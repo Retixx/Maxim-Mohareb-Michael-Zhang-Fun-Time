@@ -211,6 +211,35 @@ def main():
                          "measurable — see SPEC §5a contingencies (try 8-bit tier next).")
     print("\n".join(f"  !! {f}" for f in flags) if flags else "  none — nothing looks like a bug")
 
+    # ---- Table 2c: full taxonomy + does a parse failure cost accuracy? -------
+    print("\n" + "-" * 78)
+    print("TABLE 2c — full six-label taxonomy, and the accuracy cost of a failure")
+    print("-" * 78)
+    from src.parsing import PARSE_STATUSES
+    grand = collections.Counter()
+    for label, run in [("baseline", base)] + [(k, v) for k, v in runs.items() if v]:
+        c = collections.Counter(x["parse_status"] for x in run["calls"])
+        grand += c
+        print(f"  {label:<16} " + "  ".join(f"{s}={c[s]}" for s in PARSE_STATUSES if c[s]))
+    dead = [s for s in PARSE_STATUSES if grand[s] == 0]
+    print(f"  labels never observed: {dead if dead else '(none)'}")
+    print(f"  totals: {dict(grand)}")
+
+    print("\n  EM on questions where every call parsed vs questions with >=1 failure.")
+    print("  Note 'dirty' EM is well above zero — degraded propagation (agents.py)")
+    print("  rescues those questions rather than zeroing them.")
+    print(f"  {'run':<16}{'clean n':>9}{'clean EM':>10}{'dirty n':>9}{'dirty EM':>10}{'gap pp':>9}")
+    for label, run in [("baseline", base)] + [(k, v) for k, v in runs.items() if v]:
+        bad = collections.Counter(x["question_id"] for x in run["calls"] if x["parse_status"] != "ok")
+        clean = [a["em"] for q, a in run["answers"].items() if not bad[q]]
+        dirty = [a["em"] for q, a in run["answers"].items() if bad[q]]
+        if not dirty or not clean:
+            print(f"  {label:<16}{len(clean):>9}{'-':>10}{len(dirty):>9}{'-':>10}")
+            continue
+        ce, de = sum(clean) / len(clean), sum(dirty) / len(dirty)
+        print(f"  {label:<16}{len(clean):>9}{100 * ce:9.1f}%{len(dirty):>9}"
+              f"{100 * de:9.1f}%{100 * (ce - de):+9.1f}")
+
     # ---- Table 2b: latency, the SPEC §10 Table 1 column I had been omitting --
     print("\n" + "-" * 78)
     print("TABLE 2b — per-call latency of the quantized stage, fp16 vs 4-bit (paired)")
