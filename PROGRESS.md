@@ -4,7 +4,46 @@ Handoff log. Read SPEC.md first, then the newest entry here, then `git log`.
 
 ---
 
-## 2026-07-29 (latest) — mechanism reframed and PRE-REGISTERED; calibration instrumented
+## 2026-07-29 (latest) — EXTRACTION ACCURACY added; first significant per-role effects
+
+**Read SPEC §5c.** New third metric (`src/evidence.py`): the Extractor's spans scored
+against HotpotQA's gold `supporting_facts` labels. Human-approved addition. Pure
+re-analysis of existing runs — nothing reaches a prompt, generation unaffected.
+
+**Why it mattered.** Nothing measured extraction *correctness*. A model verbatim-copying
+an irrelevant sentence scored perfectly on parse status, verbatim_rate and churn. So
+"73.8% of Extractor calls select different evidence at 4-bit" could not be turned into
+"and the new evidence is worse". Now it can.
+
+**Result — the first per-role effects with CIs excluding zero:**
+
+    Extractor      ev-F1 drop +4.66 [+1.17, +8.08]   ROBUST (significant at every threshold)
+    Step Definer   ev-F1 drop +4.38 [+1.97, +6.88]   THRESHOLD-DEPENDENT (gone below 25 chars)
+    Planner        ev-F1 drop +0.00 [-3.45, +3.43]   null
+    QA             ev-F1 drop +0.00 [+0.00, +0.00]   zero by construction (negative control)
+
+Both positive roles are the format-heavy ones, which is what SPEC §1 predicted — but
+only the Extractor survives the sensitivity sweep. Report Step Definer as provisional.
+
+**QA = exactly 0.00 is a built-in negative control that PASSES.** QA runs after
+extraction so quantizing it cannot change extractor output. A non-zero value there means
+the metric is broken — check that first. It also confirms generation is deterministic
+under identical batch composition.
+
+**Metric design constraint — do not violate.** Scoring is set-F1 over discrete
+(title, sent_id) labels, NEVER token overlap. Token-F1 on sentence-length references
+ranks an incomplete verbatim copy (0.59) above a half-copy-plus-fabrication (0.51) above
+a complete faithful paraphrase (0.46), because precision taxes synonyms and lies
+identically. Label comparison is immune. If someone "improves" this to text similarity,
+they have reintroduced that bug.
+
+**Limitation, stated:** 26% of spans too short to attribute, 17% unmatched, so absolute
+ev-F1 (37.5%) is a floor. Deltas are valid — attribution quality is near-identical
+across runs.
+
+---
+
+## 2026-07-29 (earlier) — mechanism reframed and PRE-REGISTERED; calibration instrumented
 
 **Read SPEC §5b before touching any mechanism metric.** SPEC §1's format-damage claim was
 refuted at 4-bit on model 1 by three independent instruments, all with the point estimate

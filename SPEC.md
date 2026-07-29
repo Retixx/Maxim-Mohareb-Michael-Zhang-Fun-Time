@@ -150,6 +150,62 @@ Get baseline parse failure **under 10%** via prompt work before scaling to n=300
 
 ---
 
+## 5c. EXTRACTION ACCURACY (added 2026-07-29, human-approved after Gate 2)
+
+**Third metric, alongside answer EM/F1 (§5) and parse-failure rate (§5).** Scores the
+Extractor's spans against HotpotQA's gold `supporting_facts` — the `(title, sent_id)`
+labels marking the true evidence sentences. Implemented in `src/evidence.py`. Pure
+re-analysis: nothing here reaches a prompt, so it cannot change generation.
+
+**Why it was needed.** Nothing measured extraction *correctness*. `parse_status` says
+the JSON was well-formed; `verbatim_rate` says spans were copied not paraphrased;
+`selection_changed` says spans differed between runs. A model that verbatim-copies a
+completely irrelevant sentence scores perfectly on all three. So every claim about
+"extraction under quantization" was unsupported — we could show 73.8% of Extractor
+calls select different evidence at 4-bit, but not whether the new evidence was worse.
+
+**Why set-F1 over labels, never token overlap.** Token-F1 against sentence-length
+references ranks answers backwards. With a 15-token gold fact:
+
+| candidate | F1 |
+|---|---|
+| incomplete but verbatim copy | 0.59 |
+| half copy + fabricated clause | 0.51 |
+| complete faithful paraphrase | 0.46 |
+
+Best score to the least informative answer, worst to the only correct one — because
+precision taxes a synonym exactly as hard as an invented fact. Comparing discrete
+`(title, sent_id)` labels is immune: fabrication earns nothing, paraphrase is not
+punished. This is also HotpotQA's own official supporting-facts metric, so numbers are
+comparable to published work. **Do not re-implement this as text similarity.**
+
+**Result at n=300, model 1** (positive = quantizing that role hurt extraction):
+
+| role | ev-F1 drop (pp) | |
+|---|---|---|
+| Extractor | **+4.66 [+1.17, +8.08]** | robust — significant at every attribution threshold |
+| Step Definer | +4.38 [+1.97, +6.88] | **threshold-dependent** — vanishes below 25 chars |
+| Planner | +0.00 [−3.45, +3.43] | null |
+| QA | +0.00 [+0.00, +0.00] | zero by construction — see control below |
+
+These are the first per-role effects in the project with CIs excluding zero. Both
+positive roles are the **format-heavy** ones (§10 Figure 3), which is what §1 predicted
+— but only the Extractor survives the sensitivity check, so report Step Definer as
+provisional until n=750/5000.
+
+**Built-in negative control.** QA's delta must be exactly 0.00: QA runs after
+extraction, so quantizing it cannot alter extractor output. It is, confirming both the
+metric and that generation is deterministic under identical batch composition. **A
+non-zero value there means the metric is broken — check it first.**
+
+**Known limitation, stated not hidden.** 26% of spans are too short to attribute and
+17% match no sentence, so absolute ev-F1 (37.5% baseline) is a FLOOR, not the true
+value. Attribution quality is near-identical across runs, so the deltas remain valid.
+`MIN_ATTRIBUTABLE_CHARS = 25` is a judgment call; `gate2_report.py` records the
+sensitivity sweep.
+
+---
+
 ## 5b. PRE-REGISTERED MECHANISM PREDICTIONS (added 2026-07-29, after Gate 2)
 
 **Why this section exists.** §1 asserts a mechanism: quantization damages output

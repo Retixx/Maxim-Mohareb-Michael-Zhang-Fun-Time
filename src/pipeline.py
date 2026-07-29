@@ -11,7 +11,7 @@ that loads models, writes JSONL and resumes is src/runner.py.
 
 import random
 
-from . import agents, prompts
+from . import agents, evidence, prompts
 from .metrics import exact_match, f1_score
 
 _HOTPOT_SOURCES = ("hotpotqa/hotpot_qa", "hotpot_qa")
@@ -52,6 +52,13 @@ def load_questions(n: int, seed: int = 0, split: str = "validation") -> list[dic
                 "level": row.get("level"),
                 "type": row.get("type"),
                 "paragraphs": prompts.format_paragraphs(ctx["title"], ctx["sentences"]),
+                # Gold evidence labels, for extraction accuracy (src/evidence.py).
+                # Analysis-only: nothing here reaches a prompt, so carrying them
+                # cannot change what any agent generates.
+                "supporting_facts": row.get("supporting_facts"),
+                "sentence_index": evidence.build_sentence_index(
+                    ctx["title"], ctx["sentences"]
+                ),
             }
         )
     return out
