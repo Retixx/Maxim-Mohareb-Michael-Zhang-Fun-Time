@@ -137,6 +137,24 @@ def _run_stage(model, tok, stage, pending, precision, run_id,
     return bs
 
 
+def _library_versions() -> dict:
+    """Versions that affect numerics, for reproducibility (SPEC §7).
+
+    Runs happen on two machines (local dev, Kaggle T4); if results ever disagree
+    this is the first thing to check.
+    """
+    import bitsandbytes
+    import datasets
+    import transformers
+    return {
+        "torch": torch.__version__,
+        "transformers": transformers.__version__,
+        "bitsandbytes": bitsandbytes.__version__,
+        "datasets": datasets.__version__,
+        "cuda": torch.version.cuda,
+    }
+
+
 def _git_commit() -> str:
     try:
         return subprocess.check_output(
@@ -260,6 +278,7 @@ def run(cfg: dict, run_id: str, n: int | None, seed: int | None, batch_size: int
         "stages": stage_meta,
         "coresident_footprint_mb": round(coresident, 1),
         "git_commit": _git_commit(),
+        "library_versions": _library_versions(),
         "gpu_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
         "total_wall_s": round(meta.get("total_wall_s", 0.0) + wall, 1),
         "finished_at": datetime.now(timezone.utc).isoformat(),
