@@ -6,24 +6,60 @@ used at FP16, 8-bit and 4-bit. Any change here must bump PROMPT_VERSION and be
 re-run across *all* precisions, otherwise it confounds the experiment.
 """
 
-PROMPT_VERSION = "v4"
+PROMPT_VERSION = "v5"
 
-# SEED HYGIENE. Prompt development has looked at failures from seed 0 (n=10) and
-# seed 1234 (n=30). The n=300 experimental runs therefore use a seed that prompt
-# work has never seen — `dataset.eval_seed: 7` in config/experiment.yaml. Iterate
-# on 0 or 1234; never on 7.
+# ==========================================================================
+#  PROMPTS ARE FROZEN AT v5. DO NOT EDIT THEM.
 #
-# v3 -> v4: removed the literal `{"spans": []}` from the Extractor's rules.
-# Measured cause, not a guess: 11 of 17 v3 extractor failures were a stray empty
-# array welded onto a real one, `{"spans": [...][]}`, and that exact `[]}`
-# sequence appeared nowhere in the model's output space except that rule. The
-# model was blending the memorized empty-case literal onto the end of a populated
-# array. The rule now states the empty case in words instead.
+#  Human decision, recorded: the four templates below are final for the whole
+#  experiment. Any edit invalidates every run already collected, because a
+#  measured role difference would then partly reflect prompt changes rather than
+#  precision. If you believe a prompt is wrong, stop and raise it — do not edit.
 #
-# v2 -> v3 (did NOT work, kept for the record): hypothesised that the v2 line
-# "Close the array exactly once" primed the tic. Dropping it changed the
-# extractor parse rate from 77.3% to 75.0% — no effect. The two-span example and
-# "stop after the closing brace" introduced in v3 are retained as harmless.
+#  Related and absolute: no constrained/grammar-based decoding, ever (SPEC §12).
+#  It would drive parse failures to zero by construction and delete the paper's
+#  mechanism evidence. Prompt wording is the ONLY lever that was ever legitimate
+#  here, and it is now closed.
+# ==========================================================================
+#
+# v4 -> v5: reverted the Extractor to its original v1 wording — no worked
+# example, and the `{"spans": []}` literal restored.
+#
+# Measured head-to-head, three variants replayed over the SAME 68 extractor
+# calls (FP16, greedy, so fully deterministic):
+#
+#     v1 original (no example)   65/68 = 95.6%   stray-`[]}` tic  3
+#     v4 current  (w/ example)   49/68 = 72.1%   stray-`[]}` tic 13
+#     C  bare JSON array         61/68 = 89.7%   stray-`[]}` tic  6
+#
+# The conclusion is the reverse of what v2 assumed. The one-shot example did not
+# help the Extractor, it WAS the regression — 23 points of it — and v1's 95.5%
+# on an earlier 22-call sample was real, not small-sample luck. Two intervening
+# hypotheses about the cause (v3: the "close the array exactly once" line primed
+# the tic; v4: the `{"spans": []}` literal was being welded onto real arrays)
+# were both tested and both wrong; they moved the rate by less than noise.
+#
+# Variant C was authorised for adoption if it won. It did not win, so the object
+# schema stays and parsing.py is unchanged.
+#
+# NOTE ON ASYMMETRY: the Extractor is now the only role without a worked example.
+# v2's reasoning for adding examples everywhere — that unequal prompt engineering
+# across roles is itself a confound in a per-role comparison — still holds, but
+# the requirement it implies is that no role is left *under*-optimised relative
+# to the others, not that the templates look alike. Extractor at 95.6% is the
+# best wording found for it; forcing structural symmetry would mean knowingly
+# shipping a 23-point-worse prompt for one of the four roles under study.
+#
+# Failure sets are prompt-dependent, not item-dependent: across the four variants
+# tested, ZERO calls failed under all of them (Jaccard 0.00, union 24, breakdown
+# by number-of-variants-failed {1: 7, 2: 12, 3: 5}). There is no systematically
+# unparseable subset of HotpotQA items for this model — so the baseline should be
+# reported as a prompt-sensitive rate, not as "N% of items are impossible".
+
+# SEED HYGIENE. Prompt development looked at failures from seed 0 (n=10) and
+# seed 1234 (n=30 / the 68-call replays). The n=300 experimental runs therefore
+# use a seed prompt work has never seen — `dataset.eval_seed: 7` in
+# config/experiment.yaml.
 #
 # v1 -> v2 (Gate 1 fix, human-approved): added a one-shot worked example and an
 # explicit "quote every string value" rule to all four roles.
@@ -127,22 +163,15 @@ You return supporting evidence copied VERBATIM from the provided paragraphs.
 Rules:
 - Every string in "spans" must be an exact substring of the paragraphs above. Copy, never paraphrase.
 - Return 1 to 3 spans, each a single sentence.
-- If no paragraph supports the sub-question, return an empty list of spans.
+- If no paragraph supports the sub-question, return {"spans": []}.
 - Never invent facts that are not in the paragraphs.
 - Reply with JSON only. No explanation, no markdown fences.
-- Every string value must be wrapped in double quotes.
-- Stop immediately after the closing brace. Output nothing after it.
 
 Reply with exactly this shape:
-{"spans": ["...", "..."]}
-
-Example
-Paragraphs:
-[1] Jaws: Jaws is a 1975 American thriller film directed by Steven Spielberg. It is based on the 1974 novel by Peter Benchley.
-[2] Peter Benchley: Peter Bradford Benchley was an American author born in New York City.
-Sub-question: Who directed the film Jaws, and who wrote the novel?
-JSON:
-{"spans": ["Jaws is a 1975 American thriller film directed by Steven Spielberg.", "It is based on the 1974 novel by Peter Benchley."]}"""
+{"spans": ["...", "..."]}"""
+# ^ Deliberately has NO worked example, unlike the other three roles. Measured,
+# not stylistic: see the v4 -> v5 note at the top of this file. Do not "make it
+# consistent" with the others.
 
 EXTRACTOR_USER = """Paragraphs:
 {paragraphs}

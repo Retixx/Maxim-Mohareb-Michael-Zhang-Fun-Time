@@ -21,6 +21,7 @@ from pathlib import Path
 import yaml
 
 from src import prompts
+from src.runner import result_slug
 from src.runner import run as run_sweep
 
 ROOT = Path(__file__).parent
@@ -104,8 +105,9 @@ def main() -> int:
     if not args.report_only:
         run_sweep(cfg, args.run, args.n, args.seed, args.batch_size)
 
-    jsonl = results_dir / f"{args.run}.jsonl"
-    meta_path = results_dir / f"{args.run}.meta.json"
+    slug = result_slug(args.run, args.n, args.seed)
+    jsonl = results_dir / f"{slug}.jsonl"
+    meta_path = results_dir / f"{slug}.meta.json"
     if not jsonl.exists():
         print(f"no results at {jsonl}")
         return 1

@@ -33,6 +33,11 @@ from .pipeline import (
 FLUSH_EVERY = 50  # SPEC §6
 
 
+def result_slug(run_id: str, n: int, seed: int) -> str:
+    """Filename stem for a run's outputs. Identifies the dataset sample too."""
+    return f"{run_id}_n{n}_seed{seed}"
+
+
 class JsonlStore:
     """Append-only record store with resume (SPEC §6)."""
 
@@ -161,14 +166,21 @@ def run(cfg: dict, run_id: str, n: int | None, seed: int | None, batch_size: int
     print(f"    stage precision: {stage_precision}")
 
     questions = load_questions(n, seed=seed)
-    store = JsonlStore(results_dir / f"{run_id}.jsonl")
+
+    # n and seed are part of the filename, not just the metadata. Resume keys on
+    # (question_id, stage, call_index), which says nothing about which sample the
+    # question came from — so a dev run at n=30/seed=1234 sharing a file with the
+    # real n=300/seed=7 run would silently interleave two different datasets into
+    # one results file and no key collision would ever flag it.
+    slug = result_slug(run_id, n, seed)
+    store = JsonlStore(results_dir / f"{slug}.jsonl")
 
     existing = store.read_existing()
     idx = index_records(existing)
     if existing:
         print(f"    [resume] found {len(idx)} completed agent calls on disk")
 
-    meta_path = results_dir / f"{run_id}.meta.json"
+    meta_path = results_dir / f"{slug}.meta.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
     stage_meta = meta.get("stages", {})
 
