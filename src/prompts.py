@@ -6,7 +6,46 @@ used at FP16, 8-bit and 4-bit. Any change here must bump PROMPT_VERSION and be
 re-run across *all* precisions, otherwise it confounds the experiment.
 """
 
-PROMPT_VERSION = "v1"
+PROMPT_VERSION = "v4"
+
+# SEED HYGIENE. Prompt development has looked at failures from seed 0 (n=10) and
+# seed 1234 (n=30). The n=300 experimental runs therefore use a seed that prompt
+# work has never seen — `dataset.eval_seed: 7` in config/experiment.yaml. Iterate
+# on 0 or 1234; never on 7.
+#
+# v3 -> v4: removed the literal `{"spans": []}` from the Extractor's rules.
+# Measured cause, not a guess: 11 of 17 v3 extractor failures were a stray empty
+# array welded onto a real one, `{"spans": [...][]}`, and that exact `[]}`
+# sequence appeared nowhere in the model's output space except that rule. The
+# model was blending the memorized empty-case literal onto the end of a populated
+# array. The rule now states the empty case in words instead.
+#
+# v2 -> v3 (did NOT work, kept for the record): hypothesised that the v2 line
+# "Close the array exactly once" primed the tic. Dropping it changed the
+# extractor parse rate from 77.3% to 75.0% — no effect. The two-span example and
+# "stop after the closing brace" introduced in v3 are retained as harmless.
+#
+# v1 -> v2 (Gate 1 fix, human-approved): added a one-shot worked example and an
+# explicit "quote every string value" rule to all four roles.
+#
+# Motivation: at FP16 the QA role parsed at only 70% (SPEC §5a floor is 90%) and
+# every failure was the same defect — an unquoted JSON string value, e.g.
+# `{"answer": Richard Strauss}`. SPEC §5a sanctions prompt work to bring baseline
+# parse failure under 10%.
+#
+# The example was added to ALL FOUR roles, not just the two that were failing.
+# The experiment compares roles against each other, so unequal prompt engineering
+# across roles is itself a confound: giving QA a one-shot example while leaving
+# the Planner zero-shot would mean a measured role difference partly reflects
+# prompt quality rather than quantization sensitivity. All four now share the
+# same instruction scaffold and the same worked example (a single invented
+# question, threaded through all four roles).
+#
+# The example is invented, NOT drawn from the HotpotQA dev split, so no eval
+# question leaks into the prompt.
+#
+# This is uniform across precisions, which SPEC §12 requires. Any future change
+# must bump this version and be re-run at every precision.
 
 # Roles, in pipeline order. Used everywhere as the canonical stage names.
 ROLES = ["planner", "step_definer", "extractor", "qa"]
@@ -33,9 +72,15 @@ Rules:
 - Each sub-question must be answerable from a short encyclopedia passage.
 - Order them so that later sub-questions may depend on earlier answers.
 - Reply with JSON only. No explanation, no markdown fences.
+- Every string value must be wrapped in double quotes.
 
 Reply with exactly this shape:
-{"sub_questions": ["...", "..."]}"""
+{"sub_questions": ["...", "..."]}
+
+Example
+Question: Which university did the director of Jaws attend?
+JSON:
+{"sub_questions": ["Who directed the film Jaws?", "Which university did that director attend?"]}"""
 
 PLANNER_USER = """Question: {question}
 
@@ -55,9 +100,16 @@ Rules:
 - "target_entity": the entity or topic the evidence must be about, as a string.
 - "answer_type": exactly one of "person", "place", "date", "number", "title", "other".
 - Reply with JSON only. No explanation, no markdown fences.
+- Every string value must be wrapped in double quotes.
 
 Reply with exactly this shape:
-{"search_terms": ["...", "..."], "target_entity": "...", "answer_type": "..."}"""
+{"search_terms": ["...", "..."], "target_entity": "...", "answer_type": "..."}
+
+Example
+Overall question: Which university did the director of Jaws attend?
+Sub-question: Who directed the film Jaws?
+JSON:
+{"search_terms": ["Jaws", "directed by", "1975 film"], "target_entity": "Jaws", "answer_type": "person"}"""
 
 STEP_DEFINER_USER = """Overall question: {question}
 Sub-question: {sub_question}
@@ -75,12 +127,22 @@ You return supporting evidence copied VERBATIM from the provided paragraphs.
 Rules:
 - Every string in "spans" must be an exact substring of the paragraphs above. Copy, never paraphrase.
 - Return 1 to 3 spans, each a single sentence.
-- If no paragraph supports the sub-question, return {"spans": []}.
+- If no paragraph supports the sub-question, return an empty list of spans.
 - Never invent facts that are not in the paragraphs.
 - Reply with JSON only. No explanation, no markdown fences.
+- Every string value must be wrapped in double quotes.
+- Stop immediately after the closing brace. Output nothing after it.
 
 Reply with exactly this shape:
-{"spans": ["...", "..."]}"""
+{"spans": ["...", "..."]}
+
+Example
+Paragraphs:
+[1] Jaws: Jaws is a 1975 American thriller film directed by Steven Spielberg. It is based on the 1974 novel by Peter Benchley.
+[2] Peter Benchley: Peter Bradford Benchley was an American author born in New York City.
+Sub-question: Who directed the film Jaws, and who wrote the novel?
+JSON:
+{"spans": ["Jaws is a 1975 American thriller film directed by Steven Spielberg.", "It is based on the 1974 novel by Peter Benchley."]}"""
 
 EXTRACTOR_USER = """Paragraphs:
 {paragraphs}
@@ -104,9 +166,20 @@ Rules:
 - Never answer in a sentence. Never explain. Never restate the question.
 - Base the answer on the evidence. If the evidence is insufficient, give your best short guess anyway.
 - Reply with JSON only. No explanation, no markdown fences.
+- The value of "answer" must be wrapped in double quotes, even for a single word.
 
 Reply with exactly this shape:
-{"answer": "..."}"""
+{"answer": "..."}
+
+Example
+Evidence:
+1. Who directed the film Jaws?
+   - Jaws is a 1975 American thriller film directed by Steven Spielberg.
+2. Which university did that director attend?
+   - Spielberg attended California State University, Long Beach.
+Question: Which university did the director of Jaws attend?
+JSON:
+{"answer": "California State University, Long Beach"}"""
 
 QA_USER = """Evidence:
 {evidence}

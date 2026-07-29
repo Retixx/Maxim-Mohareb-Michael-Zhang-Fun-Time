@@ -1,8 +1,12 @@
-"""Dataset loading and pipeline orchestration.
+"""Dataset loading and stage-major orchestration.
 
-BUILD STAGE 1/2 (SPEC §11): this is the naive per-question driver used for the
-Gate 1 smoke test. The stage-major refactor described in SPEC §6 is build step
-3 and is deliberately NOT here yet.
+SPEC §6: the pipeline runs stage-by-stage across ALL questions, not
+question-by-question through all stages. Only one model is resident at a time,
+which is what makes a 4 GB card work and what enables large batches.
+
+This module is pure: it turns (questions, records-so-far) into the list of calls
+a stage still needs to make. It owns no model and touches no disk. The driver
+that loads models, writes JSONL and resumes is src/runner.py.
 """
 
 import random
@@ -53,83 +57,104 @@ def load_questions(n: int, seed: int = 0, split: str = "validation") -> list[dic
     return out
 
 
-def run_question_naive(model, tok, q: dict, run_id: str, precision: str, verbose: bool = True):
-    """Run one question through all four agents. Returns (records, answer_record).
-
-    Build-stage-1 shape: one question at a time, one model resident, FP16.
-    """
-    records = []
-    qid, question = q["question_id"], q["question"]
-
-    def _log(role, recs):
-        records.extend(recs)
-        if verbose:
-            for r in recs:
-                print(f"\n--- [{role}] qid={qid} call_index={r['call_index']} "
-                      f"status={r['parse_status']} "
-                      f"tok_in={r['prompt_tokens']} tok_out={r['output_tokens']} "
-                      f"{r['latency_s']}s ---")
-                print(r["raw_output"])
-
-    # 1. Planner ------------------------------------------------------------
-    recs = agents.run_calls(
-        model, tok, "planner",
-        [{"question_id": qid, "call_index": 0,
-          "fields": agents.build_planner_fields(question)}],
-        precision, run_id,
-    )
-    _log("planner", recs)
-    plan = recs[0]["parsed"]
-    sub_questions = agents.clamp_sub_questions(
-        (plan or {}).get("sub_questions", []), fallback_question=question
-    )
-
-    # 2. Step Definer -------------------------------------------------------
-    recs = agents.run_calls(
-        model, tok, "step_definer",
-        [{"question_id": qid, "call_index": i,
-          "fields": agents.build_step_definer_fields(question, sq)}
-         for i, sq in enumerate(sub_questions)],
-        precision, run_id,
-    )
-    _log("step_definer", recs)
-    specs = [r["parsed"] for r in recs]
-
-    # 3. Extractor ----------------------------------------------------------
-    recs = agents.run_calls(
-        model, tok, "extractor",
-        [{"question_id": qid, "call_index": i,
-          "fields": agents.build_extractor_fields(q["paragraphs"], sq, spec)}
-         for i, (sq, spec) in enumerate(zip(sub_questions, specs))],
-        precision, run_id,
-    )
-    _log("extractor", recs)
-    evidence = [
-        (sq, (r["parsed"] or {}).get("spans", []))
-        for sq, r in zip(sub_questions, recs)
-    ]
-
-    # 4. QA -----------------------------------------------------------------
-    recs = agents.run_calls(
-        model, tok, "qa",
-        [{"question_id": qid, "call_index": 0,
-          "fields": agents.build_qa_fields(question, evidence)}],
-        precision, run_id,
-    )
-    _log("qa", recs)
-    final_answer = (recs[0]["parsed"] or {}).get("answer", "")
-
-    answer_record = {
-        "run_id": run_id,
-        "question_id": qid,
-        "record_type": "answer",
-        "question": question,
-        "gold_answer": q["answer"],
-        "predicted_answer": final_answer,
-        "em": exact_match(final_answer, q["answer"]),
-        "f1": f1_score(final_answer, q["answer"]),
-        "n_sub_questions": len(sub_questions),
-        "level": q.get("level"),
-        "type": q.get("type"),
+def index_records(records: list[dict]) -> dict:
+    """Key agent-call records by (question_id, stage, call_index)."""
+    return {
+        (r["question_id"], r["stage"], r["call_index"]): r
+        for r in records
+        if r.get("record_type") != "answer"
     }
-    return records, answer_record
+
+
+def sub_questions_for(q: dict, idx: dict) -> list[str]:
+    """The sub-questions a question's downstream stages fan out over.
+
+    Derived from the Planner's record. Applies the degraded-propagation rule
+    (agents.clamp_sub_questions) when the Planner failed to parse, so the shape
+    of every downstream stage is fully determined by what is already on disk.
+    """
+    rec = idx.get((q["question_id"], "planner", 0))
+    parsed = rec["parsed"] if rec else None
+    return agents.clamp_sub_questions(
+        (parsed or {}).get("sub_questions", []), fallback_question=q["question"]
+    )
+
+
+def build_stage_calls(stage: str, questions: list[dict], idx: dict) -> list[dict]:
+    """Every call `stage` needs to make, given the records already on disk.
+
+    Upstream stages must be complete before this is called for a downstream one;
+    the runner enforces that by walking stages in order. Returns items shaped
+    {"question_id", "call_index", "fields"} — the input to agents.run_calls.
+    """
+    calls = []
+
+    if stage == "planner":
+        for q in questions:
+            calls.append({
+                "question_id": q["question_id"],
+                "call_index": 0,
+                "fields": agents.build_planner_fields(q["question"]),
+            })
+        return calls
+
+    if stage == "step_definer":
+        for q in questions:
+            for i, sq in enumerate(sub_questions_for(q, idx)):
+                calls.append({
+                    "question_id": q["question_id"],
+                    "call_index": i,
+                    "fields": agents.build_step_definer_fields(q["question"], sq),
+                })
+        return calls
+
+    if stage == "extractor":
+        for q in questions:
+            for i, sq in enumerate(sub_questions_for(q, idx)):
+                spec_rec = idx.get((q["question_id"], "step_definer", i))
+                spec = spec_rec["parsed"] if spec_rec else None
+                calls.append({
+                    "question_id": q["question_id"],
+                    "call_index": i,
+                    "fields": agents.build_extractor_fields(q["paragraphs"], sq, spec),
+                })
+        return calls
+
+    if stage == "qa":
+        for q in questions:
+            evidence = []
+            for i, sq in enumerate(sub_questions_for(q, idx)):
+                rec = idx.get((q["question_id"], "extractor", i))
+                spans = (rec["parsed"] or {}).get("spans", []) if rec else []
+                evidence.append((sq, spans))
+            calls.append({
+                "question_id": q["question_id"],
+                "call_index": 0,
+                "fields": agents.build_qa_fields(q["question"], evidence),
+            })
+        return calls
+
+    raise KeyError(f"unknown stage {stage!r}; expected one of {prompts.ROLES}")
+
+
+def build_answer_records(questions: list[dict], idx: dict, run_id: str) -> list[dict]:
+    """One scored record per question, from the QA stage's outputs (SPEC §7)."""
+    out = []
+    for q in questions:
+        rec = idx.get((q["question_id"], "qa", 0))
+        parsed = rec["parsed"] if rec else None
+        pred = (parsed or {}).get("answer", "")
+        out.append({
+            "run_id": run_id,
+            "question_id": q["question_id"],
+            "record_type": "answer",
+            "question": q["question"],
+            "gold_answer": q["answer"],
+            "predicted_answer": pred,
+            "em": exact_match(pred, q["answer"]),
+            "f1": f1_score(pred, q["answer"]),
+            "n_sub_questions": len(sub_questions_for(q, idx)),
+            "level": q.get("level"),
+            "type": q.get("type"),
+        })
+    return out

@@ -1,99 +1,52 @@
-"""Gate 1 smoke test (SPEC §11 step 1-2, §11a).
+"""Smoke test / gate reporter.
 
-10 questions, FP16, all four agents, locally. Prints every agent's raw output
-verbatim for manual inspection, then a summary: parse counts per agent broken
-down by failure type, the 10 answers beside gold, and measured throughput with
-the extrapolated GPU-hours for one 300-question run.
+Runs a small sweep through src.runner, then prints the Gate-style report over the
+resulting JSONL: every agent's raw output, parse counts per agent broken down by
+failure type, answers beside gold with EM, and measured throughput.
 
-    python smoke_test.py                     # FP16, 10 questions
-    python smoke_test.py --precision 4bit    # §5a fallback if the 4 GB card OOMs
+    python smoke_test.py                                 # baseline, n=10, dev seed
+    python smoke_test.py --run qa_4bit --n 10
+    python smoke_test.py --report-only --run baseline    # re-print, no GPU work
 
-This file is scaffolding for Gate 1, not the sweep driver. src/runner.py is
-build step 4.
+Prompt development must use --seed 0 or 1234, never the config's eval_seed
+(see the seed-hygiene note in src/prompts.py).
 """
 
 import argparse
 import json
 import sys
-import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
-import torch
+import yaml
 
-from src import models, prompts
-from src.pipeline import load_questions, run_question_naive
+from src import prompts
+from src.runner import run as run_sweep
 
-RESULTS = Path(__file__).parent / "results"
+ROOT = Path(__file__).parent
+DEV_SEED = 1234
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--model-id", default="Qwen/Qwen2.5-1.5B-Instruct")
-    ap.add_argument("--precision", default="fp16", choices=models.PRECISIONS)
-    ap.add_argument("--n", type=int, default=10)
-    ap.add_argument("--seed", type=int, default=0)
-    args = ap.parse_args()
+def report(records: list[dict], meta: dict, n_raw: int) -> None:
+    calls = [r for r in records if r.get("record_type") != "answer"]
+    answers = [r for r in records if r.get("record_type") == "answer"]
 
-    RESULTS.mkdir(exist_ok=True)
-    run_id = f"smoke_{args.precision}"
+    print(f"\n{'#' * 78}\n# SMOKE REPORT — run={meta.get('run_id')} "
+          f"model={meta.get('model_id')} prompts={meta.get('prompt_version')}\n{'#' * 78}")
+    print(f"stage precision: {meta.get('stage_precision')}")
 
-    print(f"=== SMOKE TEST: {args.model_id} @ {args.precision}, "
-          f"n={args.n}, seed={args.seed}, prompts={prompts.PROMPT_VERSION} ===")
-    if torch.cuda.is_available():
-        print(f"GPU: {torch.cuda.get_device_name(0)} "
-              f"({torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB)")
-    else:
-        print("WARNING: no CUDA device visible; this will be unusably slow on CPU.")
-
-    print("\nLoading HotpotQA (distractor, dev)...")
-    questions = load_questions(args.n, seed=args.seed)
-    print(f"Loaded {len(questions)} questions.")
-
-    print(f"\nLoading model at {args.precision}...")
-    t_load = time.perf_counter()
-    model, tok = models.load_model(args.model_id, args.precision)
-    print(f"Loaded in {time.perf_counter() - t_load:.1f}s. "
-          f"weight_footprint_mb={models.weight_footprint_mb(model, args.precision):.0f}")
-
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
-
-    all_records, all_answers = [], []
-    failed_at = None
-    t0 = time.perf_counter()
-    for i, q in enumerate(questions, start=1):
-        print(f"\n{'=' * 78}\nQUESTION {i}/{len(questions)}  qid={q['question_id']}"
-              f"  level={q.get('level')}  type={q.get('type')}"
-              f"\nQ: {q['question']}\nGOLD: {q['answer']}\n{'=' * 78}")
-        try:
-            recs, ans = run_question_naive(model, tok, q, run_id, args.precision, verbose=True)
-        except torch.cuda.OutOfMemoryError:
-            print(f"\n!!! CUDA OOM on question {i}. "
-                  f"Per SPEC §5a, re-run with --precision 4bit. !!!")
-            failed_at = i
-            break
-        except Exception as e:  # noqa: BLE001 - the gate report needs the failure point
-            print(f"\n!!! {type(e).__name__} on question {i}: {e}")
-            failed_at = i
-            break
-        all_records.extend(recs)
-        all_answers.append(ans)
-        print(f"\n>>> PREDICTED: {ans['predicted_answer']!r}  |  GOLD: {ans['gold_answer']!r}"
-              f"  |  EM={ans['em']:.0f} F1={ans['f1']:.2f}")
-    wall = time.perf_counter() - t0
-
-    # ---------------------------------------------------------------- summary
-    print(f"\n\n{'#' * 78}\n# GATE 1 SUMMARY\n{'#' * 78}")
-    completed = len(all_answers)
-    if failed_at is None:
-        print(f"\nCompleted end-to-end: {completed}/{len(questions)} questions.")
-    else:
-        print(f"\nBROKE at question {failed_at}. Completed {completed}/{len(questions)}.")
+    print(f"\n--- Verbatim raw outputs ({n_raw} per agent) ---")
+    for role in prompts.ROLES:
+        rs = [r for r in calls if r["stage"] == role]
+        print(f"\n=== {role.upper()} ===")
+        for r in rs[:n_raw]:
+            print(f"[qid={r['question_id']} call_index={r['call_index']} "
+                  f"status={r['parse_status']}]")
+            print(r["raw_output"])
 
     print("\n--- Parse status per agent ---")
     by_role = defaultdict(Counter)
-    for r in all_records:
+    for r in calls:
         by_role[r["stage"]][r["parse_status"]] += 1
     print(f"{'role':<14} {'calls':>6} {'ok':>6} {'ok%':>7}   breakdown")
     for role in prompts.ROLES:
@@ -103,45 +56,63 @@ def main() -> int:
             print(f"{role:<14} {0:>6}      -       -   (no calls)")
             continue
         rest = {k: v for k, v in sorted(c.items()) if k != "ok"}
+        flag = "" if 100 * c["ok"] / total >= 90 else "   <-- BELOW 90% (SPEC §5a)"
         print(f"{role:<14} {total:>6} {c['ok']:>6} {100 * c['ok'] / total:>6.1f}%   "
-              f"{rest if rest else '-'}")
+              f"{rest if rest else '-'}{flag}")
 
     print("\n--- Answers vs gold ---")
     print(f"{'#':<3} {'EM':<3} {'F1':<5} {'predicted':<34} gold")
-    for i, a in enumerate(all_answers, start=1):
+    for i, a in enumerate(answers, start=1):
         print(f"{i:<3} {a['em']:<3.0f} {a['f1']:<5.2f} "
-              f"{(a['predicted_answer'] or '(empty)')[:32]:<34} {a['gold_answer']}")
-    if all_answers:
-        em = sum(a["em"] for a in all_answers) / len(all_answers)
-        f1 = sum(a["f1"] for a in all_answers) / len(all_answers)
-        print(f"\nEM = {100 * em:.1f}%   F1 = {100 * f1:.1f}%   (n={len(all_answers)}, "
-              f"no CIs at this n — see SPEC §5)")
+              f"{(a['predicted_answer'] or '(empty)')[:32]:<34} {a['gold_answer'][:40]}")
+    if answers:
+        em = sum(a["em"] for a in answers) / len(answers)
+        f1 = sum(a["f1"] for a in answers) / len(answers)
+        print(f"\nEM = {100 * em:.1f}%   F1 = {100 * f1:.1f}%   (n={len(answers)})")
 
-    print("\n--- Throughput ---")
-    n_calls = len(all_records)
-    if n_calls and completed:
-        calls_per_q = n_calls / completed
-        s_per_call = wall / n_calls
-        gpu_hours_300 = (wall / completed) * 300 / 3600
-        print(f"wall: {wall:.1f}s for {completed} questions, {n_calls} agent calls")
-        print(f"calls/question: {calls_per_q:.1f}   s/agent call: {s_per_call:.2f}")
-        for role in prompts.ROLES:
-            lat = [r["latency_s"] for r in all_records if r["stage"] == role]
-            if lat:
-                print(f"    {role:<14} n={len(lat):<4} mean {sum(lat) / len(lat):.2f}s")
-        print(f"extrapolated GPU-hours for one 300-question run: {gpu_hours_300:.2f}"
-              f"  (batch_size=1, unbatched — an upper bound; SPEC §6 batching is build step 6)")
-    if torch.cuda.is_available():
-        print(f"peak_vram_mb: {torch.cuda.max_memory_allocated() / 1024**2:.0f}")
+    print("\n--- Throughput & memory ---")
+    for role in prompts.ROLES:
+        lat = [r["latency_s"] for r in calls if r["stage"] == role]
+        st = (meta.get("stages") or {}).get(role, {})
+        if lat:
+            print(f"    {role:<14} n={len(lat):<4} mean {sum(lat) / len(lat):.2f}s   "
+                  f"peak_vram_mb={st.get('peak_vram_mb')}  "
+                  f"weights_mb={st.get('weight_footprint_mb')}")
+    wall = meta.get("total_wall_s") or 0
+    if answers and wall:
+        print(f"wall {wall:.0f}s for {len(answers)} questions, {len(calls)} agent calls")
+        print(f"extrapolated GPU-hours for one 300-question run: "
+              f"{(wall / len(answers)) * 300 / 3600:.2f}")
+    print(f"coresident_footprint_mb={meta.get('coresident_footprint_mb')}")
 
-    out = RESULTS / f"{run_id}.jsonl"
-    with out.open("w", encoding="utf-8") as fh:
-        for r in all_records:
-            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
-        for a in all_answers:
-            fh.write(json.dumps(a, ensure_ascii=False) + "\n")
-    print(f"\nWrote {len(all_records) + len(all_answers)} records to {out}")
-    return 0 if failed_at is None else 1
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", default=str(ROOT / "config" / "experiment.yaml"))
+    ap.add_argument("--run", default="baseline")
+    ap.add_argument("--n", type=int, default=10)
+    ap.add_argument("--seed", type=int, default=DEV_SEED)
+    ap.add_argument("--batch-size", type=int, default=None)
+    ap.add_argument("--raw", type=int, default=2, help="raw outputs printed per agent")
+    ap.add_argument("--report-only", action="store_true",
+                    help="re-print from existing JSONL without running the GPU")
+    args = ap.parse_args()
+
+    cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
+    results_dir = ROOT / cfg.get("results_dir", "results")
+
+    if not args.report_only:
+        run_sweep(cfg, args.run, args.n, args.seed, args.batch_size)
+
+    jsonl = results_dir / f"{args.run}.jsonl"
+    meta_path = results_dir / f"{args.run}.meta.json"
+    if not jsonl.exists():
+        print(f"no results at {jsonl}")
+        return 1
+    records = [json.loads(l) for l in jsonl.read_text(encoding="utf-8").splitlines() if l.strip()]
+    meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+    report(records, meta, args.raw)
+    return 0
 
 
 if __name__ == "__main__":

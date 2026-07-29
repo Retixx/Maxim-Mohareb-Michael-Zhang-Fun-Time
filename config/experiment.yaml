@@ -1,0 +1,55 @@
+# Experiment configuration. Everything is driven from here (SPEC §8).
+#
+#   python -m src.runner --config config/experiment.yaml --run stepdef_4bit
+
+model_id: Qwen/Qwen2.5-1.5B-Instruct
+# Model 2 is a config value, not a plugin (SPEC §12). Added at build step 9:
+#   model_id: meta-llama/Llama-3.2-3B-Instruct
+
+dataset:
+  name: hotpot_qa
+  config: distractor    # SPEC §3: 2 gold + 8 distractor paragraphs, no retriever
+  split: validation
+  n: 300                # SPEC §5
+
+  # Seed for sampling the n evaluation questions.
+  #
+  # Deliberately NOT 0 and NOT 1234. Prompt development looked at failures from
+  # seed 0 (n=10) and seed 1234 (n=30); questions the prompts were shaped on must
+  # not be questions the experiment is scored on. Seed 7 has never been inspected.
+  # If you iterate on prompts again, do it on 0 or 1234 and leave this alone.
+  eval_seed: 7
+
+generation:
+  batch_size: 16        # SPEC §6: start at 16, auto-reduce on OOM
+  min_batch_size: 1
+
+results_dir: results
+
+# SPEC §2, locked. Exactly one agent quantized per run; the rest stay FP16.
+runs:
+  baseline:
+    planner: fp16
+    step_definer: fp16
+    extractor: fp16
+    qa: fp16
+  planner_4bit:
+    planner: 4bit
+    step_definer: fp16
+    extractor: fp16
+    qa: fp16
+  stepdef_4bit:
+    planner: fp16
+    step_definer: 4bit
+    extractor: fp16
+    qa: fp16
+  extractor_4bit:
+    planner: fp16
+    step_definer: fp16
+    extractor: 4bit
+    qa: fp16
+  qa_4bit:
+    planner: fp16
+    step_definer: fp16
+    extractor: fp16
+    qa: 4bit
