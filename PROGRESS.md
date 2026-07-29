@@ -4,6 +4,48 @@ Handoff log. Read SPEC.md first, then the newest entry here, then `git log`.
 
 ---
 
+## 2026-07-29 (latest) — pushed to GitHub, 4-bit tier validated, sweep handed to Kaggle
+
+**Done.** Gate 1 approved by human. Repo pushed to
+https://github.com/Retixx/Maxim-Mohareb-Michael-Zhang-Fun-Time (rebased onto the
+existing initial commit, not force-pushed). Kaggle notebook points at it and now runs
+all five run IDs from one cell.
+
+Fixed a real bug in `weight_footprint_mb`: a bitsandbytes `Params4bit` tensor is uint8
+whose `.numel()` is the PACKED byte count, so the old `params * bytes_per_param`
+shortcut applied the 4-bit compression twice and understated the footprint by 2.6x
+(423.7 MB reported vs 1070.2 MB true). That number is what the paper reports (SPEC §7).
+Now summed as `numel * element_size`, exact-matched against transformers'
+`get_memory_footprint()` at both fp16 and 4-bit. Added `param_census()`, which
+surfaces that bnb leaves embeddings/biases/norms at fp16 — a "4-bit" Qwen2.5-1.5B is
+1.310B params at 4-bit plus 234M at fp16.
+
+**All four 4-bit configs validated end-to-end at n=5, seed 1234.** Mixed precision
+wires correctly; the quantized stage loads at 4-bit and the other three at fp16.
+`coresident_footprint_mb = 9903` for all four, vs 11778 for baseline — the controlled
+constant SPEC §7 requires, proven: every configuration saves the same 1875 MB.
+
+**Next.** Build step 8 runs on Kaggle, not locally. A human must execute
+`notebooks/kaggle_run.ipynb` (Internet ON, GPU T4 x2), run the 10-question cell first,
+then the five sweeps, and return `results.zip`. Then Gate 2 analysis. Do not start a
+300-question run locally — see the VRAM note below.
+
+**Known issues / open questions.**
+- Do NOT split one run across local and Kaggle. Resume keys on
+  (question_id, stage, call_index) and is blind to which machine produced a record, so
+  a run started locally and finished on Kaggle would interleave two execution stacks
+  with no key collision to flag it. One venue per run.
+- Local VRAM readings remain untrustworthy (Windows WDDM spills CUDA allocations into
+  system RAM rather than raising OOM). FP16 stages report ~5900 MB peaks on a 4096 MB
+  card even at batch 1. Consequences unchanged: the OOM autotune path has still never
+  fired, and SPEC §13's "under 6 GB at FP16 batch 16" cannot be checked here. The T4
+  gives the first trustworthy numbers.
+- n=5 parse rates are a plumbing check only (~28 calls/run) and must not be read as a
+  role ranking: planner_4bit 100% on its quantized stage, stepdef_4bit 100%,
+  extractor_4bit 83.3%, qa_4bit 100%.
+
+---
+
 ## 2026-07-29 (later) — build steps 3-7 done, prompts frozen at v5, at GATE 1 again
 
 **Done.** Build steps 3-7: stage-major runner (`src/runner.py`, `src/pipeline.py`),
