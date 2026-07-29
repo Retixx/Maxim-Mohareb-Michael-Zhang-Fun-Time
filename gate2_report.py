@@ -211,6 +211,34 @@ def main():
                          "measurable — see SPEC §5a contingencies (try 8-bit tier next).")
     print("\n".join(f"  !! {f}" for f in flags) if flags else "  none — nothing looks like a bug")
 
+    # ---- Table 2b: latency, the SPEC §10 Table 1 column I had been omitting --
+    print("\n" + "-" * 78)
+    print("TABLE 2b — per-call latency of the quantized stage, fp16 vs 4-bit (paired)")
+    print("  CAVEAT: this is batch wall-time / batch size at the configured batch size,")
+    print("  i.e. inverse THROUGHPUT, not user-facing latency. Whole-run wall times are")
+    print("  NOT comparable across runs (shared-GPU session noise); only these paired")
+    print("  per-call deltas are.")
+    print("-" * 78)
+    print(f"{'role':<14}{'fp16 s':>9}{'4bit s':>9}{'delta':>9}{'ratio':>8}   95% CI on delta")
+    for rid, stage in QUANTIZED_STAGE.items():
+        r = runs[rid]
+        if r is None:
+            continue
+        b_idx = {(x["question_id"], x["call_index"]): x
+                 for x in base["calls"] if x["stage"] == stage}
+        q_idx = {(x["question_id"], x["call_index"]): x
+                 for x in r["calls"] if x["stage"] == stage}
+        keys = [k for k in b_idx if k in q_idx]
+        if not keys:
+            continue
+        bl = [b_idx[k]["latency_s"] for k in keys]
+        ql = [q_idx[k]["latency_s"] for k in keys]
+        m, lo, hi = bootstrap_ci([y - x for x, y in zip(bl, ql)], N_RESAMPLES)
+        mb, mq = sum(bl) / len(bl), sum(ql) / len(ql)
+        flag = "  <-- excludes 0" if (lo > 0 or hi < 0) else ""
+        print(f"{ROLE_LABEL[stage]:<14}{mb:9.3f}{mq:9.3f}{m:+9.3f}{mq / mb:8.2f}   "
+              f"[{lo:+.3f}, {hi:+.3f}]{flag}")
+
     # ---- Table 3: mechanism instruments (SPEC §5b) ---------------------------
     print("\n" + "-" * 78)
     print("TABLE 3 — mechanism instruments, baseline vs quantized (SPEC §5b)")
