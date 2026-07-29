@@ -329,6 +329,24 @@ Then **WAIT** for the human.
 - Prompt optimization or per-precision prompt tuning
 - Multi-dataset support (HotpotQA only; 2WikiMQA is a later stretch, not now)
 - Automatic retry on parse failure — this actively breaks the experiment
+- **Constrained or grammar-based decoding — forbidden.** No `outlines`, no
+  `guidance`, no `lm-format-enforcer`, no JSON-schema decoding, no logit masking,
+  no `transformers` constrained-beam or prefix-allowed-tokens generation, no
+  `response_format`-style structured-output modes.
+
+  This is the single most tempting engineering fix in the whole project and it
+  must never be applied. Constrained decoding drives the parse-failure rate to
+  zero *by construction*. The parse-failure rate is the mechanism evidence for
+  the paper's entire argument — that quantization damages output format while
+  leaving knowledge intact. Forcing valid output does not fix the model; it
+  deletes the measurement and makes every run look identical on the secondary
+  metric. A low parse-failure baseline achieved this way is worthless.
+
+  Generation stays plain greedy sampling (`do_sample=False`) with no logit
+  processors. If baseline parse failure cannot be brought under 10% by prompt
+  wording alone, the correct response is to report the higher baseline and note
+  the compressed headroom — not to constrain the decoder. See §5a: dynamic range
+  matters more than absolute level.
 
 ---
 

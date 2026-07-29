@@ -10,6 +10,11 @@ failed generation — or resampling at a higher temperature, or falling back to 
 regex "rescue" that pulls an answer out of malformed output — destroys the
 secondary measurement the whole experiment rests on. Classify it, log it, return
 None, and let the question score as-is.
+
+The same applies upstream, and more dangerously: **constrained/grammar-based
+decoding is forbidden** (SPEC §12). Making the model physically unable to emit
+invalid JSON would send every number this module produces to zero and quietly
+erase the paper's mechanism argument. If these rates look bad, report them.
 """
 
 import json

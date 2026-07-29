@@ -124,6 +124,18 @@ def generate_batch(
     Greedy (do_sample=False) is deliberate: the experiment compares precisions,
     so decoding must contribute no variance of its own.
 
+    !!! NO CONSTRAINED DECODING. EVER. (SPEC §12) !!!
+
+    Do not add `outlines`, `guidance`, `lm-format-enforcer`, a JSON grammar,
+    `prefix_allowed_tokens_fn`, a LogitsProcessor that masks tokens, constrained
+    beam search, or any structured-output mode. They would drive the parse-failure
+    rate to zero by construction and delete the paper's mechanism evidence — every
+    run would look identical on the secondary metric. If parse failures are high,
+    that is a result to report, not a bug to engineer away.
+
+    The only arguments this call may ever grow are ones that do not constrain the
+    token distribution.
+
     Returns one dict per input with keys:
         raw_output, hit_token_cap, prompt_tokens, output_tokens, latency_s
     """
