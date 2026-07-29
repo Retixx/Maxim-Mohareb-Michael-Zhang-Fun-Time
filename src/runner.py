@@ -208,6 +208,7 @@ def run(cfg: dict, run_id: str, n: int | None, seed: int | None, batch_size: int
             print(f"    loaded in {time.perf_counter() - t_load:.1f}s")
 
             footprint = models.weight_footprint_mb(model, precision)
+            census = models.param_census(model)
             t_stage = time.perf_counter()
             bs = _run_stage(
                 model, tok, stage, pending, precision, run_id,
@@ -225,6 +226,7 @@ def run(cfg: dict, run_id: str, n: int | None, seed: int | None, batch_size: int
                 "calls": len(calls),
                 "stage_wall_s": round(elapsed, 1),
                 "final_batch_size": bs,
+                **census,
             }
             vram = f"  peak_vram_mb={peak:.0f}" if peak is not None else ""
             print(f"\n    done in {elapsed:.1f}s  final_batch_size={bs}{vram}")

@@ -89,17 +89,44 @@ def load_model(model_id: str, precision: str, device: str = "cuda:0"):
     return model, tok
 
 
-def weight_footprint_mb(model, precision: str) -> float:
-    """params x bytes-per-param, in MB (SPEC §7).
+def weight_footprint_mb(model, precision: str = None) -> float:
+    """Actual weight bytes, in MB (SPEC §7).
 
-    Computed analytically rather than read off the allocator so it is
-    comparable across precisions and independent of activation memory.
+    Summed per tensor as numel x element_size, which is exact at every precision
+    and needs no special-casing: bitsandbytes stores 4-bit weights as uint8
+    (element_size 1) and int8 weights as int8 (element_size 1), while everything
+    it leaves alone stays fp16 (element_size 2).
+
+    Do NOT reintroduce the `total_params * bytes_per_param` shortcut. A
+    Params4bit tensor's .numel() is the PACKED byte count — two 4-bit values per
+    uint8 — so multiplying it by 0.5 bytes/param applies the compression twice.
+    That bug understated the 4-bit footprint by 2.6x (423.7 MB reported against a
+    true 1070.2 MB), and this number is reported in the paper.
+
+    Note that this is genuinely mixed-precision: bnb quantizes the linear layers
+    but leaves embeddings, biases and norms at fp16. For Qwen2.5-1.5B that is
+    1.31B params at 4-bit plus 233M still at fp16 — which is why a "4-bit" stage
+    costs 1070 MB rather than the 772 MB a uniform 4-bit model would.
+
+    Cross-checked against transformers' model.get_memory_footprint(): exact match.
     """
-    n_params = sum(p.numel() for p in model.parameters())
-    # bnb stores 4-bit weights packed two-per-byte, so .numel() already
-    # reflects the packed count; use the nominal rate against the base
-    # parameter count instead.
-    return n_params * _BYTES_PER_PARAM[precision] / (1024 ** 2)
+    return sum(p.numel() * p.element_size() for p in model.parameters()) / (1024 ** 2)
+
+
+def param_census(model) -> dict:
+    """Nominal vs quantized parameter counts, for the paper's memory table."""
+    quantized = nominal = 0
+    for p in model.parameters():
+        if p.__class__.__name__ == "Params4bit":
+            n = p.numel() * 2  # two 4-bit values per packed uint8
+            quantized += n
+            nominal += n
+        elif p.__class__.__name__ == "Int8Params" or p.dtype == torch.int8:
+            quantized += p.numel()
+            nominal += p.numel()
+        else:
+            nominal += p.numel()
+    return {"nominal_params": nominal, "quantized_params": quantized}
 
 
 def unload(model) -> None:
