@@ -4,7 +4,45 @@ Handoff log. Read SPEC.md first, then the newest entry here, then `git log`.
 
 ---
 
-## 2026-07-29 (latest) — n raised to 750, awaiting re-run on Kaggle
+## 2026-07-29 (latest) — mechanism reframed and PRE-REGISTERED; calibration instrumented
+
+**Read SPEC §5b before touching any mechanism metric.** SPEC §1's format-damage claim was
+refuted at 4-bit on model 1 by three independent instruments, all with the point estimate
+in the WRONG direction: parse success -0.79 pp [-2.86, +1.28], strict format (no parser
+tolerance) +0.16 [-1.11, +1.43], verbatim span fidelity -2.48 [-5.48, +0.53]. Baseline
+failure rates are 0.3-4.3%, so there is no dynamic range left — this is an
+instrumentation floor, not a power problem, and n=750 makes it SHARPER not softer (QA
+projects to [-0.65, -0.01], i.e. significantly *better* under 4-bit). **Do not keep
+re-measuring format hoping for a different answer.**
+
+What the data does support: **selection perturbation without quality degradation.**
+Selection churn under 4-bit is planner 88.7%, extractor 73.8%, step_definer 59.0%,
+qa 26.0% — while format and fidelity hold and accuracy moves <=4 pp. Quantization changes
+WHICH content is chosen, not how well-formed it is.
+
+That reframe was found by testing three metrics on the same data, so it is exploratory.
+SPEC §5b now records four falsifiable predictions committed before the confirmatory
+analysis. Note model 2 at n=750 was already running when this was written, so it is
+analyst-blind but NOT pre-data — the planned n=5000 rerun is the confirmatory test.
+
+**New code.** `src/mechanism.py` (strict_format_ok, verbatim_rate, selection_changed —
+all pure re-analysis of existing JSONL fields, no GPU). `metrics.auroc` and
+`metrics.expected_calibration_error`. `models.sequence_confidence` logs per-call
+mean/min token logprob and mean entropy so the CALIBRATION half of §1 — never measured
+until now — can finally be tested. `gate2_report.py` grew Table 3 for all of this.
+
+**generation.log_confidence is OFF by default and must stay off until the n=5000 rerun.**
+It costs an extra prefill per batch; enabling it mid-project would make wall-time
+comparisons across runs meaningless. Verified it cannot affect results: generations are
+bit-identical with the flag off vs on (greedy, and the confidence pass runs strictly
+after generation). It is a teacher-forced forward pass, deliberately NOT a
+LogitsProcessor, so there is no ambiguity with SPEC §12's constrained-decoding ban.
+
+**Safe to pull mid-sweep** — nothing in the generation path changed with the flag off.
+
+---
+
+## 2026-07-29 (earlier) — n raised to 750, awaiting re-run on Kaggle
 
 **Human decision at Gate 2: n raised from 300 to 750.** The n=300 tier was a null with
 every CI spanning zero; measured SE of the EM drop is 2.21 pp, so ~720 questions give

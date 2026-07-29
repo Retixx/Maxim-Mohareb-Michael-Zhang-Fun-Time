@@ -80,6 +80,7 @@ def run_calls(
     precision: str,
     run_id: str,
     batch_size: int = 1,
+    log_confidence: bool = False,
 ) -> list[dict]:
     """Execute a batch of same-role calls and return SPEC §7 log records.
 
@@ -90,14 +91,18 @@ def run_calls(
 
     messages_list = [prompts.build_messages(role, **c["fields"]) for c in calls]
     gens = generate_batch(
-        model, tok, messages_list, prompts.MAX_NEW_TOKENS[role], batch_size=batch_size
+        model, tok, messages_list, prompts.MAX_NEW_TOKENS[role], batch_size=batch_size,
+        log_confidence=log_confidence,
     )
 
     records = []
     for call, gen in zip(calls, gens):
         status, parsed = parse_output(role, gen["raw_output"], gen["hit_token_cap"])
+        conf = {k: gen[k] for k in ("mean_logprob", "min_logprob", "mean_entropy")
+                if k in gen}
         records.append(
             {
+                **conf,
                 "run_id": run_id,
                 "question_id": call["question_id"],
                 "stage": role,

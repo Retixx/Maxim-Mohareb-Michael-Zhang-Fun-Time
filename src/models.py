@@ -139,12 +139,81 @@ def unload(model) -> None:
 
 
 @torch.inference_mode()
+def sequence_confidence(model, tok, enc: dict, gen_ids, n_gen_per_item: list[int],
+                        max_chunk: int = 8) -> list[dict]:
+    """Per-item confidence over the generated tokens, for the calibration half of
+    SPEC §1's mechanism claim (see the §5b prediction 4).
+
+    Returns per item: mean_logprob, min_logprob, mean_entropy — all over that
+    item's real generated tokens only, excluding padding.
+
+    Implemented as ONE teacher-forced forward pass over prompt+output, restricted
+    to the output positions. Deliberately NOT a LogitsProcessor: SPEC §12 forbids
+    constrained decoding, and although an observe-only processor would not violate
+    that ban, having no logits hook at all removes the ambiguity entirely. This
+    runs strictly AFTER generation and cannot influence what was generated —
+    greedy outputs are bit-identical whether or not this is called.
+
+    Costs roughly one extra prefill per batch, which is why it is opt-in
+    (`generation.log_confidence` in the config, default false).
+    """
+    input_ids, attn = enc["input_ids"], enc["attention_mask"]
+    B, P = input_ids.shape
+    G = gen_ids.shape[1]
+
+    gen_mask = torch.zeros((B, G), dtype=attn.dtype, device=attn.device)
+    for i, n in enumerate(n_gen_per_item):
+        if n > 0:
+            gen_mask[i, :n] = 1
+
+    results: list[dict] = []
+    for start in range(0, B, max_chunk):
+        sl = slice(start, start + max_chunk)
+        full = torch.cat([input_ids[sl], gen_ids[sl]], dim=1)
+        full_attn = torch.cat([attn[sl], gen_mask[sl]], dim=1)
+
+        # Keep logits only for the positions that predict generated tokens.
+        # Materialising all positions would be vocab x seq x batch and blow up.
+        logits = None
+        for kw in ("logits_to_keep", "num_logits_to_keep"):
+            try:
+                logits = model(full, attention_mask=full_attn, **{kw: G + 1}).logits
+                break
+            except TypeError:
+                continue
+        if logits is None:  # older signature: fall back to full logits
+            logits = model(full, attention_mask=full_attn).logits[:, P - 1 :, :]
+
+        logprobs = torch.log_softmax(logits.float(), dim=-1)
+        probs = logprobs.exp()
+        entropy = -(probs * logprobs).sum(-1)  # [b, G+1]
+
+        chunk_gen = gen_ids[sl]
+        for i in range(chunk_gen.shape[0]):
+            n = n_gen_per_item[start + i]
+            if n <= 0:
+                results.append({"mean_logprob": None, "min_logprob": None,
+                                "mean_entropy": None})
+                continue
+            idx = chunk_gen[i, :n]
+            lp = logprobs[i, torch.arange(n, device=logprobs.device), idx]
+            results.append({
+                "mean_logprob": round(lp.mean().item(), 5),
+                "min_logprob": round(lp.min().item(), 5),
+                "mean_entropy": round(entropy[i, :n].mean().item(), 5),
+            })
+        del logits, logprobs, probs, entropy
+    return results
+
+
+@torch.inference_mode()
 def generate_batch(
     model,
     tok,
     messages_list: list[list[dict]],
     max_new_tokens: int,
     batch_size: int = 1,
+    log_confidence: bool = False,
 ) -> list[dict]:
     """Greedy-decode a list of chat conversations.
 
@@ -193,6 +262,9 @@ def generate_batch(
 
         gen = out[:, in_len:]
         per_item = elapsed / len(chunk)
+
+        n_gen_per_item = []
+        rows = []
         for row, attn in zip(gen, enc["attention_mask"]):
             # Trim trailing pad/eos so output_tokens reflects real generation.
             ids = row.tolist()
@@ -200,13 +272,20 @@ def generate_batch(
             while n_gen > 0 and ids[n_gen - 1] in (tok.pad_token_id, tok.eos_token_id):
                 n_gen -= 1
             hit_cap = len(ids) == max_new_tokens and n_gen == len(ids)
-            results.append(
-                {
-                    "raw_output": tok.decode(row, skip_special_tokens=True),
-                    "hit_token_cap": hit_cap,
-                    "prompt_tokens": int(attn.sum().item()),
-                    "output_tokens": n_gen,
-                    "latency_s": round(per_item, 4),
-                }
-            )
+            n_gen_per_item.append(n_gen)
+            rows.append({
+                "raw_output": tok.decode(row, skip_special_tokens=True),
+                "hit_token_cap": hit_cap,
+                "prompt_tokens": int(attn.sum().item()),
+                "output_tokens": n_gen,
+                "latency_s": round(per_item, 4),
+            })
+
+        if log_confidence:
+            # Runs after generation; cannot affect what was generated.
+            conf = sequence_confidence(model, tok, enc, gen, n_gen_per_item)
+            for r, c in zip(rows, conf):
+                r.update(c)
+
+        results.extend(rows)
     return results

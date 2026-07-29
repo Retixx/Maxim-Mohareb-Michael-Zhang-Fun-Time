@@ -32,6 +32,16 @@ generation:
   batch_size: 16        # SPEC §6: start at 16, auto-reduce on OOM
   min_batch_size: 1
 
+  # Log per-call answer confidence (mean/min token logprob, mean entropy) so the
+  # CALIBRATION half of SPEC §1's mechanism claim can finally be tested — see the
+  # pre-registered prediction 4 in SPEC §5b. Format damage has already been ruled
+  # out on three instruments; calibration is the only part of §1 still live.
+  #
+  # Off by default. It costs roughly one extra prefill per batch, and turning it on
+  # mid-project would make wall-time comparisons across runs meaningless. Turn it on
+  # for the planned n=5000 rerun, where every run is generated from scratch anyway.
+  log_confidence: false
+
 results_dir: results
 
 # SPEC §2, locked. Exactly one agent quantized per run; the rest stay FP16.

@@ -148,6 +148,62 @@ Context for the EM range: fine-tuned SOTA on HotpotQA distractor is ~68–72 EM;
 
 Get baseline parse failure **under 10%** via prompt work before scaling to n=300. Absolute failure level matters less than dynamic range — the experiment measures deltas — but a high baseline compresses headroom and adds noise.
 
+---
+
+## 5b. PRE-REGISTERED MECHANISM PREDICTIONS (added 2026-07-29, after Gate 2)
+
+**Why this section exists.** §1 asserts a mechanism: quantization damages output
+format and calibration while leaving knowledge intact. The 4-bit tier on model 1
+(n=300) **refuted the format half of that claim** on three independent instruments,
+each with the point estimate in the *wrong* direction:
+
+| instrument | baseline | 4-bit | paired delta |
+|---|---|---|---|
+| parse success (Extractor) | 95.7% | 96.5% | −0.79 pp [−2.86, +1.28] |
+| strict format, no parser tolerance | 94.1% | 94.8% | +0.16 pp [−1.11, +1.43] |
+| verbatim span fidelity | 79.7% | 81.3% | −2.48 pp [−5.48, +0.53] |
+
+This is not a power problem and more questions will not change it — baseline failure
+rates of 0.3–4.3% leave almost no dynamic range, and all three estimates favour 4-bit.
+**Do not keep re-measuring format hoping for a different answer.**
+
+What the data *does* show, with a large unambiguous effect: **73.8% of Extractor calls
+selected different evidence under 4-bit** while format and fidelity held and accuracy
+moved ≤4 pp. The mechanism the evidence supports is therefore *selection perturbation
+without quality degradation* — quantization changes **which** content is chosen, not how
+well-formed it is.
+
+**That reframing was found by testing three metrics against the same dataset. Reporting
+it as though it had been predicted would be HARKing** — the same error as asserting the
+original mechanism. Hence the predictions below, committed before the confirmatory data
+is analysed.
+
+### Predictions
+
+Confirmatory test is the planned **n=5000 rerun** (different hardware, all runs from
+scratch). Model 2 at n=750 was already executing when this was written, so it is
+**analyst-blind but not pre-data** — treat it as supporting evidence, not confirmation.
+
+1. **Format is NOT damaged.** For every role, at 4-bit, the paired delta in parse
+   success, strict-format compliance, and verbatim fidelity each have a 95% CI
+   containing zero, or are negative (favouring the quantized run).
+2. **Selection churn is HIGH.** >50% of Extractor calls select a different span set at
+   4-bit than at FP16. >25% of final answers change text.
+3. **Role type predicts sensitivity.** Pooled EM drop for format-heavy roles
+   (Step Definer, Extractor) exceeds knowledge-heavy roles (Planner, QA), with the
+   contrast's 95% CI excluding zero.
+4. **Calibration is the open question.** §1's calibration claim has never been measured.
+   Prediction is stated as directional only: if any part of §1's mechanism survives, it
+   is calibration — AUROC of answer confidence against correctness degrades under 4-bit
+   while accuracy does not.
+
+Predictions 1 and 2 are well powered already. Prediction 3 is the one n=5000 is for.
+Prediction 4 requires `generation.log_confidence: true` (see §7).
+
+**A failed prediction here is a result, not a problem to engineer around.** If 3 fails
+at n=5000, the honest finding is that role-aware precision allocation does not matter at
+4-bit and uniform allocation is sufficient — which is publishable and useful.
+
 ### Contingencies
 
 - **Floor effect** — if 4-bit collapses *all four* roles to near-zero, there is no ranking to measure. In order: (1) switch to the 8-bit tier where degradation is gentler, (2) move model 1 to `Qwen/Qwen2.5-3B-Instruct` for more parametric redundancy, (3) report uniform collapse as the finding. Do not silently tune around it.

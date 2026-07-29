@@ -53,6 +53,53 @@ def f1_score(pred: str, gold: str) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
+def auroc(scores: list[float], labels: list[float]) -> float:
+    """AUROC of `scores` against binary `labels`, via the rank/Mann-Whitney form.
+
+    Used for calibration (SPEC §5b prediction 4): does answer confidence predict
+    correctness? 0.5 means confidence carries no information about whether the
+    answer is right. A drop under quantization with accuracy held constant is
+    exactly the "calibration damaged, knowledge intact" claim in SPEC §1.
+    """
+    pairs = [(s, l) for s, l in zip(scores, labels) if s is not None]
+    pos = [s for s, l in pairs if l == 1]
+    neg = [s for s, l in pairs if l == 0]
+    if not pos or not neg:
+        return float("nan")
+    order = sorted(pairs, key=lambda x: x[0])
+    ranks = {}
+    i = 0
+    while i < len(order):  # average ranks within ties
+        j = i
+        while j + 1 < len(order) and order[j + 1][0] == order[i][0]:
+            j += 1
+        avg = (i + j) / 2 + 1
+        for k in range(i, j + 1):
+            ranks.setdefault(id(order[k]), avg)
+        i = j + 1
+    rank_sum = sum(r for (o, r) in ((o, ranks[id(o)]) for o in order) if o[1] == 1)
+    return (rank_sum - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg))
+
+
+def expected_calibration_error(confidences: list[float], labels: list[float],
+                               n_bins: int = 10) -> float:
+    """Standard binned ECE. `confidences` must already be on a [0, 1] scale."""
+    pairs = [(c, l) for c, l in zip(confidences, labels) if c is not None]
+    if not pairs:
+        return float("nan")
+    total = len(pairs)
+    ece = 0.0
+    for b in range(n_bins):
+        lo, hi = b / n_bins, (b + 1) / n_bins
+        bucket = [(c, l) for c, l in pairs if (lo < c <= hi or (b == 0 and c == 0))]
+        if not bucket:
+            continue
+        conf = sum(c for c, _ in bucket) / len(bucket)
+        acc = sum(l for _, l in bucket) / len(bucket)
+        ece += (len(bucket) / total) * abs(acc - conf)
+    return ece
+
+
 def bootstrap_ci(
     values: list[float],
     n_resamples: int = 10_000,

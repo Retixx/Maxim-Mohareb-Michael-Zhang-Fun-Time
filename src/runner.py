@@ -100,7 +100,7 @@ class JsonlStore:
 
 
 def _run_stage(model, tok, stage, pending, precision, run_id,
-               batch_size, min_batch_size, store, idx) -> int:
+               batch_size, min_batch_size, store, idx, log_confidence=False) -> int:
     """Process `pending` in batches, halving the batch size on CUDA OOM.
 
     SPEC §6: start at 16, auto-reduce on OOM. The reduction sticks for the rest
@@ -119,7 +119,8 @@ def _run_stage(model, tok, stage, pending, precision, run_id,
         chunk = pending[start : start + bs]
         try:
             recs = agents.run_calls(
-                model, tok, stage, chunk, precision, run_id, batch_size=bs
+                model, tok, stage, chunk, precision, run_id, batch_size=bs,
+                log_confidence=log_confidence,
             )
         except torch.cuda.OutOfMemoryError:
             if bs <= min_batch_size:
@@ -177,6 +178,9 @@ def run(cfg: dict, run_id: str, n: int | None, seed: int | None, batch_size: int
     seed = seed if seed is not None else cfg["dataset"]["eval_seed"]
     batch_size = batch_size if batch_size is not None else cfg["generation"]["batch_size"]
     min_batch_size = cfg["generation"].get("min_batch_size", 1)
+    # SPEC §5b prediction 4. Off by default: costs an extra prefill per batch, and
+    # enabling it mid-project would make runs non-comparable in cost accounting.
+    log_confidence = bool(cfg["generation"].get("log_confidence", False))
     results_dir = Path(cfg.get("results_dir", "results"))
 
     print(f"=== run {run_id} | {model_id} | n={n} seed={seed} "
@@ -231,6 +235,7 @@ def run(cfg: dict, run_id: str, n: int | None, seed: int | None, batch_size: int
             bs = _run_stage(
                 model, tok, stage, pending, precision, run_id,
                 batch_size, min_batch_size, store, idx,
+                log_confidence=log_confidence,
             )
             store.flush()
             elapsed = time.perf_counter() - t_stage
@@ -273,6 +278,7 @@ def run(cfg: dict, run_id: str, n: int | None, seed: int | None, batch_size: int
         "n": n,
         "seed": seed,
         "batch_size": batch_size,
+        "log_confidence": log_confidence,
         "prompt_version": prompts.PROMPT_VERSION,
         "stage_precision": stage_precision,
         "stages": stage_meta,

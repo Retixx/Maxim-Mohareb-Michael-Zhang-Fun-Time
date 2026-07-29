@@ -211,6 +211,64 @@ def main():
                          "measurable — see SPEC §5a contingencies (try 8-bit tier next).")
     print("\n".join(f"  !! {f}" for f in flags) if flags else "  none — nothing looks like a bug")
 
+    # ---- Table 3: mechanism instruments (SPEC §5b) ---------------------------
+    print("\n" + "-" * 78)
+    print("TABLE 3 — mechanism instruments, baseline vs quantized (SPEC §5b)")
+    print("  format damage was REFUTED at 4-bit on model 1; these test predictions 1-2")
+    print("-" * 78)
+    from src.mechanism import SELECTION_FIELD, selection_changed, strict_format_ok, verbatim_rate
+    from src.pipeline import load_questions
+    qmap = {q["question_id"]: q for q in load_questions(args.n, seed=args.seed)}
+    print(f"{'role':<14}{'strict fmt base/4bit':>22}{'verbatim base/4bit':>22}{'selection churn':>17}")
+    for rid, stage in QUANTIZED_STAGE.items():
+        r = runs[rid]
+        if r is None:
+            continue
+        b_idx = {(x["question_id"], x["call_index"]): x
+                 for x in base["calls"] if x["stage"] == stage}
+        q_idx = {(x["question_id"], x["call_index"]): x
+                 for x in r["calls"] if x["stage"] == stage}
+        keys = [k for k in b_idx if k in q_idx]
+        if not keys:
+            continue
+
+        def fmt(src):
+            return 100 * sum(1 for k in keys
+                             if strict_format_ok(stage, src[k]["raw_output"])) / len(keys)
+
+        def vb(src):
+            if stage != "extractor":
+                return None
+            num = den = 0
+            for k in keys:
+                spans = (src[k].get("parsed") or {}).get("spans") or []
+                rate = verbatim_rate(spans, qmap[k[0]]["paragraphs"])
+                if rate is not None:
+                    num += rate * len(spans)
+                    den += len(spans)
+            return 100 * num / den if den else None
+
+        churn = 100 * sum(1 for k in keys
+                          if selection_changed(b_idx[k], q_idx[k],
+                                               SELECTION_FIELD[stage])) / len(keys)
+        bv, qv = vb(b_idx), vb(q_idx)
+        vtxt = f"{bv:9.1f} /{qv:6.1f}" if bv is not None else f"{'n/a':>16}"
+        print(f"{ROLE_LABEL[stage]:<14}{fmt(b_idx):9.1f} /{fmt(q_idx):6.1f}   "
+              f"{vtxt}   {churn:14.1f}%")
+
+    # Calibration, only if the runs were generated with generation.log_confidence
+    if base["meta"].get("log_confidence"):
+        from src.metrics import auroc
+        print("\n  CALIBRATION (SPEC §5b prediction 4) — AUROC of QA confidence vs EM")
+        for label, run in [("baseline", base)] + [(k, v) for k, v in runs.items() if v]:
+            qa = [x for x in run["calls"] if x["stage"] == "qa"]
+            a = auroc([x.get("mean_logprob") for x in qa],
+                      [run["answers"][x["question_id"]]["em"] for x in qa])
+            print(f"    {label:<18} AUROC {a:.3f}   (0.5 = confidence says nothing)")
+    else:
+        print("\n  CALIBRATION: not measured — these runs were generated with")
+        print("    generation.log_confidence = false. Enable it for the n=5000 rerun.")
+
     # ---- memory: the controlled constant ------------------------------------
     print("\n" + "-" * 78)
     print("MEMORY (SPEC §7: identical across runs 1-4 by construction)")
