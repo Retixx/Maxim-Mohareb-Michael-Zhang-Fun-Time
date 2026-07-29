@@ -4,7 +4,55 @@ Handoff log. Read SPEC.md first, then the newest entry here, then `git log`.
 
 ---
 
-## 2026-07-29 (latest) — pushed to GitHub, 4-bit tier validated, sweep handed to Kaggle
+## 2026-07-29 (latest) — BUILD STEP 8 COMPLETE, at GATE 2 (awaiting human)
+
+**Done.** Full 4-bit tier at n=300, seed 7, on a Kaggle T4. All five runs complete:
+300 answers each, identical question sets, zero duplicate call keys, `stage_precision`
+verified correct in every metadata blob, same library versions throughout, prompts v5,
+commit 45cd985. **Whole sweep took 1.61 GPU-hours** (SPEC §13 budgets 4). Peak VRAM
+5898 MB at FP16 batch 16 (§13 wants <6 GB) — batch 16 held on every stage, autotune
+never needed. Results are in `results/*_n300_seed7.*` (gitignored); Gate 2 analysis is
+`gate2_report.py`.
+
+**Headline: baseline EM 34.7% [29.3, 40.0], F1 44.4% — squarely in §5a's healthy band.**
+
+**The result is a null, and it is not a bug.** No role's EM drop has a CI excluding
+zero: Extractor +4.00 [-0.33, +8.33], Step Definer +1.00 [-2.00, +4.00], QA
++0.67 [-2.67, +4.00], Planner -1.33 [-5.67, +3.00] pp. Verified quantization really
+applied: 83-91% of each quantized stage's raw outputs differ from baseline, and 28-44%
+of final answers change. Churn is near-symmetric (e.g. planner 21 right->wrong vs 25
+wrong->right), which is *why* net EM barely moves — 4-bit scrambles individual answers
+without systematically degrading them.
+
+**The hypothesised mechanism did not appear.** SPEC §1 predicts quantization damages
+output format. Parse-failure rates were essentially unchanged, and if anything slightly
+*lower* when quantized: planner -0.67 [-2.67, +1.33], step_definer -0.48
+[-1.43, +0.48], extractor -0.79 [-2.86, +1.27], qa -0.33 [-1.00, 0.00] pp. This is the
+metric §5 calls "as important as accuracy", and it shows no format damage at 4-bit.
+
+**Pre-specified §10 Figure 3 re-cuts** (pooled, so n is effectively doubled) point the
+hypothesised direction but still do not reach significance: format-heavy +2.50
+[-0.83, +5.67] vs knowledge-heavy -0.33 [-3.50, +2.67], contrast +2.83 [-0.67, +6.33].
+Downstream +2.33 vs upstream -0.17, contrast +2.50 [-0.67, +5.67].
+
+**Power: n=300 is underpowered for effects this size.** SE of the EM drop is 2.21 pp,
+so ~720 questions would be needed for 80% power to detect a true 4 pp effect (~960 for
+90%). HotpotQA dev has 7405, and cost scales to ~4 GPU-h per tier at n=750. Changing n
+is a design change (§2/§5 lock it at 300) so it is a human decision, NOT to be done
+unilaterally.
+
+**One bug-flag fired and was a false positive:** `qa_4bit` parse-failure rate is exactly
+0.0%. Verified genuine — 300 statuses populated, all `ok`, 280 distinct raw outputs;
+baseline had exactly 1 failure. The heuristic just distrusts round numbers.
+
+**Next.** Waiting at Gate 2. Per §2 priority order the next step is build step 9, model 2
+(`Llama-3.2-3B-Instruct`), 4-bit tier only — but see the power question above, which the
+human may want to resolve first. Llama-3.2 is a gated HF repo: needs an accepted license
+and an `HF_TOKEN` Kaggle Secret. Do not start step 9 unprompted.
+
+---
+
+## 2026-07-29 (earlier) — pushed to GitHub, 4-bit tier validated, sweep handed to Kaggle
 
 **Done.** Gate 1 approved by human. Repo pushed to
 https://github.com/Retixx/Maxim-Mohareb-Michael-Zhang-Fun-Time (rebased onto the
