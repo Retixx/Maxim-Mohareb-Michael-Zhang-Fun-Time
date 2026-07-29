@@ -10,7 +10,15 @@ dataset:
   name: hotpot_qa
   config: distractor    # SPEC §3: 2 gold + 8 distractor paragraphs, no retriever
   split: validation
-  n: 300                # SPEC §5
+  # Raised from SPEC §5's 300 to 750 by human decision at Gate 2. Reason: the
+  # n=300 tier returned a null with every CI spanning zero. Measured SE of the EM
+  # drop was 2.21 pp, so ~720 questions are needed for 80% power against a true
+  # 4 pp effect (~960 for 90%). For reference, MA-RAG evaluated on 5600 HotpotQA
+  # dev questions — 18.7x our original n — which is most of why they could resolve
+  # a four-way role ranking and we could not.
+  #
+  # Costs ~4.0 GPU-h for all five runs (measured 1.61 h at n=300, scaled).
+  n: 750
 
   # Seed for sampling the n evaluation questions.
   #

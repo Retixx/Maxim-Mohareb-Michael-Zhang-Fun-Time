@@ -110,6 +110,29 @@ Failure taxonomy, logged per call:
 
 **Statistics:** n = **300 questions** per run. Report bootstrap 95% confidence intervals (10k resamples) on every reported number. A difference whose CIs overlap is not a result.
 
+> **AMENDED AT GATE 2 (human decision, 2026-07-29): n = 750, not 300.**
+> `config/experiment.yaml` is authoritative. The n=300 tier returned a null with
+> every CI spanning zero; measured SE of the EM drop was 2.21 pp, so ~720
+> questions are needed for 80% power against a true 4 pp effect. MA-RAG evaluated
+> on 5600 HotpotQA dev questions, 18.7x the original n, which largely explains why
+> they resolved a role ranking and we did not. Cost is ~4.0 GPU-h for the five-run
+> tier. Note this makes §13's "inside 4 GPU-hours" criterion marginal by
+> construction — judge it against ~4 h at n=750, not the original figure.
+>
+> **The n=300 results must NOT be pooled with the n=750 results.** Verified:
+> `random.sample` with a fixed seed is *nested* for increasing k, so the 300-question
+> sample is a strict SUBSET of the 750-question sample (overlap 300, nested = True).
+> Pooling would therefore double-count all 300. The n=750 run supersedes the n=300
+> run outright — report n=750 alone.
+>
+> The nesting does buy one free check: after the n=750 runs land, the shared 300
+> questions can be compared against the n=300 outputs. Any disagreement is
+> attributable to batch composition (a question sits in a different batch, with
+> different padding neighbours, at n=750 than at n=300), which is also why the
+> n=300 records are NOT reused to seed the n=750 files even though the question ids
+> match. Greedy decoding is deterministic for a fixed batch, not across
+> re-batchings.
+
 ---
 
 ## 5a. Expected values — what "healthy" looks like

@@ -4,7 +4,34 @@ Handoff log. Read SPEC.md first, then the newest entry here, then `git log`.
 
 ---
 
-## 2026-07-29 (latest) — BUILD STEP 8 COMPLETE, at GATE 2 (awaiting human)
+## 2026-07-29 (latest) — n raised to 750, awaiting re-run on Kaggle
+
+**Human decision at Gate 2: n raised from 300 to 750.** The n=300 tier was a null with
+every CI spanning zero; measured SE of the EM drop is 2.21 pp, so ~720 questions give
+80% power against a true 4 pp effect. MA-RAG evaluated on 5600 HotpotQA dev questions
+(18.7x our original n), which largely explains why they resolved a role ranking and we
+did not. Recorded as an explicit amendment in SPEC §5 so a later session does not
+"restore" 300; config/experiment.yaml is authoritative at n=750.
+
+**Fits Kaggle comfortably**: ~4.0 GPU-h for all five runs (measured 1.61 h at n=300),
+~48 min per run, longest ~51 min against a 12-h session cap, 13% of the weekly quota.
+This makes SPEC §13's "inside 4 GPU-hours" marginal by construction — judge against ~4 h.
+
+**The n=300 sample is a strict SUBSET of the n=750 sample.** random.sample with a fixed
+seed is nested for increasing k (verified: overlap 300, nested True). So do NOT pool the
+two — pooling would double-count all 300. n=750 supersedes n=300 outright. The n=300
+records are also NOT reused to seed the n=750 files despite matching question ids,
+because at n=750 a question sits in a different batch with different padding neighbours;
+greedy decoding is deterministic for a fixed batch, not across re-batchings. Comparing
+the shared 300 afterwards is a free check on exactly that.
+
+**Next.** Human re-runs the Kaggle notebook: cell 2 to pull the new config, then cell 5.
+New outputs land as *_n750_seed7.*. Then re-run gate2_report.py with --n 750 --seed 7.
+Model 2 (build step 9) comes after, still gated on a human decision.
+
+---
+
+## 2026-07-29 (earlier) — BUILD STEP 8 COMPLETE, at GATE 2
 
 **Done.** Full 4-bit tier at n=300, seed 7, on a Kaggle T4. All five runs complete:
 300 answers each, identical question sets, zero duplicate call keys, `stage_precision`
