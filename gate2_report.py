@@ -44,8 +44,8 @@ MARAG_NOTE = ("MA-RAG (size): QA hurts most -> Planner ~ Extractor -> "
 N_RESAMPLES = 10_000
 
 
-def load_run(results_dir: Path, run_id: str, n: int, seed: int):
-    stem = f"{run_id}_n{n}_seed{seed}"
+def load_run(results_dir: Path, run_id: str, n: int, seed: int, model: str = "qwen2.5-1.5b"):
+    stem = f"{run_id}_{model}_n{n}_seed{seed}"
     jsonl = results_dir / f"{stem}.jsonl"
     if not jsonl.exists():
         return None
@@ -86,13 +86,15 @@ def main():
     ap.add_argument("results_dir")
     ap.add_argument("--n", type=int, default=300)
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--model", default="qwen2.5-1.5b",
+                    help="model slug in the filenames, e.g. llama-3.2-3b")
     args = ap.parse_args()
     rd = Path(args.results_dir)
 
-    base = load_run(rd, "baseline", args.n, args.seed)
+    base = load_run(rd, "baseline", args.n, args.seed, args.model)
     if base is None:
-        raise SystemExit(f"no baseline at {rd}/baseline_n{args.n}_seed{args.seed}.jsonl")
-    runs = {rid: load_run(rd, rid, args.n, args.seed) for rid in QUANTIZED_STAGE}
+        raise SystemExit(f"no baseline at {rd}/baseline_{args.model}_n{args.n}_seed{args.seed}.jsonl")
+    runs = {rid: load_run(rd, rid, args.n, args.seed, args.model) for rid in QUANTIZED_STAGE}
     missing = [r for r, v in runs.items() if v is None]
     if missing:
         print(f"!! MISSING RUNS: {missing} — report is incomplete\n")
@@ -162,10 +164,25 @@ def main():
     print(f"\n  ours (precision): {' -> '.join(ROLE_LABEL[x['stage']] for x in ranked)}")
     print(f"  {MARAG_NOTE}")
 
+    # Verdict. Deliberately conservative: an ordering claim needs EVERY role
+    # resolved, not just one. An earlier version declared "DIFFERS" as soon as a
+    # single role was significant, which overstates what the data supports — with
+    # only one role resolved you know that role's position, not the ordering.
     sig_rows = [x for x in ranked if x["significant"]]
     if not sig_rows:
         verdict = ("INDISTINGUISHABLE — no role's drop has a CI excluding zero, so the "
                    "orderings cannot be compared. This is a real possible outcome, not a bug.")
+    elif len(sig_rows) < len(ranked):
+        named = ", ".join(
+            f"{ROLE_LABEL[x['stage']]} ({x['em_drop']:+.2f} pp, "
+            f"MA-RAG rank {MARAG_SIZE_RANKING.index(x['stage']) + 1}/4 by size)"
+            for x in sig_rows
+        )
+        verdict = (
+            f"PARTIAL — {len(sig_rows)} of {len(ranked)} roles resolved: {named}. "
+            "The remaining roles' CIs include zero, so the FULL ordering cannot be "
+            "compared to MA-RAG. Claim only the resolved roles' positions."
+        )
     else:
         ours = [x["stage"] for x in ranked]
         verdict = ("MATCHES MA-RAG's size ordering" if ours == MARAG_SIZE_RANKING
@@ -376,9 +393,10 @@ def main():
         m, lo, hi = bootstrap_ci(deltas, N_RESAMPLES)
         flag = "  <-- EXCLUDES 0" if (lo > 0 or hi < 0) else ""
         print(f"  {ROLE_LABEL[stage]:<14}{100*m:+6.2f}  [{100*lo:+6.2f}, {100*hi:+6.2f}]{flag}")
-    print(f"\n  MIN_ATTRIBUTABLE_CHARS={EV.MIN_ATTRIBUTABLE_CHARS}. Sensitivity checked at")
-    print("  0/10/25/40/60: Extractor significant at ALL thresholds; Step Definer only")
-    print("  at >=25. Treat Extractor as robust and Step Definer as threshold-dependent.")
+    print(f"\n  MIN_ATTRIBUTABLE_CHARS={EV.MIN_ATTRIBUTABLE_CHARS}. Sensitivity swept at")
+    print("  0/10/25/40/60 on BOTH n=300 and n=750, same conclusion each time:")
+    print("  Extractor significant at every threshold; Step Definer only at >=25.")
+    print("  Extractor is the robust effect; Step Definer is threshold-dependent.")
 
     # ---- memory: the controlled constant ------------------------------------
     print("\n" + "-" * 78)

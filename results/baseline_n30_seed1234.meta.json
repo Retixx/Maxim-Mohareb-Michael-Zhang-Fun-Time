@@ -1,0 +1,65 @@
+{
+  "run_id": "baseline",
+  "model_id": "Qwen/Qwen2.5-1.5B-Instruct",
+  "n": 30,
+  "seed": 1234,
+  "batch_size": 16,
+  "prompt_version": "v5",
+  "stage_precision": {
+    "planner": "fp16",
+    "step_definer": "fp16",
+    "extractor": "fp16",
+    "qa": "fp16"
+  },
+  "stages": {
+    "planner": {
+      "precision": "fp16",
+      "method": "none",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "peak_vram_mb": 3243.7,
+      "weight_footprint_mb": 2944.4,
+      "calls": 30,
+      "stage_wall_s": 9.8,
+      "final_batch_size": 16
+    },
+    "step_definer": {
+      "precision": "fp16",
+      "method": "none",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "peak_vram_mb": 5896.9,
+      "weight_footprint_mb": 2944.4,
+      "calls": 66,
+      "stage_wall_s": 92.2,
+      "final_batch_size": 16
+    },
+    "extractor": {
+      "precision": "fp16",
+      "method": "none",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "peak_vram_mb": 6515.6,
+      "weight_footprint_mb": 2944.4,
+      "calls": 66,
+      "stage_wall_s": 1299.1,
+      "final_batch_size": 16
+    },
+    "qa": {
+      "precision": "fp16",
+      "method": "none",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "peak_vram_mb": 5896.9,
+      "weight_footprint_mb": 2944.4,
+      "calls": 30,
+      "stage_wall_s": 43.8,
+      "final_batch_size": 16
+    }
+  },
+  "coresident_footprint_mb": 11777.6,
+  "git_commit": "66f421a8e9870f45fc024f883a54cfe646564150",
+  "gpu_name": "NVIDIA GeForce RTX 3050 Laptop GPU",
+  "total_wall_s": 1465.5,
+  "finished_at": "2026-07-29T10:54:07.939390+00:00"
+}

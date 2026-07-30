@@ -105,7 +105,7 @@ def main() -> int:
     if not args.report_only:
         run_sweep(cfg, args.run, args.n, args.seed, args.batch_size)
 
-    slug = result_slug(args.run, args.n, args.seed)
+    slug = result_slug(args.run, args.n, args.seed, cfg["model_id"])
     jsonl = results_dir / f"{slug}.jsonl"
     meta_path = results_dir / f"{slug}.meta.json"
     if not jsonl.exists():

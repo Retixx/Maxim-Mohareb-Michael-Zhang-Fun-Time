@@ -1,0 +1,74 @@
+{
+  "run_id": "extractor_4bit",
+  "model_id": "Qwen/Qwen2.5-1.5B-Instruct",
+  "n": 5,
+  "seed": 1234,
+  "batch_size": 1,
+  "prompt_version": "v5",
+  "stage_precision": {
+    "planner": "fp16",
+    "step_definer": "fp16",
+    "extractor": "4bit",
+    "qa": "fp16"
+  },
+  "stages": {
+    "planner": {
+      "precision": "fp16",
+      "method": "none",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "peak_vram_mb": 2971.2,
+      "weight_footprint_mb": 2944.4,
+      "calls": 5,
+      "stage_wall_s": 13.1,
+      "final_batch_size": 1,
+      "nominal_params": 1543714304,
+      "quantized_params": 0
+    },
+    "step_definer": {
+      "precision": "fp16",
+      "method": "none",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "peak_vram_mb": 5896.9,
+      "weight_footprint_mb": 2944.4,
+      "calls": 12,
+      "stage_wall_s": 133.3,
+      "final_batch_size": 1,
+      "nominal_params": 1543714304,
+      "quantized_params": 0
+    },
+    "extractor": {
+      "precision": "4bit",
+      "method": "bitsandbytes-nf4",
+      "group_size": 64,
+      "compute_dtype": "float16",
+      "double_quant": true,
+      "peak_vram_mb": 4078.3,
+      "weight_footprint_mb": 1070.2,
+      "calls": 12,
+      "stage_wall_s": 61.9,
+      "final_batch_size": 1,
+      "nominal_params": 1543714304,
+      "quantized_params": 1310195712
+    },
+    "qa": {
+      "precision": "fp16",
+      "method": "none",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "peak_vram_mb": 4054.1,
+      "weight_footprint_mb": 2944.4,
+      "calls": 5,
+      "stage_wall_s": 10.7,
+      "final_batch_size": 1,
+      "nominal_params": 1543714304,
+      "quantized_params": 0
+    }
+  },
+  "coresident_footprint_mb": 9903.4,
+  "git_commit": "5399146d85456493f9d0a538579c46f90d2ebc42",
+  "gpu_name": "NVIDIA GeForce RTX 3050 Laptop GPU",
+  "total_wall_s": 241.6,
+  "finished_at": "2026-07-29T15:36:17.203862+00:00"
+}

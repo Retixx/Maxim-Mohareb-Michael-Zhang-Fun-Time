@@ -33,9 +33,29 @@ from .pipeline import (
 FLUSH_EVERY = 50  # SPEC §6
 
 
-def result_slug(run_id: str, n: int, seed: int) -> str:
-    """Filename stem for a run's outputs. Identifies the dataset sample too."""
-    return f"{run_id}_n{n}_seed{seed}"
+def model_slug(model_id: str) -> str:
+    """Short filename-safe tag for a base model.
+
+    Qwen/Qwen2.5-1.5B-Instruct     -> qwen2.5-1.5b
+    meta-llama/Llama-3.2-3B-Instruct -> llama-3.2-3b
+    """
+    name = model_id.split("/")[-1].lower()
+    for suffix in ("-instruct", "-chat", "-it"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+    return name
+
+
+def result_slug(run_id: str, n: int, seed: int, model_id: str) -> str:
+    """Filename stem for a run's outputs.
+
+    Carries model, n and seed — not just run_id. Resume keys on
+    (question_id, stage, call_index), which is blind to all three, so any of them
+    sharing a file would silently interleave incompatible data with no key
+    collision to flag it. Model matters as much as n: `baseline` on Qwen and
+    `baseline` on Llama are different experiments answering to the same run_id.
+    """
+    return f"{run_id}_{model_slug(model_id)}_n{n}_seed{seed}"
 
 
 class JsonlStore:
@@ -194,7 +214,7 @@ def run(cfg: dict, run_id: str, n: int | None, seed: int | None, batch_size: int
     # question came from — so a dev run at n=30/seed=1234 sharing a file with the
     # real n=300/seed=7 run would silently interleave two different datasets into
     # one results file and no key collision would ever flag it.
-    slug = result_slug(run_id, n, seed)
+    slug = result_slug(run_id, n, seed, model_id)
     store = JsonlStore(results_dir / f"{slug}.jsonl")
 
     existing = store.read_existing()
@@ -307,9 +327,14 @@ def main():
     ap.add_argument("--n", type=int, default=None, help="override dataset.n")
     ap.add_argument("--seed", type=int, default=None, help="override dataset.eval_seed")
     ap.add_argument("--batch-size", type=int, default=None)
+    ap.add_argument("--model-id", default=None,
+                    help="override model_id (SPEC §9 build step 9: model 2 is a config "
+                         "value, not a plugin — this is just so one config can drive both)")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
+    if args.model_id:
+        cfg["model_id"] = args.model_id
     run(cfg, args.run, args.n, args.seed, args.batch_size)
 
 
