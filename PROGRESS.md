@@ -4,7 +4,61 @@ Handoff log. Read SPEC.md first, then the newest entry here, then `git log`.
 
 ---
 
-## 2026-07-29 (latest) — EXTRACTION ACCURACY added; first significant per-role effects
+## 2026-07-29 (latest) — n=750 TIER COMPLETE. At GATE 2 (awaiting human).
+
+**All five runs at n=750, seed 7, Tesla T4, 4.24 GPU-h.** 750 answers each, identical
+question sets, zero duplicate keys, prompts v5, coresident 9903.4 MB across all four
+quantized runs vs 11777.6 baseline. Results committed to `results/` (force-added past
+.gitignore) so they survive — the Kaggle GitHub push failed on a `BackendError` from a
+missing/unattached `GITHUB_TOKEN` secret, and an earlier n=750 sweep was lost entirely
+to an idle-timeout before that was in place.
+
+**Raising n from 300 to 750 did exactly what it was approved for.** Answer EM now
+separates one role where nothing separated before:
+
+    Extractor      +3.20 [+0.67, +5.87]   SIGNIFICANT  (was +4.00 [-0.33, +8.33])
+    QA             +1.73 [-0.13, +3.60]   marginal
+    Step Definer   +0.53 [-1.60, +2.67]   null
+    Planner        -1.73 [-4.53, +1.07]   null
+
+**Extraction accuracy (§5c) separates two — and both are the format-heavy roles:**
+
+    Step Definer   +2.80 [+1.20, +4.42]
+    Extractor      +2.18 [+0.04, +4.27]
+    Planner        -0.73 [-2.72, +1.27]
+    QA             +0.00 [+0.00, +0.00]   negative control PASSES
+
+**Pre-registered predictions (§5b), scored honestly:**
+
+    1 format not damaged       HOLDS on all four roles
+    2 selection churn high     HOLDS (extractor spans 75.9%, answer churn 29-44%)
+    3 format-heavy > knowledge CONFIRMED on ev-F1 +2.85 [+1.34, +4.37]
+                               NOT confirmed on answer EM +1.87 [-0.13, +4.00]
+    4 calibration              UNTESTED - log_confidence was off
+
+**Effect sizes shrank from n=300** (StepDef 4.38 -> 2.80, Extractor 4.66 -> 2.18) while
+CIs tightened enough to stay significant. Consistent with the n=300 estimates having
+been inflated by winner's curse; treat n=750 as the better estimate.
+
+**Next.** Waiting at Gate 2 for approval to start build step 9 (model 2,
+Llama-3.2-3B-Instruct, gated HF repo needing an HF_TOKEN secret). Do not start unprompted.
+
+**Known issues.**
+- `gate2_report.py`'s sensitivity note is STALE - it cites the n=300 sweep. Re-run at
+  n=750 gives the same conclusion (Extractor significant at every threshold 0/10/25/40/60,
+  Step Definer only at >=25) but the printed text should be updated.
+- The report's MA-RAG verdict logic is too strong: it declares "DIFFERS" whenever any one
+  role is significant. With only the Extractor resolved, the honest claim is narrower -
+  see the Gate 2 write-up.
+- Peak VRAM reached 7510-8162 MB on extractor stages, up from 5898 at n=300 (same batch
+  size; it is a max over 2.5x as many batches). SPEC §13's "under 6 GB at fp16 batch 16"
+  no longer holds at this n and should be restated rather than treated as a failure.
+- qa_4bit's 0.0% parse-rate flag re-checked and genuine (750 statuses all ok, 684
+  distinct outputs; baseline had 2 failures).
+
+---
+
+## 2026-07-29 (earlier) — EXTRACTION ACCURACY added; first significant per-role effects
 
 **Read SPEC §5c.** New third metric (`src/evidence.py`): the Extractor's spans scored
 against HotpotQA's gold `supporting_facts` labels. Human-approved addition. Pure

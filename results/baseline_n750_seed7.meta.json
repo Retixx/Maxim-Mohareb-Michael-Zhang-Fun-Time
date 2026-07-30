@@ -1,0 +1,81 @@
+{
+  "run_id": "baseline",
+  "model_id": "Qwen/Qwen2.5-1.5B-Instruct",
+  "n": 750,
+  "seed": 7,
+  "batch_size": 16,
+  "log_confidence": false,
+  "prompt_version": "v5",
+  "stage_precision": {
+    "planner": "fp16",
+    "step_definer": "fp16",
+    "extractor": "fp16",
+    "qa": "fp16"
+  },
+  "stages": {
+    "planner": {
+      "precision": "fp16",
+      "method": "none",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "peak_vram_mb": 3294.4,
+      "weight_footprint_mb": 2944.4,
+      "calls": 750,
+      "stage_wall_s": 116.0,
+      "final_batch_size": 16,
+      "nominal_params": 1543714304,
+      "quantized_params": 0
+    },
+    "step_definer": {
+      "precision": "fp16",
+      "method": "none",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "peak_vram_mb": 5897.9,
+      "weight_footprint_mb": 2944.4,
+      "calls": 1597,
+      "stage_wall_s": 260.5,
+      "final_batch_size": 16,
+      "nominal_params": 1543714304,
+      "quantized_params": 0
+    },
+    "extractor": {
+      "precision": "fp16",
+      "method": "none",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "peak_vram_mb": 7509.8,
+      "weight_footprint_mb": 2944.4,
+      "calls": 1597,
+      "stage_wall_s": 2470.8,
+      "final_batch_size": 16,
+      "nominal_params": 1543714304,
+      "quantized_params": 0
+    },
+    "qa": {
+      "precision": "fp16",
+      "method": "none",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "peak_vram_mb": 5898.8,
+      "weight_footprint_mb": 2944.4,
+      "calls": 750,
+      "stage_wall_s": 107.1,
+      "final_batch_size": 16,
+      "nominal_params": 1543714304,
+      "quantized_params": 0
+    }
+  },
+  "coresident_footprint_mb": 11777.6,
+  "git_commit": "70b63ce717b8e95dece0ee0dfde0c5fd37dfae7e",
+  "library_versions": {
+    "torch": "2.10.0+cu128",
+    "transformers": "5.14.1",
+    "bitsandbytes": "0.50.0",
+    "datasets": "5.0.1",
+    "cuda": "12.8"
+  },
+  "gpu_name": "Tesla T4",
+  "total_wall_s": 2983.1,
+  "finished_at": "2026-07-30T19:20:49.310362+00:00"
+}

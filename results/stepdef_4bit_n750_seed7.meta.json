@@ -1,0 +1,82 @@
+{
+  "run_id": "stepdef_4bit",
+  "model_id": "Qwen/Qwen2.5-1.5B-Instruct",
+  "n": 750,
+  "seed": 7,
+  "batch_size": 16,
+  "log_confidence": false,
+  "prompt_version": "v5",
+  "stage_precision": {
+    "planner": "fp16",
+    "step_definer": "4bit",
+    "extractor": "fp16",
+    "qa": "fp16"
+  },
+  "stages": {
+    "planner": {
+      "precision": "fp16",
+      "method": "none",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "peak_vram_mb": 3294.2,
+      "weight_footprint_mb": 2944.4,
+      "calls": 750,
+      "stage_wall_s": 119.4,
+      "final_batch_size": 16,
+      "nominal_params": 1543714304,
+      "quantized_params": 0
+    },
+    "step_definer": {
+      "precision": "4bit",
+      "method": "bitsandbytes-nf4",
+      "group_size": 64,
+      "compute_dtype": "float16",
+      "double_quant": true,
+      "peak_vram_mb": 4078.9,
+      "weight_footprint_mb": 1070.2,
+      "calls": 1597,
+      "stage_wall_s": 326.6,
+      "final_batch_size": 16,
+      "nominal_params": 1543714304,
+      "quantized_params": 1310195712
+    },
+    "extractor": {
+      "precision": "fp16",
+      "method": "none",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "peak_vram_mb": 8162.3,
+      "weight_footprint_mb": 2944.4,
+      "calls": 1597,
+      "stage_wall_s": 2338.7,
+      "final_batch_size": 16,
+      "nominal_params": 1543714304,
+      "quantized_params": 0
+    },
+    "qa": {
+      "precision": "fp16",
+      "method": "none",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "peak_vram_mb": 5897.9,
+      "weight_footprint_mb": 2944.4,
+      "calls": 750,
+      "stage_wall_s": 102.3,
+      "final_batch_size": 16,
+      "nominal_params": 1543714304,
+      "quantized_params": 0
+    }
+  },
+  "coresident_footprint_mb": 9903.4,
+  "git_commit": "3445abf5da3fd5b5f00ae685df40f321ff862141",
+  "library_versions": {
+    "torch": "2.10.0+cu128",
+    "transformers": "5.14.1",
+    "bitsandbytes": "0.50.0",
+    "datasets": "5.0.1",
+    "cuda": "12.8"
+  },
+  "gpu_name": "Tesla T4",
+  "total_wall_s": 2904.1,
+  "finished_at": "2026-07-30T21:02:35.848197+00:00"
+}
