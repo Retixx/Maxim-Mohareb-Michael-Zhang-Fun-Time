@@ -2,9 +2,20 @@
 #
 #   python -m src.runner --config config/experiment.yaml --run stepdef_4bit
 
+# The run's base model: what a stage gets when its treatment is a bare precision
+# string. Overridable with --model-id. Model 2 is a config value, not a plugin
+# (SPEC §12):  model_id: meta-llama/Llama-3.2-3B-Instruct
 model_id: Qwen/Qwen2.5-1.5B-Instruct
-# Model 2 is a config value, not a plugin (SPEC §12). Added at build step 9:
-#   model_id: meta-llama/Llama-3.2-3B-Instruct
+
+# Aliases for the size axis (SPEC §2 Phase S, §8). `base` always resolves to
+# model_id above, so it does not need an entry. Same family, same tokenizer, same
+# instruct recipe as the base model — the closest available approximation to a
+# pure parameter-count intervention (SPEC §12's stated limitation).
+models:
+  small: Qwen/Qwen2.5-0.5B-Instruct
+  # Model 2's pair, for build step 17:
+  #   base:  meta-llama/Llama-3.2-3B-Instruct   (via model_id)
+  #   small: meta-llama/Llama-3.2-1B-Instruct
 
 dataset:
   name: hotpot_qa
@@ -71,3 +82,49 @@ runs:
     step_definer: fp16
     extractor: fp16
     qa: 4bit
+
+  # --- SPEC §2 Phase S — size ablation. Same shape as Phase Q, other axis.
+  # Shares the `baseline` run above; do NOT add a second baseline. The perturbed
+  # role holds 942.2 MB at 0.5B/fp16 against 1070.2 MB at 1.5B/4-bit, so the size
+  # arm runs on 13.6% FEWER bytes than the quantization arm — stated, not hidden
+  # (SPEC §2). analyze.py must print that gap beside every Q-vs-S comparison.
+  planner_small:
+    planner: {model: small, precision: fp16}
+    step_definer: fp16
+    extractor: fp16
+    qa: fp16
+  stepdef_small:
+    planner: fp16
+    step_definer: {model: small, precision: fp16}
+    extractor: fp16
+    qa: fp16
+  extractor_small:
+    planner: fp16
+    step_definer: fp16
+    extractor: {model: small, precision: fp16}
+    qa: fp16
+  qa_small:
+    planner: fp16
+    step_definer: fp16
+    extractor: fp16
+    qa: {model: small, precision: fp16}
+
+  # --- SPEC §2 Phase D — uniform arms. These are fixed by definition, not
+  # chosen from data, so defining them now does not pre-empt the §5e allocation
+  # rule (which still must be committed here BEFORE the role-aware arms run).
+  #
+  # Note the deduped footprints (SPEC §5d): a uniform run needs ONE resident
+  # instance, so ma_uniform_4bit sits at 1070.2 MB — below every single-role
+  # quantized run in Phase Q, which each need two. Uniform allocation is
+  # memory-efficient precisely because it is uniform. That is the frontier the
+  # role-aware arms have to beat.
+  ma_uniform_4bit:        # deduped 1070.2 MB
+    planner: 4bit
+    step_definer: 4bit
+    extractor: 4bit
+    qa: 4bit
+  ma_uniform_small:       # deduped 942.2 MB
+    planner: {model: small, precision: fp16}
+    step_definer: {model: small, precision: fp16}
+    extractor: {model: small, precision: fp16}
+    qa: {model: small, precision: fp16}

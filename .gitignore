@@ -1,6 +1,16 @@
 .venv/
 __pycache__/
 *.pyc
-results/
 *.zip
 .ipynb_checkpoints/
+
+# Sweep outputs ARE committed. The Kaggle notebook pushes results/ to GitHub
+# after every run because a session that dies otherwise loses everything — one
+# n=750 sweep was already lost that way (PROGRESS.md, 2026-07-29). `results/`
+# used to be ignored wholesale and every push needed `git add -f`, which meant a
+# plain `git add -A` silently skipped new results. Ignore only the dev-seed
+# scratch files instead; SPEC's seed hygiene keeps seeds 0 and 1234 out of the
+# experiment, so nothing ignored here is ever reportable.
+results/*_seed0.*
+results/*_seed1234.*
+results/smoke_*

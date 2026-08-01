@@ -63,12 +63,23 @@ def selection_changed(rec_a: dict, rec_b: dict, key: str) -> bool:
     """Did the chosen content differ between two records of the same call?
 
     `key` is the parsed field carrying the selection: "spans" for the Extractor,
-    "sub_questions" for the Planner, "search_terms" for the Step Definer.
-    Compares normalised content, so formatting-only differences do not count.
+    "sub_questions" for the Planner, "search_terms" for the Step Definer,
+    "answer" for QA. Compares normalised content, so formatting-only differences
+    do not count.
+
+    QA's field is a scalar, not a list. Iterating it would compare lists of
+    *characters* — which happens to give the right answer most of the time and
+    the wrong one whenever the two strings differ only in whitespace, since
+    `_norm` maps a lone space to "" but collapses interior runs. Scalars are
+    normalised whole.
     """
-    a = (rec_a.get("parsed") or {}).get(key) or []
-    b = (rec_b.get("parsed") or {}).get(key) or []
-    return [_norm(x) for x in a] != [_norm(x) for x in b]
+    def sel(rec):
+        v = (rec.get("parsed") or {}).get(key)
+        if v is None:
+            return []
+        return [_norm(x) for x in v] if isinstance(v, list) else [_norm(v)]
+
+    return sel(rec_a) != sel(rec_b)
 
 
 # The selection field each role's output is judged on.

@@ -39,31 +39,10 @@ _REFUSAL_MARKERS = (
 )
 
 
-def _find_json_blob(text: str) -> str | None:
-    """Return the first balanced {...} or [...] substring, or None.
-
-    Tolerant of markdown fences and of prose before/after the JSON, because
-    those are formatting noise rather than a structural failure. Not tolerant
-    of actually-broken JSON — that is what `malformed_json` is for.
-    """
-    if not text:
-        return None
-    # Strip markdown fences if present; the content inside is what we want.
-    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
-    if fenced:
-        text = fenced.group(1)
-
-    start = None
-    opener = closer = ""
-    for i, ch in enumerate(text):
-        if ch in "{[":
-            start = i
-            opener = ch
-            closer = "}" if ch == "{" else "]"
-            break
-    if start is None:
-        return None
-
+def _balanced_from(text: str, start: int) -> str | None:
+    """The balanced {...} / [...] substring beginning at `start`, or None."""
+    opener = text[start]
+    closer = "}" if opener == "{" else "]"
     depth = 0
     in_string = False
     escaped = False
@@ -86,6 +65,59 @@ def _find_json_blob(text: str) -> str | None:
             if depth == 0:
                 return text[start : i + 1]
     return None  # never closed — truncated or malformed
+
+
+def _iter_json_blobs(text: str):
+    """Yield candidate balanced JSON substrings, best-first.
+
+    Tolerant of markdown fences and of prose before/after the JSON, because
+    those are formatting noise rather than a structural failure. Not tolerant
+    of actually-broken JSON — that is what `malformed_json` is for.
+
+    Two things this deliberately does NOT do, both of which it used to:
+
+    1. **It no longer throws away everything outside the first fence.** The old
+       code replaced the whole output with the first ```...``` block, so a model
+       that reasoned inside a fence and then emitted correct JSON after it scored
+       `malformed_json`. Fenced content is still tried first — it is the most
+       likely place for the payload — but the full text is tried after.
+
+    2. **It no longer commits to the first `{` or `[` in the string.** A brace in
+       prose ("use the shape {sub_questions: [...]}") or a preamble object
+       ({"note": "thinking"}) hijacked the parse, in the second case producing
+       `schema_mismatch` for a model whose very next object had exactly the right
+       fields. Every opening bracket is now a candidate and the caller takes the
+       first that satisfies the role's schema.
+
+    Both were latent on model 1 — replaying all 23,486 model-1 call records
+    produces byte-identical statuses before and after — but they penalise
+    *chatty* models specifically. Phase S's 0.5B model and Llama-3.2 are chattier
+    than Qwen2.5-1.5B, so the old behaviour would have surfaced as format damage
+    under the treatment, i.e. as a spurious confirmation of SPEC §5b prediction 5.
+    """
+    if not text:
+        return
+    seen = set()
+    fenced = re.findall(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
+    for chunk in [*fenced, text]:
+        i = 0
+        while i < len(chunk):
+            if chunk[i] not in "{[":
+                i += 1
+                continue
+            blob = _balanced_from(chunk, i)
+            if blob is None:
+                # Unterminated from here. Stop scanning this chunk rather than
+                # descending inside it: a truncated object very often contains a
+                # COMPLETE inner array, and treating that as the payload would
+                # relabel a genuine `truncated` as `schema_mismatch`. Replaying
+                # the model-1 corpus, descending changed 388 published statuses
+                # exactly this way. Candidates must be top level.
+                break
+            if blob not in seen:
+                seen.add(blob)
+                yield blob
+            i += len(blob)  # continue AFTER this blob, never inside it
 
 
 def _is_str_list(v, allow_empty: bool = False) -> bool:
@@ -177,9 +209,9 @@ def parse_output(role: str, raw_output: str, hit_token_cap: bool) -> tuple[str, 
     Precedence, in order:
       1. empty_output        — nothing but whitespace came back
       2. refusal_or_offtopic — no JSON at all, and refusal language present
-      3. truncated           — ran out of tokens and the result does not parse.
-                               Checked before malformed_json because truncation
-                               is the *cause* of the malformation; labelling it
+      3. truncated           — ran out of tokens and nothing DECODED. Checked
+                               before malformed_json because truncation is the
+                               *cause* of the malformation; labelling it
                                malformed would hide a budget problem as a format
                                problem. Note that hitting the cap while still
                                emitting complete valid JSON scores "ok" — the
@@ -187,6 +219,15 @@ def parse_output(role: str, raw_output: str, hit_token_cap: bool) -> tuple[str, 
       4. malformed_json      — no locatable JSON, or json.loads failed
       5. schema_mismatch     — valid JSON, wrong fields or wrong types
       6. ok
+
+    `truncated` outranks `malformed_json` but NOT `schema_mismatch`. If a blob
+    decoded cleanly and merely had the wrong fields, truncation did not cause
+    that — the model emitted a complete, well-formed object of the wrong shape,
+    and the cap being hit alongside it is a coincidence. The old code returned
+    `truncated` for that case, which contradicted the precedence documented right
+    here and bled schema errors into the truncation bucket for any role whose cap
+    bites (QA's is 48 tokens). Verified not to fire on model 1: no QA call reached
+    its cap at n=750.
     """
     if role not in _VALIDATORS:
         raise KeyError(f"unknown role {role!r}")
@@ -195,27 +236,25 @@ def parse_output(role: str, raw_output: str, hit_token_cap: bool) -> tuple[str, 
     if not text:
         return "empty_output", None
 
-    blob = _find_json_blob(text)
+    # Take the first candidate satisfying the role's schema. Remember whether
+    # anything decoded at all, to tell "wrong shape" from "not JSON".
+    decoded_something = False
+    for blob in _iter_json_blobs(text):
+        try:
+            obj = json.loads(blob)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        decoded_something = True
+        ok, payload = _VALIDATORS[role](obj)
+        if ok:
+            return "ok", payload
 
-    if blob is None:
-        lowered = text.lower()
-        if any(m in lowered for m in _REFUSAL_MARKERS):
-            return "refusal_or_offtopic", None
-        if hit_token_cap:
-            return "truncated", None
-        return "malformed_json", None
-
-    try:
-        obj = json.loads(blob)
-    except (json.JSONDecodeError, ValueError):
-        if hit_token_cap:
-            return "truncated", None
-        return "malformed_json", None
-
-    ok, payload = _VALIDATORS[role](obj)
-    if not ok:
-        if hit_token_cap:
-            return "truncated", None
+    if decoded_something:
         return "schema_mismatch", None
 
-    return "ok", payload
+    lowered = text.lower()
+    if any(m in lowered for m in _REFUSAL_MARKERS):
+        return "refusal_or_offtopic", None
+    if hit_token_cap:
+        return "truncated", None
+    return "malformed_json", None
