@@ -170,6 +170,64 @@ def _validate_step_definer(obj):
     }
 
 
+def salvage(role: str, raw_output: str) -> dict | None:
+    """Best-effort usable fields from output that FAILED validation. SPEC §13b.1.
+
+    Separate from `parse_output` on purpose. The taxonomy is a measurement and
+    must not become more lenient mid-experiment, so `parse_output` is untouched
+    and every published parse-failure number is unchanged. This function is for
+    the *consumer*: a call already counted as a failure can still carry fields a
+    downstream stage could have used, and discarding them costs accuracy twice.
+
+    The case that motivated it: 55 of 63 Step Definer failures across the five
+    n=750 runs are
+
+        {"search_terms": [...good...], "target_entity": "", "answer_type": "..."}
+
+    correct types, usable keywords, one empty string. `_validate_step_definer`
+    rejects on the empty `target_entity` and returns None, so the Extractor loses
+    the good `search_terms` too and falls back to "(none)".
+
+    Returns None when nothing is salvageable. Never affects `parse_status`.
+    """
+    if not raw_output:
+        return None
+    for blob in _iter_json_blobs(raw_output):
+        try:
+            obj = json.loads(blob)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if not isinstance(obj, dict):
+            continue
+        out = {}
+        if role == "step_definer":
+            terms = obj.get("search_terms")
+            if _is_str_list(terms):
+                out["search_terms"] = [t.strip() for t in terms]
+            ent = obj.get("target_entity")
+            if isinstance(ent, str) and ent.strip():
+                out["target_entity"] = ent.strip()
+        elif role == "planner":
+            subs = obj.get("sub_questions")
+            if _is_str_list(subs):
+                out["sub_questions"] = [s.strip() for s in subs]
+        elif role == "extractor":
+            spans = obj.get("spans")
+            if isinstance(spans, list):
+                keep = [s.strip() for s in spans if isinstance(s, str) and s.strip()]
+                if keep:
+                    out["spans"] = keep
+        elif role == "qa":
+            ans = obj.get("answer")
+            if isinstance(ans, (int, float)) and not isinstance(ans, bool):
+                ans = str(ans)
+            if isinstance(ans, str) and ans.strip():
+                out["answer"] = ans.strip()
+        if out:
+            return out
+    return None
+
+
 def _validate_extractor(obj):
     if not isinstance(obj, dict):
         return False, None

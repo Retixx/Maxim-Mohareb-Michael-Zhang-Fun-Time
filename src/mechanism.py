@@ -82,6 +82,27 @@ def selection_changed(rec_a: dict, rec_b: dict, key: str) -> bool:
     return sel(rec_a) != sel(rec_b)
 
 
+def selection_changed_set(rec_a: dict, rec_b: dict, key: str) -> bool:
+    """Set-based counterpart to `selection_changed`. SPEC §13b.3.
+
+    `selection_changed` compares ordered lists, so a pure REORDERING of the same
+    spans counts as churn — which makes the published 73.8% / 75.9% figures upper
+    bounds by an unmeasured amount. SPEC §5b prediction 2 is worded as a
+    "different span *set*", and that wording is pre-registered, so it cannot be
+    edited after seeing data to match whichever number is more convenient.
+
+    Both are therefore reported: the sequence figure for continuity with what was
+    published, and this one for the prediction as actually written.
+    """
+    def sel(rec):
+        v = (rec.get("parsed") or {}).get(key)
+        if v is None:
+            return frozenset()
+        return frozenset(_norm(x) for x in v) if isinstance(v, list) else frozenset([_norm(v)])
+
+    return sel(rec_a) != sel(rec_b)
+
+
 # The selection field each role's output is judged on.
 SELECTION_FIELD = {
     "planner": "sub_questions",

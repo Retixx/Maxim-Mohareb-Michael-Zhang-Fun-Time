@@ -94,6 +94,33 @@ def load_questions(
     return out
 
 
+def assert_nested(small_seed: int, small_n: int, big_seed: int, big_n: int,
+                  split: str = "validation", config: str = "distractor") -> bool:
+    """Verify one sample really is a subset of another. SPEC §13b.4.
+
+    Do not assume `random.sample` is nested in k. It is a CPython implementation
+    detail, holding only while `21 + 4**ceil(log(3k,4)) < N`; for HotpotQA's
+    7405-row dev split the boundary is k ~= 1365. Measured:
+
+        sample(300) subset of sample(750)   True
+        sample(750) subset of sample(1365)  True
+        sample(750) subset of sample(1400)  False   (overlap 722/750)
+        sample(750) subset of sample(5000)  False   (overlap 739/750)
+
+    So "n=300 is a strict subset of n=750" is correct BY LUCK, and the planned
+    n=5000 rerun will NOT contain 11 of the 750 selection-set questions — the
+    free check on shared questions that SPEC §5 banks on silently stops existing.
+    It can also differ between CPython versions, i.e. between local Windows and
+    Kaggle Linux.
+
+    Use `exclude=` to construct disjointness explicitly (§5e) and this to check
+    subset claims. Never infer either from the seed.
+    """
+    a = {q["question_id"] for q in load_questions(small_n, small_seed, split, config)}
+    b = {q["question_id"] for q in load_questions(big_n, big_seed, split, config)}
+    return a <= b
+
+
 def index_records(records: list[dict]) -> dict:
     """Key agent-call records by (question_id, stage, call_index)."""
     return {
@@ -149,7 +176,13 @@ def build_stage_calls(stage: str, questions: list[dict], idx: dict) -> list[dict
         for q in questions:
             for i, sq in enumerate(sub_questions_for(q, idx)):
                 spec_rec = idx.get((q["question_id"], "step_definer", i))
-                spec = spec_rec["parsed"] if spec_rec else None
+                # SPEC §13b.1: prefer the validated payload; fall back to whatever
+                # was salvageable from a failed call rather than discarding it.
+                # The call still counts as a parse failure — this only stops a
+                # good search_terms list being thrown away with an empty entity.
+                spec = None
+                if spec_rec:
+                    spec = spec_rec["parsed"] or spec_rec.get("salvaged")
                 calls.append({
                     "question_id": q["question_id"],
                     "call_index": i,

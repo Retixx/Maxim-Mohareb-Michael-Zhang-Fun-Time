@@ -89,7 +89,20 @@ def attribute_span(span: str, index: list[dict]) -> set:
         return set()
     hits = set()
     for s in index:
-        if n in s["norm"] or s["norm"] in n:
+        sn = s["norm"]
+        if n in sn:
+            # Span is a fragment of this sentence. The span already cleared the
+            # length bar, so this direction is safe.
+            hits.add((s["title"], s["sent_id"]))
+        elif sn in n and len(sn) >= MIN_ATTRIBUTABLE_CHARS:
+            # Span swallowed this whole sentence. SPEC §13b.2: the length guard
+            # must apply to the SENTENCE here, not the span. Without it any
+            # context sentence shorter than the span could be claimed by a
+            # correct span — including sentences in *distractor* paragraphs. A
+            # correct verbatim gold span was co-matching a 7-character distractor
+            # ("in 1804"), dropping precision from 1.00 to 0.50 on that question.
+            # The published MIN_ATTRIBUTABLE_CHARS sweep could not detect this:
+            # sweeping the constant only ever moved the span-side guard.
             hits.add((s["title"], s["sent_id"]))
     return hits
 

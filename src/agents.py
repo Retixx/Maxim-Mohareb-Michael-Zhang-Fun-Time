@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 
 from . import prompts
 from .models import generate_batch
-from .parsing import parse_output
+from .parsing import parse_output, salvage
 
 MAX_SUB_QUESTIONS = 3
 
@@ -103,6 +103,9 @@ def run_calls(
     records = []
     for call, gen in zip(calls, gens):
         status, parsed = parse_output(role, gen["raw_output"], gen["hit_token_cap"])
+        # SPEC §13b.1: a failed call may still carry usable fields. Recorded
+        # separately so parse_status stays exactly what it was.
+        salvaged = None if status == "ok" else salvage(role, gen["raw_output"])
         conf = {k: gen[k] for k in ("mean_logprob", "min_logprob", "mean_entropy")
                 if k in gen}
         records.append(
@@ -120,6 +123,7 @@ def run_calls(
                 "raw_output": gen["raw_output"],
                 "parse_status": status,
                 "parsed": parsed,
+                "salvaged": salvaged,
                 "prompt_version": prompts.PROMPT_VERSION,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }

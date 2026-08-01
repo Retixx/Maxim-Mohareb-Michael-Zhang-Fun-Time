@@ -725,7 +725,74 @@ Found by audit 2026-08-01. All are repo defects, not design changes.
 12. **`gate2_report.py` Table 2b bootstraps per-call latency, which pseudo-replicates ~16x.** `latency_s` is batch wall-time divided by batch size, so all 16 calls in a batch carry the *same* value — only 43–101 distinct values exist per (run, stage). Bootstrapping over calls treats them as independent and yields CIs roughly 5x too narrow: planner reads +0.0735 s [+0.0704, +0.0765] where the honest batch-level comparison is 0.154 [0.147, 0.162] vs 0.228 [0.217, 0.240]. The printed caveat covers the *units* but not the CI width. Resample batches, not calls. Substantively: planner (+48%) and step_definer (+26%) slow down under 4-bit above session noise; the extractor's +9.1% does **not** clear the cross-run fp16 noise band for that stage (0.946–1.053) and must not be reported as resolved.
 13. **`PROGRESS.md` claims QA's parse delta "projects to [−0.65, −0.01], significantly *better* under 4-bit".** The realised n=750 value is −0.267 [−0.667, **0.000**] — the upper bound is exactly zero. Do not claim significance. Fix the claim where it appears.
 
-### 13b. OPEN — needs a human decision at Gate 3, do NOT change unilaterally
+### 13b. RESOLVED 2026-08-01 by human decision. Fixes on `spec-v3-13b-fixes`.
+
+All four were raised as open. The human directed that they be fixed. What each fix
+actually moved is recorded here, because two of them touch already-published numbers
+and one **retracts a significance claim**.
+
+**1. Step Definer empty `target_entity` — option (b) implemented.** `parse_output` is
+untouched, so no parse-failure number moves (verified: 0 status changes over the five
+n=750 runs). A new `parsing.salvage()` recovers usable fields from *already-failed*
+calls, recorded in a separate `salvaged` record field, and `build_stage_calls` feeds it
+to the Extractor when `parsed` is None. **62 of the 63 Step Definer failures carry a
+usable `search_terms` list** that was previously discarded along with the empty entity.
+The taxonomy still counts them as failures — only the accuracy leak is closed. This
+changes generation, so it applies to FUTURE runs only and cannot be backfilled.
+
+**2. `attribute_span` guard — implemented, and it RETRACTS a published result.** The
+`MIN_ATTRIBUTABLE_CHARS` bar now applies to the index sentence in the
+sentence-inside-span direction, not just to the span. At the default 25:
+
+    role           published                    corrected
+    Step Definer   +2.80 [+1.23, +4.38]  sig    +2.82 [+1.25, +4.40]  sig
+    Extractor      +2.18 [+0.08, +4.25]  sig    +2.04 [-0.06, +4.13]  NOT sig
+
+**The Extractor's extraction-accuracy effect is no longer significant at the default
+threshold.** Its *answer* EM effect (+3.20 [+0.67, +5.87]) is a different metric and is
+unaffected. Re-sweeping with the corrected two-sided guard:
+
+    thresh   Step Definer            Extractor
+    0        +1.49 [-0.01,+3.00]     +2.37 [+0.43,+4.29] *
+    10       +1.29 [-0.23,+2.81]     +2.17 [+0.13,+4.15] *
+    25       +2.82 [+1.25,+4.40] *   +2.04 [-0.06,+4.13]
+    40       +3.18 [+1.62,+4.76] *   +2.99 [+0.85,+5.12] *
+    60       +2.76 [+1.21,+4.29] *   +2.24 [+0.14,+4.31] *
+
+Neither role is robust across the whole sweep. The Extractor clears zero at four of five
+thresholds and fails at exactly the default; the Step Definer clears at three of five and
+fails at the two loosest. **The earlier claim "Extractor robust, Step Definer
+threshold-dependent" is withdrawn — both are threshold-dependent, in opposite directions.**
+`MIN_ATTRIBUTABLE_CHARS = 25` was an arbitrary choice and a significance claim must not
+rest on it. Report the sweep, not a single value.
+
+**3. Set-based churn — implemented, prediction 2 unaffected.**
+`mechanism.selection_changed_set` added alongside the sequence version; the pre-registered
+wording is not edited. Pure reorderings are negligible, so both readings agree:
+
+    planner       sequence 89.7%   set 89.6%   reorderings 0.1 pp
+    step_definer  sequence 59.7%   set 57.4%   reorderings 2.3 pp
+    extractor     sequence 75.9%   set 75.6%   reorderings 0.3 pp
+    qa            sequence 26.8%   set 26.8%   reorderings 0.0 pp
+
+Prediction 2 (">50% of extractor calls") holds on either definition. Report both.
+
+**4. Sample nesting — assumption removed.** `pipeline.assert_nested()` added; every
+subset claim must now be checked, never inferred from the seed. Re-verified:
+
+    sample(300) subset of sample(750)   True    overlap 300/300
+    sample(750) subset of sample(1365)  True    overlap 750/750
+    sample(750) subset of sample(1400)  False   overlap 722/750
+    sample(750) subset of sample(5000)  False   overlap 739/750
+
+n=300 ⊂ n=750 is true by luck. The planned n=5000 rerun will **not** contain 11 of the
+750 selection-set questions, so the "free check on shared questions" must be constructed
+with `exclude=`, not assumed.
+
+---
+
+### 13b-original. The items as first raised (kept for the record)
+**Original text follows.**
 
 Each of these would move a number that has already been reported. §0 rule 4 applies:
 raise them, do not silently substitute a fix.
