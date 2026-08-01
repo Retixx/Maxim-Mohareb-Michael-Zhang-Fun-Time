@@ -1,9 +1,15 @@
-"""GATE 2 report (SPEC §11a).
+"""GATE 2 report (SPEC §11a). SUPERSEDED — kept for provenance.
 
-Ad-hoc by design: the spec puts analyze.py at build step 10, after model 2, so the
-Gate 2 tables are produced without it. No figures here — those are step 10.
+This produced the Phase Q numbers recorded in SPEC §14, so it is retained as the
+reference implementation those numbers must be reproduced against at Gate 3
+(SPEC §11a). New analysis goes in `analyze.py` (SPEC §8, §10), not here. Do not
+extend this file; do not delete it either, or §14 loses its provenance.
 
-    python gate2.py <results_dir> [--n 300] [--seed 7]
+Note it reports only `coresident_footprint_mb`, which SPEC §5d shows is the wrong
+number to lead with — it counts one model instance per stage, so a uniform run
+counts four copies of one model. `analyze.py` must report `deduped` alongside it.
+
+    python gate2_report.py <results_dir> [--n 750] [--seed 7]
 
 Produces:
   - accuracy drop from baseline per role, with PAIRED bootstrap 95% CIs
@@ -16,11 +22,14 @@ Produces:
 import argparse
 import collections
 import json
-import random
 import sys
 from pathlib import Path
 
-sys.path.insert(0, r"C:\Users\maxim\Projects\marag-precision")
+# Resolve the repo root from this file, never from an absolute path. SPEC §8:
+# every entrypoint must run unchanged on Windows local, macOS and Kaggle Linux.
+# This previously hardcoded one developer's Windows checkout and broke everywhere
+# else, including on Kaggle where the analysis is actually run.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from src.metrics import bootstrap_ci  # noqa: E402
 
 # SPEC §2: run id -> the single stage quantized in that run.
@@ -72,6 +81,23 @@ def paired_delta_ci(base: dict, other: dict, metric: str, seed: int = 0):
     return mean, lo, hi, len(qids)
 
 
+def _deduped(meta: dict) -> float:
+    """Weight bytes for a single-process deployment (SPEC §5d).
+
+    Recomputed here rather than read from `deduped_footprint_mb`, because the
+    Phase Q runs in results/ predate that field. Stage metadata written before
+    v2 has no per-stage `model_id` either — those runs are single-model by
+    construction, so fall back to the run-level id.
+    """
+    default_model = meta.get("model_id")
+    seen = {}
+    for s in (meta.get("stages") or {}).values():
+        fp = s.get("weight_footprint_mb")
+        if fp:
+            seen[(s.get("model_id", default_model), s.get("precision"))] = fp
+    return sum(seen.values())
+
+
 def parse_rate(calls, stage):
     c = collections.Counter(r["parse_status"] for r in calls if r["stage"] == stage)
     total = sum(c.values())
@@ -84,7 +110,7 @@ def parse_rate(calls, stage):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("results_dir")
-    ap.add_argument("--n", type=int, default=300)
+    ap.add_argument("--n", type=int, default=750)
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--model", default="qwen2.5-1.5b",
                     help="model slug in the filenames, e.g. llama-3.2-3b")
@@ -400,12 +426,19 @@ def main():
 
     # ---- memory: the controlled constant ------------------------------------
     print("\n" + "-" * 78)
-    print("MEMORY (SPEC §7: identical across runs 1-4 by construction)")
+    print("MEMORY — two topologies (SPEC §5d)")
+    print("  coresident = one model server per agent (sum over stages)")
+    print("  deduped    = one process loading each distinct (model, precision) once")
+    print("  v1 reported coresident only, so a uniform run counted FOUR copies of one")
+    print("  model and the four quantized runs appeared to 'save' 1874 MB. Deduped,")
+    print("  they COST an extra 1070 MB: mixing precisions is what forces a second")
+    print("  resident copy. No accuracy result depends on this; the framing did.")
     print("-" * 78)
-    print(f"  baseline coresident : {base['meta'].get('coresident_footprint_mb')} MB")
-    for rid in QUANTIZED_STAGE:
-        if runs[rid]:
-            print(f"  {rid:<20}: {runs[rid]['meta'].get('coresident_footprint_mb')} MB")
+    print(f"  {'run':<20}{'coresident':>12}{'deduped':>10}")
+    for label, run in [("baseline", base)] + [(k, v) for k, v in runs.items() if v]:
+        m = run["meta"]
+        print(f"  {label:<20}{m.get('coresident_footprint_mb', 0):>10.1f} MB"
+              f"{_deduped(m):>8.1f} MB")
 
 
 if __name__ == "__main__":

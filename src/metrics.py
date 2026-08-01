@@ -83,10 +83,26 @@ def auroc(scores: list[float], labels: list[float]) -> float:
 
 def expected_calibration_error(confidences: list[float], labels: list[float],
                                n_bins: int = 10) -> float:
-    """Standard binned ECE. `confidences` must already be on a [0, 1] scale."""
+    """Standard binned ECE. `confidences` must already be on a [0, 1] scale.
+
+    That precondition is now enforced. The bin predicate assigns only values in
+    [0, 1] to a bin while `total` counts every pair, so out-of-range inputs were
+    silently dropped from the numerator and kept in the denominator — pushing the
+    result toward 0.0, which reads as "perfectly calibrated". Every confidence
+    field this pipeline logs (`mean_logprob`, `min_logprob`, `mean_entropy`) is
+    out of range, so feeding the obvious field to this function for SPEC §5b
+    prediction 4 returned a clean-looking 0.0. Fail instead: exp() a mean logprob
+    to get a probability first.
+    """
     pairs = [(c, l) for c, l in zip(confidences, labels) if c is not None]
     if not pairs:
         return float("nan")
+    bad = [c for c, _ in pairs if not 0.0 <= c <= 1.0]
+    if bad:
+        raise ValueError(
+            f"{len(bad)} confidence values outside [0, 1] (e.g. {bad[0]!r}). ECE is "
+            "defined on probabilities; pass exp(mean_logprob), not a raw logprob."
+        )
     total = len(pairs)
     ece = 0.0
     for b in range(n_bins):
@@ -109,6 +125,15 @@ def bootstrap_ci(
     """Percentile bootstrap CI over the mean. Returns (mean, lo, hi).
 
     SPEC §5: 10k resamples, 95% interval, on every reported number.
+
+    `values` is sorted first. The RNG draws *indices*, so without this the same
+    multiset in a different order gives a different interval at the same seed —
+    the 750 baseline F1 values return [38.21, 44.64] in file order and
+    [38.16, 44.50] sorted by question id. The shift is only Monte-Carlo sized
+    (~0.15 pp) and moved no conclusion, but a number in the paper must not
+    depend on the order records happened to be appended to a JSONL. Sorting is
+    safe: the bootstrap treats the sample as exchangeable, so the estimator is
+    unchanged — this pins *which* resamples a given seed produces, nothing else.
     """
     if not values:
         return (float("nan"),) * 3
@@ -117,6 +142,7 @@ def bootstrap_ci(
     if n == 1:
         return mean, mean, mean
 
+    values = sorted(values)
     rng = random.Random(seed)
     means = []
     for _ in range(n_resamples):

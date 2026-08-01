@@ -129,8 +129,23 @@ def param_census(model) -> dict:
     return {"nominal_params": nominal, "quantized_params": quantized}
 
 
-def unload(model) -> None:
-    """Drop a model and return its VRAM (SPEC §6: one model resident at a time)."""
+def unload(model=None) -> None:
+    """Reclaim VRAM (SPEC §6: exactly one model resident at a time).
+
+    **The caller must drop its own reference to the model BEFORE calling this.**
+    `del model` here only clears this function's parameter binding; if the caller
+    still holds the object it stays reachable, `gc.collect()` cannot collect it,
+    and `empty_cache()` frees only unused cached blocks — so the weights survive.
+
+    This mattered: the stage loop used to call `unload(model)` while `model` was
+    still bound in the caller, then load the next stage's model into the *same*
+    variable. The rebinding is what finally released the old one, which happens
+    after `from_pretrained` has already allocated the new one — so both models
+    were briefly resident, exactly the thing SPEC §6 exists to prevent. It went
+    unnoticed because the sweeps run on a 16 GB T4 with 2.9 GB models.
+
+    Prefer:  model = tok = None; models.unload()
+    """
     del model
     gc.collect()
     if torch.cuda.is_available():
@@ -263,13 +278,30 @@ def generate_batch(
         gen = out[:, in_len:]
         per_item = elapsed / len(chunk)
 
+        # Every id generation may stop on, not just `tok.eos_token_id`.
+        # `generation_config.eos_token_id` is a LIST for Llama-3.x (three ids)
+        # and for Qwen2.5-Instruct (two). Trimming against the tokenizer
+        # attribute alone leaves a trailing stop token on any sequence that
+        # terminated on one of the others: `output_tokens` comes out one too
+        # high, and in a batch that reached the cap `n_gen == len(ids)` still
+        # holds, so `hit_token_cap` is wrongly True and the record is
+        # mislabelled `truncated`. Qwen2.5 escaped this only because its second
+        # stop id happens to equal the pad id. Model 2 would not have.
+        stop_ids = {tok.pad_token_id, tok.eos_token_id}
+        cfg_eos = getattr(model.generation_config, "eos_token_id", None)
+        if isinstance(cfg_eos, (list, tuple, set)):
+            stop_ids |= set(cfg_eos)
+        elif cfg_eos is not None:
+            stop_ids.add(cfg_eos)
+        stop_ids.discard(None)
+
         n_gen_per_item = []
         rows = []
         for row, attn in zip(gen, enc["attention_mask"]):
-            # Trim trailing pad/eos so output_tokens reflects real generation.
+            # Trim trailing pad/stop tokens so output_tokens reflects real generation.
             ids = row.tolist()
             n_gen = len(ids)
-            while n_gen > 0 and ids[n_gen - 1] in (tok.pad_token_id, tok.eos_token_id):
+            while n_gen > 0 and ids[n_gen - 1] in stop_ids:
                 n_gen -= 1
             hit_cap = len(ids) == max_new_tokens and n_gen == len(ids)
             n_gen_per_item.append(n_gen)

@@ -4,6 +4,193 @@ Handoff log. Read SPEC.md first, then the newest entry here, then `git log`.
 
 ---
 
+## 2026-08-01 (latest) — SPEC v2: SIZE AXIS ADDED. Repairs done. Next: analyze.py, Gate 3.
+
+**SPEC.md rewritten to v2.** v1 answered "which role is most sensitive to quantization?"
+That is done (§14). v2 adds the second axis so the trade-off is measured *inside this
+pipeline* instead of borrowed, and adds the deployment comparison that makes it
+actionable. Four phases now: **Q** quantization ablation (complete), **S** size ablation
+(0.5B swapped into one role, wired, not run), **H** head-to-head (pure re-analysis of Q
+and S — no new runs), **D** role-aware vs uniform vs single-call RAG at matched budget.
+
+**The MA-RAG comparison has been demoted to related work.** v1's Gate 2 asked whether
+our quantization ranking matches MA-RAG's published *size* ranking. That comparison is
+not admissible: different base model (they use LLaMA3-8B/70B and GPT-4o-mini, we use
+1.5B), different pipeline (they retrieve; we don't, and we're non-iterative), different
+n (5600 vs 750), different prompts. Phase S is the in-house control arm that replaces
+it. Cite MA-RAG; do not infer anything from agreeing or disagreeing with it.
+
+### Two real defects found, both with paper-level consequences
+
+**1. `coresident_footprint_mb` was counting four copies of one model (SPEC §5d).**
+It sums per-stage footprints, but all four roles share the same weights at the same
+precision in a uniform run. So baseline read 4 x 2944.4 = 11777.6 MB and the quantized
+runs 9903.4 MB, making every configuration look like it "saves the same 1874 MB" — the
+controlled constant SPEC §7 leaned on. Deduplicated by distinct (model_id, precision):
+
+    baseline    2944.4 MB   one instance
+    any *_4bit  4014.6 MB   two instances
+
+**Role-aware allocation does not save 1874 MB, it costs an extra 1070 MB** — mixing
+precisions is exactly what forces a second resident copy. The sign was inverted. No
+accuracy result depends on this; the deployment framing did. Both numbers are now
+logged (`deduped_footprint_mb` is new) and the topology assumption must be stated in
+every figure caption. Note `ma_uniform_4bit` dedupes to 1070.2 MB — *below* every
+single-role quantized run. Uniform allocation is memory-efficient because it is
+uniform, and that is the frontier Phase D has to beat.
+
+**2. The reported baseline EM is the n=300 figure.** n=750 baseline is
+**EM 30.80% [27.47, 34.13], F1 41.38%** — not 34.7 / 44.4. Independently recomputed.
+The gap is sampling noise in the original 300 (shared-300 34.33 vs new-450 28.44,
+permutation p=0.093, all five runs move the same way), but 30.8 sits on the bottom edge
+of SPEC §5a's healthy band rather than mid-band. **Do not quote 34.7% for n=750.**
+
+### Independent verification of §14 (all recomputed from results/)
+
+CONFIRMED exactly: all four paired EM drops and their CIs; qa_4bit's 0.0% parse rate
+(750 statuses all ok, 684 distinct outputs); n=300 is a strict subset of n=750;
+record integrity (750 answers each, identical qid sets, zero duplicate call keys);
+EM/F1 recomputed from raw text with 0 mismatches over 5250 records; `parsed` is null
+iff status != ok; 4.237 GPU-h.
+
+Corrections to earlier claims:
+
+- **"83–91% of each quantized stage's outputs differ"** — actual range is 39.3–91.9%.
+  **QA is 39.3%**, less than half the stated floor. Restate per role; the sentence is
+  load-bearing for "quantization really applied."
+- **"QA projects to [−0.65, −0.01], significantly better under 4-bit"** — realised value
+  is −0.267 [−0.667, **0.000**]. Upper bound is exactly zero. Not significant.
+- **"baseline had 2 failures"** is QA-stage only; baseline has **118** across all stages.
+- **The §10 Figure 3 re-cuts are not "pooled, so n is effectively doubled."** Stacking
+  two runs' per-question deltas reuses the same questions against the same baseline —
+  pseudo-replication. At n=750 it flips a call: format-heavy +1.87 [+0.13, +3.53]
+  stacked vs [−0.07, +3.87] question-clustered. The *contrast* was always computed
+  correctly and is unaffected.
+- **Perturbing the Planner changes run shape:** planner_4bit has 1605 step_definer *and*
+  1605 extractor calls (165 of 750 questions drew a different sub-question count), so
+  downstream stages pair with baseline on **1516** keys, not 1597. Intersect, never assume.
+- **Determinism confirmed from a second direction:** in extractor_4bit and qa_4bit every
+  unquantized upstream stage is bit-identical to baseline (0.0% divergence).
+
+### Repairs landed (SPEC build step 10 + 11, §13a)
+
+- `deduped_footprint_mb` added; both footprints logged; runner prints both
+- per-stage `model_id` in run metadata **and on every call record** — Phase S is
+  unanalysable without it, since the base model now varies within a run
+- **per-stage model support**: `{model: small, precision: fp16}` per stage, resolved via
+  a `models:` alias map, backward compatible with bare precision strings so every Phase Q
+  run definition still resolves unchanged. Unit-tested incl. all five error paths.
+- consecutive stages sharing a (model, precision) now reuse the loaded model (baseline
+  goes from 4 loads to 1). Peak counter still reset per stage, so peaks stay comparable.
+- runner walks only the stages a run defines, in canonical order — ready for the
+  one-stage `single_*` runs of Phase D
+- `gate2_report.py`'s hardcoded `C:\Users\maxim\...` path removed (it broke on every
+  machine but one, *including Kaggle where the analysis actually runs*)
+- `load_questions` now reads `dataset.name/config/split` from the config — they were
+  present but dead — and takes `exclude=` for SPEC §5e's disjoint confirmation set,
+  with the disjointness enforced by assertion, not assumed
+- `bootstrap_ci` made order-invariant (it drew indices, so record order changed the
+  interval at a fixed seed). Point estimates identical; one bound moved within
+  Monte-Carlo noise — see the Gate 3 note in SPEC §14 so the diff doesn't fail spuriously.
+- `mechanism.selection_changed` handles scalar fields: QA's `answer` is a string, and
+  the old code iterated it *character by character*. Verified behaviour-preserving on
+  the real corpus (0 disagreements over 4494 calls) and correct on the whitespace cases
+  the old code got wrong.
+- `pipeline.build_stage_calls` no longer binds a local named `evidence`, which shadowed
+  the imported module for the whole function
+- README rewritten (it claimed build steps 3–12 were unimplemented and documented a
+  `--precision` flag smoke_test.py does not have); `.gitignore` no longer ignores
+  `results/` wholesale, which had made `git add -A` silently skip every new result
+- Phase S and the Phase D uniform arms added to `config/experiment.yaml`
+
+### Second audit pass — bugs that would have corrupted Phase S
+
+**The JSON blob finder penalised chatty models, which would have faked prediction 5.**
+`_find_json_blob` did two things it should not: it replaced the whole output with the
+first ```` ``` ```` block (so a model that reasoned inside a fence and emitted correct
+JSON *after* it scored `malformed_json`), and it committed to the first `{`/`[` anywhere
+in the string (so a brace in prose, or a `{"note": "thinking"}` preamble, hijacked the
+parse — the preamble case reporting `schema_mismatch` for a model whose very next object
+had exactly the right fields). Latent on Qwen2.5-1.5B, but it penalises **verbosity**,
+and Phase S's 0.5B model and Llama-3.2 are both chattier. It would have surfaced as
+format damage under the treatment — a spurious confirmation of SPEC §5b prediction 5,
+on the one prediction Phase S exists to test.
+
+Now scans top-level candidates and takes the first satisfying the role's schema.
+**Verified byte-for-byte: 33,426 call records replayed, 0 published statuses changed.**
+An intermediate version that scanned *every* bracket rather than top-level ones changed
+388 statuses — a truncated object very often contains a complete inner array, which it
+mistook for the payload — so candidates must not descend into an unterminated structure.
+
+Also fixed in the taxonomy: `schema_mismatch` was relabelled `truncated` whenever the
+token cap was hit, contradicting the precedence documented in the same docstring. A
+complete, well-formed object with wrong fields is a schema error; the cap being hit
+alongside it is a coincidence. Did not fire on model 1 (no QA call reached its 48-token
+cap at n=750) but it would have bled schema errors into the truncation bucket.
+
+**A regression from earlier today, caught and fixed.** The model-reuse optimization reset
+the peak-VRAM counter *before* unloading the outgoing model, so its bytes became the
+incoming stage's peak floor — `qa_small`'s 0.5B QA stage would have reported the 1.5B
+footprint it replaced. Reset now happens once nothing stale is resident.
+
+**Other fixes this pass.**
+- `generate_batch` trimmed against `tok.eos_token_id` only. `generation_config.eos_token_id`
+  is a **list** for Llama-3.x (3 ids) and Qwen2.5-Instruct (2). A sequence stopping on
+  any other stop id kept that token: `output_tokens` off by one, and in a capped batch
+  `hit_token_cap` wrongly True → mislabelled `truncated`. Qwen escaped only because its
+  second stop id equals the pad id. Model 2 would not have.
+- Resume silently truncated the memory metadata: a stage that resumed as already-complete
+  writes no `stage_meta`, so footprints were summed over a *subset* of stages and came
+  out smaller, with no warning. Reproduced: kill after planner → 3000 MB instead of 4000.
+  Now suppressed with a loud message rather than under-reported.
+- `result_slug` used the base model only, so `--model-id <llama> --run stepdef_small`
+  would have written Qwen small-stage records into a file named `llama-3.2-3b`. Multi-model
+  runs now carry every model (`stepdef_small_qwen2.5-1.5b+qwen2.5-0.5b_...`); **every
+  Phase Q filename is unchanged**. Added `--small-model-id` for the model-2 pairing.
+- `total_wall_s` accumulated on every invocation including no-op resumes (1100→1200→1300
+  while `stage_wall_s` stayed 400). smoke_test extrapolates GPU-hours from it, which is
+  what SPEC §13's budget criterion is judged on. Now only counts invocations that worked.
+- `expected_calibration_error` silently dropped out-of-range confidences from the
+  numerator while keeping them in the denominator, so feeding it a raw `mean_logprob` —
+  the only confidence field the pipeline logs — returned a clean-looking 0.0. Raises now.
+- Notebook: `N = 750` was decorative (the runner reads it from the config), so editing it
+  only mislabelled the commit; now read from the config. `push_results`' rebase result was
+  never checked, so a conflict left the clone mid-rebase and broke every later push *and*
+  next session's `--ff-only` pull, all swallowed by `capture_output`; it now aborts loudly.
+
+**Verified correct, so nobody re-audits them:** `metrics.auroc` (matched a brute-force
+Mann-Whitney reference on 3000 fuzz cases with heavy ties, 0 mismatches); EM/F1
+normalization against the official HotpotQA script; resume duplicate-safety across
+kill-mid-stage and no-op reruns; `sequence_confidence` logit alignment under left padding.
+
+**Four findings are NOT fixed because they would move published numbers — see SPEC §13b.**
+They need a human decision at Gate 3: the Step Definer's parse-failure rate is mostly an
+empty-`target_entity` check the parser claims not to perform (55 of 63 failures) and it
+discards good `search_terms` with it; `evidence.attribute_span` applies its length floor
+to the span but not the index sentence, so short *distractor* sentences get claimed by
+correct spans; selection churn compares ordered lists while prediction 2 says "set"; and
+`random.sample` nesting is a CPython detail that **breaks above k≈1365**, so the planned
+n=5000 rerun will not contain 11 of the 750 selection questions.
+
+**Known issues, not yet fixed.**
+- `analyze.py` still does not exist (SPEC §8/§10 require it). **This is build step 12
+  and the next thing to do.** It must reproduce §14 before Phase S runs — two
+  implementations disagreeing means one is wrong, and Gate 3 blocks on that diff.
+- `gate2_report.py` Table 2b bootstraps per-*call* latency, but `latency_s` is batch
+  wall-time / batch size, so all 16 calls in a batch share one value. CIs come out ~5x
+  too narrow. Resample batches. Substantively: planner (+48%) and step_definer (+26%)
+  slow under 4-bit above noise; **the extractor's +9.1% does not** clear the cross-run
+  fp16 band for that stage and must not be reported as resolved.
+- `bootstrap_ci` is a pure-Python double loop; fine at n=750, will dominate wall-time at
+  the planned n=5000. Vectorize before that rerun.
+- Nothing in Phase S/D has been executed. All of the above is code and design only.
+
+**Next.** Build step 12 (`analyze.py`), then **STOP at Gate 3**. Do not start Phase S
+before Gate 3 passes — the whole point of the gate is that the analysis code is
+trustworthy before new data is generated with it.
+
+---
+
 ## 2026-07-29 (latest) — n=750 TIER COMPLETE. At GATE 2 (awaiting human).
 
 **All five runs at n=750, seed 7, Tesla T4, 4.24 GPU-h.** 750 answers each, identical

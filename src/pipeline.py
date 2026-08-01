@@ -17,28 +17,54 @@ from .metrics import exact_match, f1_score
 _HOTPOT_SOURCES = ("hotpotqa/hotpot_qa", "hotpot_qa")
 
 
-def load_questions(n: int, seed: int = 0, split: str = "validation") -> list[dict]:
+def load_questions(
+    n: int,
+    seed: int = 0,
+    split: str = "validation",
+    config: str = "distractor",
+    name: str | None = None,
+    exclude: set | None = None,
+) -> list[dict]:
     """Load `n` HotpotQA distractor-setting questions.
 
     SPEC §3: distractor setting, dev split, no retriever — the 10 provided
     paragraphs (2 gold + 8 distractors) are used directly.
+
+    `exclude` is a set of question_ids that must NOT appear in the sample, used
+    to draw the confirmation set disjointly from the selection set (SPEC §5e).
+    Disjointness cannot be got by changing the seed: `random.sample` is nested in
+    k for a fixed seed but says nothing across seeds, and two independent
+    750-question samples from 7405 overlap by ~76 in expectation. The exclusion
+    is applied to the index space BEFORE sampling, so the returned sample is
+    exactly n and provably disjoint — see the assertion at the end.
     """
     from datasets import load_dataset
 
+    sources = (name,) + _HOTPOT_SOURCES if name else _HOTPOT_SOURCES
     ds = None
     errors = []
-    for src in _HOTPOT_SOURCES:
+    for src in sources:
         try:
-            ds = load_dataset(src, "distractor", split=split)
+            ds = load_dataset(src, config, split=split)
             break
         except Exception as e:  # noqa: BLE001 - report all attempts if none work
             errors.append(f"{src}: {type(e).__name__}: {e}")
     if ds is None:
-        raise RuntimeError("could not load HotpotQA distractor:\n  " + "\n  ".join(errors))
+        raise RuntimeError(
+            f"could not load {config}/{split}:\n  " + "\n  ".join(errors)
+        )
 
     # Seeded sample rather than head(n), so a subset is not biased by the
     # dataset's own ordering. Reproducible for a given (n, seed).
-    idx = sorted(random.Random(seed).sample(range(len(ds)), n))
+    pool = range(len(ds))
+    if exclude:
+        pool = [i for i in pool if ds[i]["id"] not in exclude]
+        if len(pool) < n:
+            raise ValueError(
+                f"only {len(pool)} questions remain after excluding "
+                f"{len(exclude)}; cannot draw n={n}"
+            )
+    idx = sorted(random.Random(seed).sample(pool, n))
 
     out = []
     for i in idx:
@@ -61,6 +87,10 @@ def load_questions(n: int, seed: int = 0, split: str = "validation") -> list[dic
                 ),
             }
         )
+    if exclude:
+        # SPEC §5e requires this to be enforced, not assumed.
+        overlap = {q["question_id"] for q in out} & set(exclude)
+        assert not overlap, f"confirmation set overlaps selection set on {len(overlap)} ids"
     return out
 
 
@@ -129,15 +159,18 @@ def build_stage_calls(stage: str, questions: list[dict], idx: dict) -> list[dict
 
     if stage == "qa":
         for q in questions:
-            evidence = []
+            # NOT named `evidence`: that would bind a local of the same name as
+            # the imported `evidence` module for the whole function, turning any
+            # future module use in build_stage_calls into an UnboundLocalError.
+            blocks = []
             for i, sq in enumerate(sub_questions_for(q, idx)):
                 rec = idx.get((q["question_id"], "extractor", i))
                 spans = (rec["parsed"] or {}).get("spans", []) if rec else []
-                evidence.append((sq, spans))
+                blocks.append((sq, spans))
             calls.append({
                 "question_id": q["question_id"],
                 "call_index": 0,
-                "fields": agents.build_qa_fields(q["question"], evidence),
+                "fields": agents.build_qa_fields(q["question"], blocks),
             })
         return calls
 

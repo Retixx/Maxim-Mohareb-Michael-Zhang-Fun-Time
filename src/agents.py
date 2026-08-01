@@ -81,10 +81,15 @@ def run_calls(
     run_id: str,
     batch_size: int = 1,
     log_confidence: bool = False,
+    model_id: str | None = None,
 ) -> list[dict]:
     """Execute a batch of same-role calls and return SPEC §7 log records.
 
     `calls` items: {"question_id": str, "call_index": int, "fields": dict}
+
+    `model_id` is recorded per call, not just per run. SPEC §7: with the size
+    ablation (Phase S) the base model varies *within* a run, so a record carrying
+    only `precision` cannot say which model produced it.
     """
     if not calls:
         return []
@@ -106,6 +111,7 @@ def run_calls(
                 "run_id": run_id,
                 "question_id": call["question_id"],
                 "stage": role,
+                "model_id": model_id,
                 "precision": precision,
                 "call_index": call["call_index"],
                 "prompt_tokens": gen["prompt_tokens"],
