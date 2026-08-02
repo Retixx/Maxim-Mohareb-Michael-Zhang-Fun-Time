@@ -38,6 +38,40 @@ That decomposes into three questions, answered in order:
 
 Prior work (MA-RAG, arXiv:2505.20096) built this four-agent pipeline and ablated **model size** per role, reporting that the planner and extractor are critical for multi-hop reasoning and that the QA agent is the one that most needs a high-capacity model. They never varied **numerical precision**.
 
+> **CORRECTION (2026-08-02, read before citing MA-RAG's ordering).** The ranking this
+> project has been quoting — *QA hurts most → Planner ≈ Extractor → Step Definer barely* —
+> is MA-RAG's **2WikiMQA** result. On **HotpotQA**, the dataset we actually use, their own
+> Table 2 is essentially flat. Replacing one agent of a 70B system with an 8B model:
+>
+> | perturbed role | HotpotQA EM | drop | 2WikiMQA EM | drop |
+> |---|---|---|---|---|
+> | none (all 70B) | 50.7 | — | 43.1 | — |
+> | Planner → 8B | 49.2 | **1.5** | 39.1 | 4.0 |
+> | Extractor → 8B | 49.4 | **1.3** | 39.8 | 3.3 |
+> | QA → 8B | 49.7 | **1.0** | 34.5 | **8.6** |
+> | Step Definer → 8B | 49.9 | **0.8** | 42.5 | 0.6 |
+>
+> On HotpotQA all four roles land within **0.7 pp of each other** — no resolvable ordering,
+> and the largest drop is the *Planner*, not the QA agent. The dramatic QA effect is
+> 2WikiMQA-only. MA-RAG report no CIs, so a 0.7 pp spread over 5600 questions is not
+> distinguishable from noise.
+>
+> Two consequences. **(1)** Any sentence comparing our HotpotQA ranking to "MA-RAG's
+> ranking" was comparing against a *different dataset's* result. **(2)** This strengthens
+> the case for Phase S rather than weakening it: on HotpotQA, size-sensitivity per role is
+> an **open question that prior work did not answer**, so measuring it in-house is a
+> contribution rather than a replication.
+
+**Related work that must be cited and distinguished.** *Dissecting Agentic RAG: A
+Component Ablation for Multi-Hop QA with a Local 7B Model* (Shaikh, arXiv:2606.21553,
+June 2026) runs a component ablation over agentic RAG on HotpotQA distractor with
+Qwen2.5-7B-Instruct on a 5000-question sample. It is the closest neighbour to this work
+and reports the most directly comparable numbers we have (§5a). It ablates
+**architectural** components — retrieval loop depth, query decomposition, reranking,
+retrieval strategy — and explicitly does **not** vary quantization or per-component model
+size. The distinction to draw in the paper: *prior work ablates which components a
+pipeline has; we ablate how much capacity each component gets.*
+
 **Why Q2 has to be run in-house.** v1 of this spec compared our quantization ranking directly against MA-RAG's published size ranking. That comparison is not admissible and must not appear in the paper as evidence. It differs in base model (LLaMA3-8B/70B and GPT-4o-mini vs our 1.5B), in pipeline (they retrieve; we use gold+distractor paragraphs directly, and we are non-iterative), in dataset scale (they evaluate on ~5600 HotpotQA dev questions; we use 750), and in prompts. Any of those alone would sink it. MA-RAG's ordering is **related work to cite, not a control arm.** The size ablation below is the control arm.
 
 **Hypothesis (unchanged from v1, still under test):** the cheapest agent to shrink is the most expensive agent to quantize. Rationale — quantization damages output format and calibration while leaving knowledge intact; parameter reduction does the reverse. If true, the two rankings are close to inverted and role-aware allocation has real headroom. If the rankings instead coincide, the honest finding is that one capacity axis is a proxy for the other and uniform allocation is sufficient.
@@ -274,7 +308,31 @@ Failure taxonomy, logged per call:
 | **Parse success rate** (per agent, FP16 1.5B) | > 90% | 70–85% | < 70% |
 | **Answer EM** (FP16 1.5B baseline) | 30–45% | 20–30% | < 15% |
 
-Context for the EM range: fine-tuned SOTA on HotpotQA distractor is ~68–72 EM; GPT-4-class few-shot is ~50–60. A 1.5B–3B model in a four-agent pipeline landing at **35 EM is a healthy result, not a defect.** Do not attempt to "fix" the pipeline toward 70%.
+Context for the EM range: fine-tuned SOTA on HotpotQA distractor is ~68–72 EM; GPT-4-class few-shot is ~50–60. A 1.5B–3B model in a four-agent pipeline landing at **32–35 EM is a healthy result, not a defect.** Do not attempt to "fix" the pipeline toward 70%.
+
+**Published comparators, for the "your accuracy is too low" objection** (§13c):
+
+| system | HotpotQA EM | source |
+|---|---|---|
+| Llama3-Instruct **8B**, standalone, no RAG | **26.0** | MA-RAG, KILT split |
+| GPT-3.5-turbo-1106, standalone | 29.9 | MA-RAG |
+| **ours: Qwen2.5-1.5B, four-agent, n=3000** | **32.2** | §14 |
+| Llama3-Instruct **70B**, standalone, no RAG | 35.5 | MA-RAG |
+| Qwen2.5-**7B**, single-pass dense RAG | 43.1 | Shaikh 2026, distractor, n=5000 |
+| MA-RAG (Llama3-70B) | 50.7 | MA-RAG Table 2 |
+| MA-RAG (GPT-4o-mini) | 52.1 | MA-RAG |
+| Qwen2.5-**7B**, full agentic pipeline | 53.2 | Shaikh 2026, distractor, n=5000 |
+
+**A 1.5B model in this pipeline outperforms a standalone Llama3-8B and sits within
+3.3 points of a standalone Llama3-70B.** That is the answer to anyone calling 32.2% low.
+The gap to Shaikh's 53.2 at 7B is explained by three documented design choices: 4.7x
+fewer parameters, no iterative retrieval loop (§4 — Shaikh measures that single choice at
+7.1 EM), and no reranking.
+
+Caveat when quoting these side by side: MA-RAG evaluates on the KILT split with retrieval
+over full Wikipedia; we and Shaikh use the distractor setting with the 10 paragraphs
+provided. Distractor is generally the easier condition because gold is guaranteed present.
+Cite them as context, never as a controlled comparison.
 
 **These thresholds are for the 1.5B reference configuration only.** The 0.5B model is a smaller model and is *expected* to parse worse and score lower — that is the intervention, not a defect. Do not "fix" a Phase S run because it falls below the table above, and do not apply the §11a Gate FIX-FIRST rule to it. The only thing that would invalidate Phase S is the floor case in §5b's contingencies: the 0.5B model failing so completely that no ranking is measurable.
 
