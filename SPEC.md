@@ -940,6 +940,41 @@ raise them, do not silently substitute a fix.
 
 ---
 
+## 13d. VENUE FIT — measuring on an A100 for an on-device workshop (NEW)
+
+**Target venue: ODI 2026** (On-Device Intelligence, NeurIPS, Sydney, Dec 11/12), 5 pages
+excluding references, non-archival, double-blind, deadline **Aug 29 2026 AoE**. Topic 01
+is compression and quantization under memory constraints; topic 05 is *"benchmarks and
+metrics that jointly assess performance, latency, energy, memory, safety, and reliability
+under realistic deployment conditions."* Both are direct hits. LIGHT (Paris, Dec 12-13)
+and Efficient On-Device AI Agents (Sydney, same deadline) are alternates.
+
+**Running the experiments on an A100 is fine and needs no apology.** The A100 is the
+measurement instrument; the artifact under study is a 1.5B model at 2944 MB dropping to
+1070 MB at 4-bit, which is an on-device budget. Nobody runs a 27,000-question sweep on a
+phone. State the framing explicitly: **memory footprint is device-transferable, the
+measurement platform is not.** The §5d Pareto argument is denominated in bytes, so it
+holds regardless of what silicon produced it.
+
+**What is NOT transferable, and must not be presented as if it were: `latency_s`.**
+It is batch wall-time divided by the batch size (64 in the A100 tier) — inverse
+*throughput* under datacenter serving. On-device inference is batch 1. Quoting a batch-64
+A100 latency in an on-device paper is the error a reviewer at this venue catches first.
+
+### Required: a batch-1 latency probe
+
+Run ~200 questions at `--batch-size 1` on the reference config plus the arms being
+compared. Roughly 11 min per run, 30-45 min total. This produces per-query latency in a
+deployment-shaped configuration, which is what topic 05 asks for and what the main tier
+structurally cannot provide.
+
+**It is a LATENCY-ONLY probe.** Greedy decoding is deterministic for a fixed batch and
+not across re-batchings (§6), so batch-1 generations differ from batch-64 ones. Report
+its timings; **never report its EM, and never pool it with the main tier.** Give it a
+distinct slug so it cannot be mistaken for an accuracy run.
+
+---
+
 ## 13c. ANTICIPATED CRITIQUES — the evaluation, and how it is defended (NEW)
 
 **The evaluation method is sound and standard, but it has six attackable seams.** Five
