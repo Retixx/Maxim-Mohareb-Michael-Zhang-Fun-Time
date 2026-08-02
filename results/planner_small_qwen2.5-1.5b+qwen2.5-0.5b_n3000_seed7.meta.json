@@ -1,0 +1,97 @@
+{
+  "run_id": "planner_small",
+  "model_id": "Qwen/Qwen2.5-1.5B-Instruct",
+  "n": 3000,
+  "seed": 7,
+  "batch_size": 64,
+  "log_confidence": true,
+  "prompt_version": "v5",
+  "stage_precision": {
+    "planner": "fp16",
+    "step_definer": "fp16",
+    "extractor": "fp16",
+    "qa": "fp16"
+  },
+  "stage_models": {
+    "planner": "Qwen/Qwen2.5-0.5B-Instruct",
+    "step_definer": "Qwen/Qwen2.5-1.5B-Instruct",
+    "extractor": "Qwen/Qwen2.5-1.5B-Instruct",
+    "qa": "Qwen/Qwen2.5-1.5B-Instruct"
+  },
+  "stages": {
+    "planner": {
+      "precision": "fp16",
+      "method": "none",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "model_id": "Qwen/Qwen2.5-0.5B-Instruct",
+      "peak_vram_mb": 3563.8,
+      "weight_footprint_mb": 942.3,
+      "calls": 3000,
+      "stage_wall_s": 82.8,
+      "final_batch_size": 64,
+      "oom_autotuned": false,
+      "nominal_params": 494032768,
+      "quantized_params": 0
+    },
+    "step_definer": {
+      "precision": "fp16",
+      "method": "none",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "model_id": "Qwen/Qwen2.5-1.5B-Instruct",
+      "peak_vram_mb": 5025.9,
+      "weight_footprint_mb": 2944.4,
+      "calls": 4652,
+      "stage_wall_s": 180.6,
+      "final_batch_size": 64,
+      "oom_autotuned": false,
+      "nominal_params": 1543714304,
+      "quantized_params": 0
+    },
+    "extractor": {
+      "precision": "fp16",
+      "method": "none",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "model_id": "Qwen/Qwen2.5-1.5B-Instruct",
+      "peak_vram_mb": 25616.3,
+      "weight_footprint_mb": 2944.4,
+      "calls": 4652,
+      "stage_wall_s": 1965.4,
+      "final_batch_size": 64,
+      "oom_autotuned": false,
+      "nominal_params": 1543714304,
+      "quantized_params": 0
+    },
+    "qa": {
+      "precision": "fp16",
+      "method": "none",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "model_id": "Qwen/Qwen2.5-1.5B-Instruct",
+      "peak_vram_mb": 7631.3,
+      "weight_footprint_mb": 2944.4,
+      "calls": 3000,
+      "stage_wall_s": 102.0,
+      "final_batch_size": 64,
+      "oom_autotuned": false,
+      "nominal_params": 1543714304,
+      "quantized_params": 0
+    }
+  },
+  "coresident_footprint_mb": 9775.5,
+  "deduped_footprint_mb": 3886.7,
+  "metadata_complete": true,
+  "git_commit": "5f9a40f9e4702df24e48cab12e5506d26aec03ef",
+  "library_versions": {
+    "torch": "2.13.0+cu130",
+    "transformers": "5.14.1",
+    "bitsandbytes": "0.50.0",
+    "datasets": "5.0.1",
+    "cuda": "13.0"
+  },
+  "gpu_name": "NVIDIA A100-SXM4-40GB",
+  "total_wall_s": 2336.1,
+  "finished_at": "2026-08-02T06:16:29.244073+00:00"
+}
