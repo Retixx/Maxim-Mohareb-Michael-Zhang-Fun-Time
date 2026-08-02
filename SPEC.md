@@ -884,7 +884,7 @@ raise them, do not silently substitute a fix.
 
 ## 13c. ANTICIPATED CRITIQUES — the evaluation, and how it is defended (NEW)
 
-**The evaluation method is sound and standard, but it has five attackable seams.** Four
+**The evaluation method is sound and standard, but it has six attackable seams.** Five
 have real answers; one is a genuine limitation to concede. Write the answers into the
 paper rather than waiting for a referee to find them.
 
@@ -906,24 +906,56 @@ supporting-facts metric.
    Answered by §5f: one pre-registered primary contrast, Holm-corrected secondaries,
    everything per-role explicitly descriptive. Requires the paper to lead with the
    format-heavy vs knowledge-heavy contrast, not the four-way ranking.
-2. **"EM 30.8% is near the floor; your deltas are noise on a broken pipeline."** Answered
+2. **"EM is too brittle for multi-hop QA — you need atomized fact scoring."** Answered
+   empirically, measured on the n=750 baseline (2026-08-01):
+
+   | | count | share |
+   |---|---|---|
+   | EM=1 | 231 | 30.8% |
+   | EM=0 but F1 ≥ 0.5 — arguably correct | 98 | **13.1%** |
+   | EM=0, 0 < F1 < 0.5 | 49 | 6.5% |
+   | EM=0, F1=0 — genuinely wrong | 372 | 49.6% |
+
+   **EM is brittle — 13.1% of questions are near-misses** (`Marvel Comics` vs `Marvel`;
+   `Sir George Cayley` vs `George Cayley`), two thirds pure granularity: 32 where the
+   prediction is a substring of gold, 32 where it contains gold. **But brittleness costs
+   variance, not validity, because every comparison here is a paired delta on the same
+   questions**, so it hits both arms identically and cancels. Demonstrated: EM and F1
+   drops agree in sign on all four roles and to within 0.2 pp on three of four (Extractor
+   +3.20 vs +3.16), and mean answer length is flat across arms (2.18–2.29 words) — so
+   quantization does not change verbosity, which is the only route by which EM could
+   penalise one arm more than another. F1's intervals are no tighter than EM's, so there
+   is no power argument for switching primary metric either.
+
+   **Atomization is not applicable.** Mean predicted answer is 2.24 words. FActScore and
+   SAFE decompose paragraph-length generations into 10–50 claims; the atomic
+   decomposition of a two-word span is the span. Adopting it would also break
+   comparability with MA-RAG and every published HotpotQA number.
+
+   **The legitimate multi-hop concern is different, and §5c already answers it:** EM
+   cannot distinguish real multi-hop reasoning from a lucky guess. That is what
+   supporting-facts ev-F1 is for — it scores the reasoning trace rather than the final
+   string, and it resolved *two* roles at n=750 where EM resolved one. Frame the three
+   metrics as answering three different questions: EM/F1 for comparability with prior
+   work, ev-F1 for multi-hop faithfulness, parse-failure for mechanism.
+3. **"EM 30.8% is near the floor; your deltas are noise on a broken pipeline."** Answered
    by §5a: fine-tuned SOTA on HotpotQA distractor is ~68–72 EM and GPT-4-class few-shot is
    ~50–60, so a 1.5B model in a four-agent pipeline at ~31–35 EM is the expected range,
    not a defect. Reinforced by the parse rates (94.7–99.7% per role) and by the
    determinism check. Report the §5a table in the paper.
-3. **"Your evidence metric is unreliable."** Partly true and must be conceded up front:
+4. **"Your evidence metric is unreliable."** Partly true and must be conceded up front:
    26% of spans are too short to attribute, 17% match nothing, so **absolute ev-F1 is a
    floor, not the true value**. The defence is that only *deltas* are claimed and
    attribution quality is near-identical across arms — which §5c now requires be
    demonstrated per arm, not assumed. §13b item 2 (the index-side length floor) must be
    resolved before ev-F1 goes in a paper.
-4. **"Degraded propagation contaminates the accuracy signal."** On a parse failure the
+5. **"Degraded propagation contaminates the accuracy signal."** On a parse failure the
    pipeline substitutes a fixed fallback rather than retrying, so a failure costs
    accuracy indirectly. This is deliberate (§5 forbids retries, which would destroy the
    parse-failure measurement) and it is *uniform across arms*, so it cannot favour one.
    State the policy explicitly and report the clean-vs-dirty EM split, which the harness
    already computes.
-5. **Genuine limitations — concede, do not defend.** One dataset (HotpotQA). One base
+6. **Genuine limitations — concede, do not defend.** One dataset (HotpotQA). One base
    model family unless a second lands. Greedy decoding with a single question sample, so
    no generation-variance estimate. Qwen2.5-0.5B vs 1.5B differ in depth and width and
    data mix, not only parameter count, so Phase S measures "swap in the smaller sibling",
