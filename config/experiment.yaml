@@ -28,8 +28,18 @@ dataset:
   # dev questions — 18.7x our original n — which is most of why they could resolve
   # a four-way role ranking and we could not.
   #
-  # Costs ~4.0 GPU-h for all five runs (measured 1.61 h at n=300, scaled).
-  n: 750
+  # RAISED TO 3000 for the A100 tier (SPEC §2 "Compute budget"). Sized to the
+  # GPU actually available: Phase Q + Phase S at n=3000 is ~5.2 GPU-h on one
+  # A100, i.e. about half a 10-hour window, leaving margin for downloads, a
+  # smoke test, an OOM retry and one run that has to be redone. n=5000 would fit
+  # the arithmetic and not the reality — a completed n=3000 tier beats a
+  # truncated n=5000 one, and resume does not help if the instance disappears.
+  #
+  # SE of the EM drop goes 2.21 pp (n=750, measured) -> ~1.10 pp, i.e. ~80% power
+  # against a 3 pp effect on a SINGLE test. Per SPEC §5f expect the primary
+  # format-heavy vs knowledge-heavy contrast to resolve and most per-role numbers
+  # not to. The n=750 tier is now PILOT data and must not be pooled with this one.
+  n: 3000
 
   # Seed for sampling the n evaluation questions.
   #
@@ -40,7 +50,13 @@ dataset:
   eval_seed: 7
 
 generation:
-  batch_size: 16        # SPEC §6: start at 16, auto-reduce on OOM
+  # SPEC §6: start here, auto-reduce on OOM. 16 was a 4 GB-card number; on an
+  # A100 use 64 (80 GB) or 32 (40 GB). MUST be identical across every run being
+  # compared: greedy decoding is deterministic for a fixed batch but NOT across
+  # re-batchings, so a run at a different batch size is not comparable to its
+  # baseline. This is measured, not theoretical — 10/300 answers changed between
+  # the n=300 and n=750 tiers from re-batching alone.
+  batch_size: 64
   min_batch_size: 1
 
   # Log per-call answer confidence (mean/min token logprob, mean entropy) so the
@@ -51,7 +67,7 @@ generation:
   # Off by default. It costs roughly one extra prefill per batch, and turning it on
   # mid-project would make wall-time comparisons across runs meaningless. Turn it on
   # for the planned n=5000 rerun, where every run is generated from scratch anyway.
-  log_confidence: false
+  log_confidence: true
 
 results_dir: results
 

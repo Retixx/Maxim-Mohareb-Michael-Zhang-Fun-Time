@@ -107,14 +107,41 @@ The deliverable is **accuracy against deduplicated memory footprint** (§5d, §1
 
 ### Priority order — do not reorder
 
-1. **Phase S on model 1** (4 runs) — makes Q2 answerable and Phase H free. Highest value per GPU-hour in the whole project.
-2. **Phase H analysis** (0 runs) — the central table.
-3. **Phase D on model 1** (8 runs on the confirmation set) — the actionable claim.
-4. **Phase Q + S on model 2** (9 runs) — the generalization claim.
-5. 8-bit tier on model 1 (4 runs), only if time remains.
-6. 3-bit via GPTQ, only if everything above is done.
+1. **Phase Q re-run at the new n on model 1** (5 runs) — the pilot at n=750 resolved one role; the tier has to be regenerated at the chosen n so Q and S share a question set and a batch size.
+2. **Phase S on model 1** (4 runs) — makes Q2 answerable and Phase H free. Highest value per GPU-hour in the project.
+3. **Phase H analysis** (0 runs) — the central table, and the primary test in §5f.
+4. **Phase D on model 1** (8 runs, confirmation set) — the actionable claim.
+5. **Phase Q + S on a second family** (9 runs) — generalization, and the answer to model currency (§3).
+6. 8-bit tier on model 1 (4 runs), only if time remains.
+7. 3-bit via GPTQ, only if everything above is done.
 
-Generalization across architectures is worth more than dose-response on a single model, but Phases S and D come first: they are what turns a single-role sensitivity result into a paper with a recommendation in it.
+Steps 1–3 are the paper. Everything from 4 on is an extension; a 5-page workshop
+submission does not need it.
+
+### Compute budget — sizing n to the GPU you actually have
+
+Measured: Qwen2.5-1.5B, n=750, five runs, **4.24 GPU-h on a Tesla T4**. Decode here is
+memory-bandwidth-bound, where an A100 is roughly 5x a T4, plus better utilization at
+larger batch — call it **6x, conservatively**. Phase S is slightly cheaper than Phase Q
+because the 0.5B stage replaces a 1.5B one. So on one A100:
+
+| n | Phase Q (5 runs) | Phase S (4 runs) | Q+S total | SE of the EM drop |
+|---|---|---|---|---|
+| 750 | 0.7 h | 0.6 h | **1.3 h** | 2.21 pp (measured) |
+| 2000 | 1.9 h | 1.6 h | **3.5 h** | ~1.35 pp |
+| **3000** | **2.8 h** | **2.4 h** | **~5.2 h** | **~1.10 pp** |
+| 5000 | 4.7 h | 4.0 h | **8.7 h** | ~0.86 pp |
+
+**Rule: pick the largest n whose Q+S total is under half your wall-clock budget.** The
+other half absorbs model and dataset download, a smoke test, at least one OOM-autotune
+retry, and the run you will have to redo. n=5000 inside a 10-hour window has no margin
+and is the wrong trade — a completed n=3000 tier beats a truncated n=5000 one, and
+resume does not help if the instance disappears.
+
+At n=3000, SE ≈ 1.10 pp gives ~80% power against a 3 pp effect on a single test. The
+observed Phase Q effects were +3.20 / +1.73 / +0.53 / −1.73 pp, so **expect the primary
+contrast (§5f) to resolve and expect most per-role numbers not to.** That is the honest
+prior, and it is why §5f makes the contrast primary rather than the ranking.
 
 ---
 
@@ -122,7 +149,23 @@ Generalization across architectures is worth more than dose-response on a single
 
 - **Base model 1:** `Qwen/Qwen2.5-1.5B-Instruct` (1.5437B params, 2944.4 MB fp16 — measured)
 - **Small model 1:** `Qwen/Qwen2.5-0.5B-Instruct` (0.49B params, 0.36B non-embedding, 24 layers). **Same family, same tokenizer, same instruction-tuning recipe as the base model.** This matters: it is the closest thing available to a pure parameter-count intervention. It is still not clean — 0.5B and 1.5B differ in depth, width and data mix, not just count — and §12's limitation note covers that.
-- **Base model 2:** `meta-llama/Llama-3.2-3B-Instruct`, with `meta-llama/Llama-3.2-1B-Instruct` as its small model. Different family and tokenizer, same capability tiers. Kaggle only (6.4 GB at FP16). Gated repo: needs an accepted licence and an `HF_TOKEN` secret. Phase 4 of the priority order, not before.
+- **Base model 2 (only if compute remains):** `meta-llama/Llama-3.2-3B-Instruct`, with `meta-llama/Llama-3.2-1B-Instruct` as its small model. Different family and tokenizer, same capability tiers. Gated repo: needs an accepted licence and an `HF_TOKEN`.
+
+> **Why not Llama-3.1-8B.** Two reasons, the first fatal. (1) **The 3.1 family has no
+> small sibling** — it is 8B / 70B / 405B. Phase S requires a same-family, same-tokenizer,
+> same-instruct-recipe smaller model to swap into one role; pairing 3.1-8B with a
+> Llama-3.2 small model crosses a generation and a training recipe, which is exactly the
+> confound §12 says the in-house size ablation exists to remove. (2) 8B is 16 GB at FP16,
+> which is not an on-device budget and not an SLM by the venue's own framing, and it costs
+> ~5x model 1 per run. If a second family is added it must be one with a size ladder:
+> Llama-3.2 (1B/3B) qualifies, Llama-3.1 does not.
+>
+> **Model currency is a known reviewer risk, not an eligibility one.** Qwen2.5 is two
+> generations behind Qwen3.5. No target venue restricts base models. Mitigation, in
+> priority order: (a) state the limitation, (b) add a current-generation second family if
+> compute allows. Do NOT swap model 1 — prompts are frozen at v5 and validated on
+> Qwen2.5, and §12 forbids retuning them per model, so a swap risks a floor effect that
+> cannot be fixed.
 - **Quantization:** `bitsandbytes` via transformers — `load_in_4bit=True` (NF4, double quant, fp16 compute) and `load_in_8bit=True`. Chosen for reliability, not speed. 3-bit requires GPTQ (`gptqmodel`), treat as a separate optional path.
 - **Inference:** HuggingFace `transformers` with **batched generation**. Batching is mandatory, not an optimization — see §6.
 - **Dataset:** HotpotQA, **distractor setting**, dev split (7405 questions). Each question ships with 10 paragraphs (2 gold, 8 distractors) and gold `supporting_facts` labels.
@@ -202,7 +245,15 @@ Failure taxonomy, logged per call:
 > match. Greedy decoding is deterministic for a fixed batch, not across
 > re-batchings.
 
-> **AMENDED FOR v2 (2026-08-01): paired power, not one-sample power.**
+> **AMENDED FOR v2 (2026-08-01): n is now sized to available compute, not fixed.**
+> The two amendments above are the historical record of the 300 -> 750 decision and
+> stand. `config/experiment.yaml` remains authoritative for the current n; §2's
+> compute-budget table is how it gets chosen. **The n=750 tier is now PILOT data** —
+> superseded by whatever tier is generated next, and never pooled with it, for exactly
+> the reason the 300/750 amendment gives. Note the nesting argument used there does not
+> generalise: see §13b item 4.
+>
+> **Paired power, not one-sample power.**
 > Phase H's axis contrast is a *difference of two differences*. Both differences
 > are paired on the same questions against the same baseline, which cancels most
 > of the between-question variance, but the contrast still carries more noise than
@@ -403,6 +454,50 @@ Phase D's allocation is *chosen* using Phase H's results. Scoring it on the same
 Two allocations are built from that rule: `ma_optimized_hi` (roles whose cost CI excludes zero keep FP16) and `ma_optimized_lo` (every role takes its cheaper treatment). They bracket the budget range and give the frontier two points instead of one.
 
 **If the rule produces an allocation identical to a uniform one, that is the finding.** Report it and do not hand-adjust the rule to manufacture a distinct arm.
+
+---
+
+## 5f. MULTIPLICITY — one primary test, everything else descriptive (NEW)
+
+**This is the most likely statistical objection to the paper and it is currently
+unanswered.** Phase Q tests 4 roles. Phase S tests 4 more. Phase H tests 4 contrasts.
+On three metrics (EM, F1, ev-F1) that is up to 36 hypothesis tests, and §14 reports
+"Extractor +3.20 [+0.53, +5.87], SIGNIFICANT" with no correction. Under Bonferroni at
+even 4 tests (α = 0.0125) that interval no longer excludes zero. A referee who checks
+will say the headline result is a multiple-comparisons artifact, and on the current
+framing they would be right.
+
+**Fix: designate one pre-registered primary test and demote the rest, rather than
+correcting 36 tests into oblivion.**
+
+- **PRIMARY (confirmatory, one test, no correction needed).** §5b prediction 3's
+  contrast: pooled cost for format-heavy roles (Step Definer, Extractor) minus
+  knowledge-heavy roles (Planner, QA). This was pre-registered on 2026-07-29, before the
+  confirmatory data existed, and it is a *single* number. It is also better powered than
+  any per-role test because it pools two roles per side. Report it on EM and on ev-F1,
+  and say which was pre-specified as primary — **EM**, because §5 names accuracy primary.
+- **SECONDARY (pre-registered, Holm-corrected).** §5b predictions 5, 6, 7. Four tests.
+  Use Holm–Bonferroni, which is uniformly more powerful than Bonferroni and needs no
+  independence assumption — the tests share a baseline and are positively correlated,
+  which Holm tolerates and Šidák does not.
+- **DESCRIPTIVE (no significance claims at all).** Every per-role number, both rankings,
+  and the Spearman correlation. Report point estimates with CIs and describe them as
+  estimates. **Do not write "significant" next to a per-role result.** Say "the Extractor
+  is the only role whose interval excludes zero uncorrected" — which is true, informative,
+  and not a significance claim.
+
+**Consequence for §14 and for how the paper is written.** The current draft leads with a
+four-way role ranking. It should lead with the format-heavy vs knowledge-heavy contrast,
+because that is the one claim the design can actually license. The ranking becomes a
+figure and a paragraph of description, not the headline. This is a *presentation* change,
+not a re-analysis — every number stays the same.
+
+**Note on Phase H's contrast variance.** `size cost − quantization cost` is a difference
+of two differences, but both are paired against the *same* baseline on the *same*
+questions, so they are positively correlated and Var(A−B) = Var(A) + Var(B) − 2Cov(A,B)
+is materially less than 2·Var. **Compute the paired bootstrap on the per-question
+contrast directly; do not estimate it by adding the two arms' variances.** Doing the
+latter overstates the interval and would bury a real effect.
 
 ---
 
@@ -608,11 +703,11 @@ Steps 1–9 are complete (§14). Continue from step 10.
 11. **Per-stage model support.** Config schema in §8, `{model, precision}` per stage, backward compatible with bare strings. Validate at n=5 that a mixed-model run really loads two different models.
 12. **`analyze.py`.** Figures 1–3 and Tables 1–3 over the *existing* Phase Q results. Must reproduce §14's numbers before Phase S runs — if it cannot reproduce a result already reported, the analysis code is wrong and everything after it is untrustworthy.
     → **STOP. See §11a Gate 3.**
-13. **Phase S**, 4 runs on model 1, selection set (seed 7, n=750).
+13. **Phase S**, 4 runs on model 1, selection set (seed 7, n per §2's compute budget).
 14. **Phase H** analysis. Table 2, Table 3, Figure 2 with both axes. Score predictions 5 and 6.
     → **STOP. See §11a Gate 4.**
 15. **Single-call RAG role** (§4a) plus the disjoint confirmation sampler (§5e), validated at n=5.
-16. **Phase D**, 8 runs on the confirmation set (seed 8, n=750). Figure 4. Score prediction 7.
+16. **Phase D**, 8 runs on the confirmation set (seed 8, drawn with `exclude=`). Figure 4. Score prediction 7.
 17. Phase Q + S on **model 2**, selection set.
 18. 8-bit tier on model 1, if time allows.
 19. 3-bit via GPTQ, only if everything above is done.
@@ -632,6 +727,20 @@ Smoke test: 10 questions, FP16, all four agents, locally. Report raw outputs, pa
 ### GATE 2 — after build step 8 — PASSED 2026-07-29
 
 First complete 4-bit tier on model 1. Outcome recorded in §14.
+
+> **AMENDED 2026-08-01: time-boxed GPU access may collect data before Gate 3.**
+> The gate exists to stop new data being *generated* with analysis code that has never
+> been checked against a known answer. That risk does not apply to the generation path:
+> `runner.py` / `agents.py` / `models.py` / `parsing.py` are the same code that produced
+> the n=750 tier, and the parser change was verified byte-identical on all 33,426
+> existing records. Only `n` and `batch_size` differ.
+>
+> So when GPU access expires on a clock — a rented A100, a workshop deadline — **run
+> Phases Q and S first and analyse afterwards.** The GPU is the scarce resource; the
+> analysis is CPU-bound and has no deadline. Gate 3 still blocks *reporting* anything,
+> and `analyze.py` must still reproduce §14 from the n=750 pilot before any n=3000 number
+> is believed. What is forbidden is skipping the gate, not reordering it against a
+> hardware constraint. Record in `PROGRESS.md` that this amendment was used.
 
 ### GATE 3 — after build step 12 (`analyze.py` reproduces Phase Q)
 
@@ -694,7 +803,7 @@ Then **WAIT**.
 
 ## 13. Acceptance criteria
 
-- `python -m src.runner --config config/experiment.yaml --run baseline` completes n=750 and writes valid JSONL
+- `python -m src.runner --config config/experiment.yaml --run baseline` completes the configured n and writes valid JSONL
 - A mixed-model run (`--run stepdef_small`) loads two *different* models and records the correct `model_id` on every call record
 - A `single_*` run completes with one stage and is skipped, not silently averaged, by four-stage analyses
 - Killing the process mid-run and rerunning resumes without duplicating work
@@ -702,7 +811,7 @@ Then **WAIT**.
 - Parse failures appear in output with correct taxonomy labels, zero retries
 - No absolute or developer-specific path anywhere in the repo; every entrypoint runs on Windows, macOS and Kaggle Linux
 - `deduped_footprint_mb` and `coresident_footprint_mb` are both recorded and differ for any mixed-precision run
-- All five Phase Q runs complete inside ~4 GPU-hours at n=750; Phase S is cheaper (the 0.5B stage is faster) and must not exceed it
+- Phase Q + Phase S complete inside half the available wall-clock, per §2's compute-budget table; Phase S is cheaper than Phase Q (the 0.5B stage replaces a 1.5B one) and must not exceed it
 - `analyze.py` emits every §10 figure and table from `results/` alone, with CIs, and reproduces §14
 
 **Peak VRAM.** v1 required "under 6 GB at FP16 with batch size 16." That was written for n=300 and no longer holds: peak is a max over batches, so at n=750 the extractor stage reaches 7510–8162 MB with the same batch size. Restated: **peak VRAM must stay under 14 GB** (the usable T4 budget) at the configured batch size, and any OOM autotune firing must be recorded in metadata. The 6 GB figure was never a scientific constraint, only a fit-on-the-card one, and the card it referred to is not where the experiment runs.
@@ -770,6 +879,57 @@ raise them, do not silently substitute a fix.
    between CPython versions, i.e. between local Windows and Kaggle Linux. Do not rely on
    nesting: derive every subset relationship explicitly with `exclude=` (§5e) and assert
    it, which `load_questions` now supports.
+
+---
+
+## 13c. ANTICIPATED CRITIQUES — the evaluation, and how it is defended (NEW)
+
+**The evaluation method is sound and standard, but it has five attackable seams.** Four
+have real answers; one is a genuine limitation to concede. Write the answers into the
+paper rather than waiting for a referee to find them.
+
+**What the metrics actually are** (so nobody mis-describes them in the writeup):
+
+| metric | granularity | how it scores |
+|---|---|---|
+| Answer **EM** | whole string | official HotpotQA normalization (lowercase → strip punctuation → strip articles → collapse whitespace), then exact equality |
+| Answer **F1** | token bag | same normalization, multiset overlap of whitespace tokens, harmonic mean of P and R; yes/no/noanswer short-circuit to 0 on mismatch |
+| **ev-F1** (§5c) | discrete `(title, sent_id)` labels | Extractor spans resolved to sentence labels, then **set** P/R/F1 against gold `supporting_facts` |
+
+There is **no claim-level fact atomization** (FActScore / SAFE style) and there should not
+be: that is a long-form-generation metric, HotpotQA answers are 1–4 token spans, and
+deviating would make the numbers incomparable to MA-RAG and to every published HotpotQA
+result. ev-F1 is atomization at the *sentence* level, which is HotpotQA's own official
+supporting-facts metric.
+
+1. **"Your headline is a multiple-comparisons artifact."** The strongest objection.
+   Answered by §5f: one pre-registered primary contrast, Holm-corrected secondaries,
+   everything per-role explicitly descriptive. Requires the paper to lead with the
+   format-heavy vs knowledge-heavy contrast, not the four-way ranking.
+2. **"EM 30.8% is near the floor; your deltas are noise on a broken pipeline."** Answered
+   by §5a: fine-tuned SOTA on HotpotQA distractor is ~68–72 EM and GPT-4-class few-shot is
+   ~50–60, so a 1.5B model in a four-agent pipeline at ~31–35 EM is the expected range,
+   not a defect. Reinforced by the parse rates (94.7–99.7% per role) and by the
+   determinism check. Report the §5a table in the paper.
+3. **"Your evidence metric is unreliable."** Partly true and must be conceded up front:
+   26% of spans are too short to attribute, 17% match nothing, so **absolute ev-F1 is a
+   floor, not the true value**. The defence is that only *deltas* are claimed and
+   attribution quality is near-identical across arms — which §5c now requires be
+   demonstrated per arm, not assumed. §13b item 2 (the index-side length floor) must be
+   resolved before ev-F1 goes in a paper.
+4. **"Degraded propagation contaminates the accuracy signal."** On a parse failure the
+   pipeline substitutes a fixed fallback rather than retrying, so a failure costs
+   accuracy indirectly. This is deliberate (§5 forbids retries, which would destroy the
+   parse-failure measurement) and it is *uniform across arms*, so it cannot favour one.
+   State the policy explicitly and report the clean-vs-dirty EM split, which the harness
+   already computes.
+5. **Genuine limitations — concede, do not defend.** One dataset (HotpotQA). One base
+   model family unless a second lands. Greedy decoding with a single question sample, so
+   no generation-variance estimate. Qwen2.5-0.5B vs 1.5B differ in depth and width and
+   data mix, not only parameter count, so Phase S measures "swap in the smaller sibling",
+   not "remove parameters". The 13.6% footprint gap between the two treatments. Model
+   currency (§3). None of these is fatal for a 5-page workshop paper; all of them look
+   fatal if a referee finds them before you say them.
 
 ---
 

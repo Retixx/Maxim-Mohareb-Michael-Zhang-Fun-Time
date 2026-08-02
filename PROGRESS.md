@@ -4,7 +4,63 @@ Handoff log. Read SPEC.md first, then the newest entry here, then `git log`.
 
 ---
 
-## 2026-08-01 (latest) — SPEC v2: SIZE AXIS ADDED. Repairs done. Next: analyze.py, Gate 3.
+## 2026-08-01 (latest) — RETARGETED for a 10-hour A100. n=3000, batch 64, Qwen2.5 only.
+
+**Venue decided: NeurIPS 2026 workshops, deadline Aug 29 AoE (28 days).** ODI
+(odi2026.github.io, 5pp, Sydney) is the tightest fit — topic 01 is compression and
+quantization under memory constraints, topic 05 is metrics that jointly assess accuracy,
+latency and memory, which is exactly what this harness reports. LIGHT (Paris) and
+Efficient On-Device AI Agents (Sydney, same deadline) also fit. **None has a shared task,
+a prescribed metric, or any restriction on base models** — so Qwen2.5 is eligible
+everywhere and the metric is ours to choose and defend.
+
+**Config retargeted:** `n: 3000`, `batch_size: 64`, `log_confidence: true`.
+n=3000 sizes Phase Q + Phase S to ~5.2 GPU-h on one A100 — about half a 10-hour window,
+leaving margin for downloads, a smoke test, an OOM retry and one run that has to be
+redone. n=5000 fits the arithmetic and not the reality. SE of the EM drop goes
+2.21 pp → ~1.10 pp. `log_confidence` is finally on, so prediction 4 (calibration), the
+only part of §1's mechanism never measured, gets tested. **The n=750 tier is now PILOT
+data**; do not pool it with n=3000, and note the batch size differs so it is not
+comparable call-for-call either.
+
+**Model decision: Qwen2.5 only. NOT Llama-3.1-8B.** Two reasons, the first fatal:
+the 3.1 family is 8B/70B/405B and **has no small sibling**, so Phase S is impossible
+within it — pairing it with Llama-3.2 crosses a generation and a recipe, the exact
+confound the in-house size ablation exists to remove. Second, 8B is 16 GB at fp16, which
+is neither an on-device budget nor an SLM by the venue's framing, and ~5x the compute.
+If a second family is added later it must have a size ladder: Llama-3.2 (1B/3B) does.
+Qwen2.5 being two generations behind Qwen3.5 is a **reviewer risk, not an eligibility
+one** — mitigate by stating it, not by swapping model 1 (prompts are frozen at v5 and
+validated on Qwen2.5; §12 forbids retuning per model, so a swap risks an unfixable floor).
+
+### New in SPEC v2.1
+
+- **§5f MULTIPLICITY — the biggest unaddressed statistical hole.** 4 roles x 2 axes x 3
+  metrics is up to 36 tests, and §14 says "Extractor SIGNIFICANT" with no correction;
+  under Bonferroni at just 4 tests that interval no longer excludes zero. Fixed by
+  designating ONE pre-registered primary test — §5b prediction 3's format-heavy vs
+  knowledge-heavy contrast, which is a single number, was committed before the data, and
+  is better powered because it pools two roles per side. Predictions 5–7 are
+  Holm-corrected secondaries. **Every per-role number is descriptive; do not write
+  "significant" next to one.** This changes how the paper is written — lead with the
+  contrast, not the four-way ranking — but changes no number.
+- **§2 compute budget table** — n vs GPU-hours vs resulting SE, so n is sized to the
+  hardware instead of aspirationally.
+- **§3** — why Llama-3.1-8B is disqualified, and the model-currency risk.
+- **§13c ANTICIPATED CRITIQUES** — the five attackable seams in the evaluation with the
+  answer to each, plus a table stating plainly what the three metrics are: answer EM is
+  whole-string after official HotpotQA normalization, answer F1 is token-bag overlap,
+  ev-F1 is **set** P/R/F1 over discrete `(title, sent_id)` labels. There is no
+  claim-level fact atomization and there should not be — that is a long-form metric, and
+  HotpotQA answers are 1–4 token spans. ev-F1 is atomization at the *sentence* level.
+- **Gate 3 amended:** time-boxed GPU access may collect Phase Q/S data *before*
+  `analyze.py` exists. The gate guards against generating data with unvalidated analysis
+  code; the generation path is unchanged and verified, only the analysis is missing, and
+  the GPU is the resource with a clock on it. Gate 3 still blocks reporting.
+
+---
+
+## 2026-08-01 — SPEC v2: SIZE AXIS ADDED. Repairs done. Next: analyze.py, Gate 3.
 
 **SPEC.md rewritten to v2.** v1 answered "which role is most sensitive to quantization?"
 That is done (§14). v2 adds the second axis so the trade-off is measured *inside this
