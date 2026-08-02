@@ -961,6 +961,32 @@ It is batch wall-time divided by the batch size (64 in the A100 tier) — invers
 *throughput* under datacenter serving. On-device inference is batch 1. Quoting a batch-64
 A100 latency in an on-device paper is the error a reviewer at this venue catches first.
 
+### Do NOT drop the timing measurement — relabel it
+
+Deleting it was considered and rejected. Three changes instead:
+
+1. **Never call a batch-64 number "latency."** It is inverse throughput. Report it as
+   throughput, or as a ratio.
+2. **Report ratios, not absolute seconds.** "Quantizing the extractor makes it 1.09x
+   slower" is valid — paired, same batch size, same hardware, same questions. "Extractor
+   latency is 1.68 s" is not a deployment claim and must not appear.
+3. **Fix the pseudo-replication** (§13a item 12) before quoting any interval: all 64
+   calls in a batch carry one shared timing value, so bootstrapping over calls gives
+   intervals roughly 5x too narrow. Resample batches.
+
+**The finding that would be lost by dropping it.** In the n=750 tier the quantized stage
+was *always* slower — planner 1.48x, step_definer 1.26x, extractor 1.09x, qa 1.08x (the
+last two inside cross-run noise). That is bitsandbytes NF4 paying dequantization overhead
+on every forward pass. The 0.5B model in Phase S goes the other way, roughly 3x faster.
+So at matched memory — 1070 MB quantized against 942 MB small — the two treatments are
+asymmetric in a way that matters to a practitioner:
+
+> **Memory-bound? Either treatment works. Latency-bound? Shrink, don't quantize.**
+
+That is a concrete recommendation, it falls out of data already being logged at zero
+extra cost, and it is exactly the joint accuracy/memory/speed trade-off ODI topic 05 asks
+for. It is also the only part of this project that speaks to *speed* at all.
+
 ### Required: a batch-1 latency probe
 
 Run ~200 questions at `--batch-size 1` on the reference config plus the arms being
