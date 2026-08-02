@@ -511,6 +511,14 @@ def main():
                     help="override the `small` alias. Pair this with --model-id when "
                          "running a Phase S definition on model 2, or the small stage "
                          "silently keeps model 1's sibling.")
+    ap.add_argument("--log-confidence", dest="log_confidence", action="store_true",
+                    default=None, help="force confidence logging on for this run")
+    ap.add_argument("--no-log-confidence", dest="log_confidence", action="store_false",
+                    help="force it off. The confidence pass costs ~4.7 GB at batch 64 "
+                         "and is what pushes a 3B extractor stage toward the 40 GB "
+                         "ceiling. It is teacher-forced and runs strictly AFTER "
+                         "generation, so disabling it cannot change any accuracy "
+                         "number — only the calibration fields are lost.")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
@@ -518,6 +526,8 @@ def main():
         cfg["model_id"] = args.model_id
     if args.small_model_id:
         cfg.setdefault("models", {})["small"] = args.small_model_id
+    if args.log_confidence is not None:
+        cfg.setdefault("generation", {})["log_confidence"] = args.log_confidence
     run(cfg, args.run, args.n, args.seed, args.batch_size)
 
 

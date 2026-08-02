@@ -13,6 +13,12 @@ model_id: Qwen/Qwen2.5-1.5B-Instruct
 # pure parameter-count intervention (SPEC §12's stated limitation).
 models:
   small: Qwen/Qwen2.5-0.5B-Instruct
+  # Third size for the uniform frontier (SPEC §2). 5894 MB at fp16; at batch 64
+  # the extractor stage lands near 34 GB of 40, so run 3B with
+  # --no-log-confidence to drop the ~4.7 GB confidence pass. That pass provably
+  # cannot affect generation (it is teacher-forced and runs strictly after
+  # decoding), so disabling it changes no accuracy number.
+  mid: Qwen/Qwen2.5-3B-Instruct
   # Model 2's pair, for build step 17:
   #   base:  meta-llama/Llama-3.2-3B-Instruct   (via model_id)
   #   small: meta-llama/Llama-3.2-1B-Instruct
@@ -144,3 +150,71 @@ runs:
     step_definer: {model: small, precision: fp16}
     extractor: {model: small, precision: fp16}
     qa: {model: small, precision: fp16}
+
+  # ================= PER-ROLE 8-BIT (dose-response, SPEC §2 priority 6) =======
+  # Third column of the Phase H table: does damage scale monotonically with how
+  # hard you quantize? Same reference model, same n, same seed, same batch, so
+  # these compose directly with the 4-bit and 0.5B tiers already collected.
+  planner_8bit:
+    planner: 8bit
+    step_definer: fp16
+    extractor: fp16
+    qa: fp16
+  stepdef_8bit:
+    planner: fp16
+    step_definer: 8bit
+    extractor: fp16
+    qa: fp16
+  extractor_8bit:
+    planner: fp16
+    step_definer: fp16
+    extractor: 8bit
+    qa: fp16
+  qa_8bit:
+    planner: fp16
+    step_definer: fp16
+    extractor: fp16
+    qa: 8bit
+
+  # ================= UNIFORM FRONTIER (accuracy vs memory, SPEC §10 Fig 4) ====
+  # 3 sizes x 3 precisions. `baseline` IS the 1.5B/fp16 cell and is not re-run;
+  # ma_uniform_small is 0.5B/fp16 and ma_uniform_4bit is 1.5B/4-bit.
+  #
+  # Deduped footprints (SPEC §5d) — a uniform run needs ONE resident instance:
+  #   0.5B  fp16  942   8bit  660   4bit  430
+  #   1.5B  fp16 2944   8bit 1695   4bit 1070
+  #   3B    fp16 5894   8bit 3252   4bit 1931
+  #
+  # The second matched pair lives here: 3B@8bit (3252) vs 1.5B@fp16 (2944), 10%
+  # apart. That is what turns "quantize, don't shrink" from one observation into
+  # a trend across budgets.
+  uni_0.5b_8bit:
+    planner: {model: small, precision: 8bit}
+    step_definer: {model: small, precision: 8bit}
+    extractor: {model: small, precision: 8bit}
+    qa: {model: small, precision: 8bit}
+  uni_0.5b_4bit:
+    planner: {model: small, precision: 4bit}
+    step_definer: {model: small, precision: 4bit}
+    extractor: {model: small, precision: 4bit}
+    qa: {model: small, precision: 4bit}
+  uni_1.5b_8bit:
+    planner: 8bit
+    step_definer: 8bit
+    extractor: 8bit
+    qa: 8bit
+  uni_3b_fp16:
+    planner: {model: mid, precision: fp16}
+    step_definer: {model: mid, precision: fp16}
+    extractor: {model: mid, precision: fp16}
+    qa: {model: mid, precision: fp16}
+  uni_3b_8bit:
+    planner: {model: mid, precision: 8bit}
+    step_definer: {model: mid, precision: 8bit}
+    extractor: {model: mid, precision: 8bit}
+    qa: {model: mid, precision: 8bit}
+  uni_3b_4bit:
+    planner: {model: mid, precision: 4bit}
+    step_definer: {model: mid, precision: 4bit}
+    extractor: {model: mid, precision: 4bit}
+    qa: {model: mid, precision: 4bit}
