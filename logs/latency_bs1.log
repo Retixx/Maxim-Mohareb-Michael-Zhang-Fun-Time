@@ -1,0 +1,78 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+=== run baseline | Qwen/Qwen2.5-1.5B-Instruct | n=200 seed=7 batch=1 prompts=v5 ===
+    planner        Qwen/Qwen2.5-1.5B-Instruct @ fp16
+    step_definer   Qwen/Qwen2.5-1.5B-Instruct @ fp16
+    extractor      Qwen/Qwen2.5-1.5B-Instruct @ fp16
+    qa             Qwen/Qwen2.5-1.5B-Instruct @ fp16
+    [resume] found 1246 completed agent calls on disk
+
+--- stage planner @ Qwen/Qwen2.5-1.5B-Instruct fp16: 200 calls, 0 pending ---
+    (already complete, skipping model load)
+
+--- stage step_definer @ Qwen/Qwen2.5-1.5B-Instruct fp16: 423 calls, 0 pending ---
+    (already complete, skipping model load)
+
+--- stage extractor @ Qwen/Qwen2.5-1.5B-Instruct fp16: 423 calls, 0 pending ---
+    (already complete, skipping model load)
+
+--- stage qa @ Qwen/Qwen2.5-1.5B-Instruct fp16: 200 calls, 0 pending ---
+    (already complete, skipping model load)
+
+
+=== baseline complete: EM 34.5%  F1 44.8%  n=200  wall 0s ===
+    deduped_footprint_mb=2944  (SPEC §5d — the paper's number)
+    coresident_footprint_mb=11778  (one server per agent)
+    -> results/baseline_qwen2.5-1.5b_n200_seed7.jsonl
+    -> results/baseline_qwen2.5-1.5b_n200_seed7.meta.json
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+=== run ma_uniform_4bit | Qwen/Qwen2.5-1.5B-Instruct | n=200 seed=7 batch=1 prompts=v5 ===
+    planner        Qwen/Qwen2.5-1.5B-Instruct @ 4bit
+    step_definer   Qwen/Qwen2.5-1.5B-Instruct @ 4bit
+    extractor      Qwen/Qwen2.5-1.5B-Instruct @ 4bit
+    qa             Qwen/Qwen2.5-1.5B-Instruct @ 4bit
+    [resume] found 1258 completed agent calls on disk
+
+--- stage planner @ Qwen/Qwen2.5-1.5B-Instruct 4bit: 200 calls, 0 pending ---
+    (already complete, skipping model load)
+
+--- stage step_definer @ Qwen/Qwen2.5-1.5B-Instruct 4bit: 429 calls, 0 pending ---
+    (already complete, skipping model load)
+
+--- stage extractor @ Qwen/Qwen2.5-1.5B-Instruct 4bit: 429 calls, 0 pending ---
+    (already complete, skipping model load)
+
+--- stage qa @ Qwen/Qwen2.5-1.5B-Instruct 4bit: 200 calls, 0 pending ---
+    (already complete, skipping model load)
+
+
+=== ma_uniform_4bit complete: EM 28.5%  F1 38.6%  n=200  wall 0s ===
+    deduped_footprint_mb=1070  (SPEC §5d — the paper's number)
+    coresident_footprint_mb=4281  (one server per agent)
+    -> results/ma_uniform_4bit_qwen2.5-1.5b_n200_seed7.jsonl
+    -> results/ma_uniform_4bit_qwen2.5-1.5b_n200_seed7.meta.json
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+=== run ma_uniform_small | Qwen/Qwen2.5-1.5B-Instruct | n=200 seed=7 batch=1 prompts=v5 ===
+    planner        Qwen/Qwen2.5-0.5B-Instruct @ fp16
+    step_definer   Qwen/Qwen2.5-0.5B-Instruct @ fp16
+    extractor      Qwen/Qwen2.5-0.5B-Instruct @ fp16
+    qa             Qwen/Qwen2.5-0.5B-Instruct @ fp16
+    [resume] found 1004 completed agent calls on disk
+
+--- stage planner @ Qwen/Qwen2.5-0.5B-Instruct fp16: 200 calls, 0 pending ---
+    (already complete, skipping model load)
+
+--- stage step_definer @ Qwen/Qwen2.5-0.5B-Instruct fp16: 302 calls, 0 pending ---
+    (already complete, skipping model load)
+
+--- stage extractor @ Qwen/Qwen2.5-0.5B-Instruct fp16: 302 calls, 0 pending ---
+    (already complete, skipping model load)
+
+--- stage qa @ Qwen/Qwen2.5-0.5B-Instruct fp16: 200 calls, 0 pending ---
+    (already complete, skipping model load)
+
+
+=== ma_uniform_small complete: EM 11.5%  F1 19.4%  n=200  wall 0s ===
+    deduped_footprint_mb=942  (SPEC §5d — the paper's number)
+    coresident_footprint_mb=3769  (one server per agent)
+    -> results/ma_uniform_small_qwen2.5-1.5b+qwen2.5-0.5b_n200_seed7.jsonl
+    -> results/ma_uniform_small_qwen2.5-1.5b+qwen2.5-0.5b_n200_seed7.meta.json
