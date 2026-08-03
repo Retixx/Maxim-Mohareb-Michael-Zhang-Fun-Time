@@ -1,0 +1,101 @@
+{
+  "run_id": "uni_0.5b_8bit",
+  "model_id": "Qwen/Qwen2.5-1.5B-Instruct",
+  "n": 3000,
+  "seed": 7,
+  "batch_size": 64,
+  "log_confidence": false,
+  "prompt_version": "v5",
+  "stage_precision": {
+    "planner": "8bit",
+    "step_definer": "8bit",
+    "extractor": "8bit",
+    "qa": "8bit"
+  },
+  "stage_models": {
+    "planner": "Qwen/Qwen2.5-0.5B-Instruct",
+    "step_definer": "Qwen/Qwen2.5-0.5B-Instruct",
+    "extractor": "Qwen/Qwen2.5-0.5B-Instruct",
+    "qa": "Qwen/Qwen2.5-0.5B-Instruct"
+  },
+  "stages": {
+    "planner": {
+      "precision": "8bit",
+      "method": "bitsandbytes-llm.int8",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "llm_int8_threshold": 6.0,
+      "model_id": "Qwen/Qwen2.5-0.5B-Instruct",
+      "peak_vram_mb": 1534.8,
+      "weight_footprint_mb": 601.0,
+      "calls": 3000,
+      "stage_wall_s": 314.3,
+      "final_batch_size": 64,
+      "oom_autotuned": false,
+      "nominal_params": 494032768,
+      "quantized_params": 357826560
+    },
+    "step_definer": {
+      "precision": "8bit",
+      "method": "bitsandbytes-llm.int8",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "llm_int8_threshold": 6.0,
+      "model_id": "Qwen/Qwen2.5-0.5B-Instruct",
+      "peak_vram_mb": 1934.0,
+      "weight_footprint_mb": 601.0,
+      "calls": 4732,
+      "stage_wall_s": 882.0,
+      "final_batch_size": 64,
+      "oom_autotuned": false,
+      "nominal_params": 494032768,
+      "quantized_params": 357826560
+    },
+    "extractor": {
+      "precision": "8bit",
+      "method": "bitsandbytes-llm.int8",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "llm_int8_threshold": 6.0,
+      "model_id": "Qwen/Qwen2.5-0.5B-Instruct",
+      "peak_vram_mb": 15506.3,
+      "weight_footprint_mb": 601.0,
+      "calls": 4732,
+      "stage_wall_s": 2250.8,
+      "final_batch_size": 64,
+      "oom_autotuned": false,
+      "nominal_params": 494032768,
+      "quantized_params": 357826560
+    },
+    "qa": {
+      "precision": "8bit",
+      "method": "bitsandbytes-llm.int8",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "llm_int8_threshold": 6.0,
+      "model_id": "Qwen/Qwen2.5-0.5B-Instruct",
+      "peak_vram_mb": 2704.3,
+      "weight_footprint_mb": 601.0,
+      "calls": 3000,
+      "stage_wall_s": 189.8,
+      "final_batch_size": 64,
+      "oom_autotuned": false,
+      "nominal_params": 494032768,
+      "quantized_params": 357826560
+    }
+  },
+  "coresident_footprint_mb": 2404.0,
+  "deduped_footprint_mb": 601.0,
+  "metadata_complete": true,
+  "git_commit": "e1eb8c88eb4dd96fbc8712ebe1a094183fe622e4",
+  "library_versions": {
+    "torch": "2.13.0+cu130",
+    "transformers": "5.14.1",
+    "bitsandbytes": "0.50.0",
+    "datasets": "5.0.1",
+    "cuda": "13.0"
+  },
+  "gpu_name": "NVIDIA A100-SXM4-40GB",
+  "total_wall_s": 3641.3,
+  "finished_at": "2026-08-03T05:35:47.545493+00:00"
+}
