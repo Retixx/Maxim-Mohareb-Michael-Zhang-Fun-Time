@@ -4,7 +4,7 @@
   "n": 200,
   "seed": 7,
   "batch_size": 1,
-  "log_confidence": true,
+  "log_confidence": false,
   "prompt_version": "v5",
   "stage_precision": {
     "planner": "4bit",
@@ -87,7 +87,7 @@
   "coresident_footprint_mb": 4280.8,
   "deduped_footprint_mb": 1070.2,
   "metadata_complete": true,
-  "git_commit": "b23d5910764441cb37679d6d6e10525150f61773",
+  "git_commit": "cef6459dc0749db9372d32c1e52f898981e605f7",
   "library_versions": {
     "torch": "2.13.0+cu130",
     "transformers": "5.14.1",
@@ -97,5 +97,5 @@
   },
   "gpu_name": "NVIDIA A100-SXM4-40GB",
   "total_wall_s": 1901.1,
-  "finished_at": "2026-08-02T09:13:34.047335+00:00"
+  "finished_at": "2026-08-03T17:08:55.478151+00:00"
 }

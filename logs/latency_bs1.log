@@ -1,4 +1,4 @@
-Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+nohup: ignoring input
 === run baseline | Qwen/Qwen2.5-1.5B-Instruct | n=200 seed=7 batch=1 prompts=v5 ===
     planner        Qwen/Qwen2.5-1.5B-Instruct @ fp16
     step_definer   Qwen/Qwen2.5-1.5B-Instruct @ fp16
@@ -24,7 +24,6 @@ Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF
     coresident_footprint_mb=11778  (one server per agent)
     -> results/baseline_qwen2.5-1.5b_n200_seed7.jsonl
     -> results/baseline_qwen2.5-1.5b_n200_seed7.meta.json
-Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
 === run ma_uniform_4bit | Qwen/Qwen2.5-1.5B-Instruct | n=200 seed=7 batch=1 prompts=v5 ===
     planner        Qwen/Qwen2.5-1.5B-Instruct @ 4bit
     step_definer   Qwen/Qwen2.5-1.5B-Instruct @ 4bit
@@ -50,7 +49,6 @@ Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF
     coresident_footprint_mb=4281  (one server per agent)
     -> results/ma_uniform_4bit_qwen2.5-1.5b_n200_seed7.jsonl
     -> results/ma_uniform_4bit_qwen2.5-1.5b_n200_seed7.meta.json
-Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
 === run ma_uniform_small | Qwen/Qwen2.5-1.5B-Instruct | n=200 seed=7 batch=1 prompts=v5 ===
     planner        Qwen/Qwen2.5-0.5B-Instruct @ fp16
     step_definer   Qwen/Qwen2.5-0.5B-Instruct @ fp16
