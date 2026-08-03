@@ -1,0 +1,19 @@
+nohup: ignoring input
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+=== run uni_3b_fp16 | Qwen/Qwen2.5-1.5B-Instruct | n=3000 seed=7 batch=32 prompts=v5 ===
+    planner        Qwen/Qwen2.5-3B-Instruct @ fp16
+    step_definer   Qwen/Qwen2.5-3B-Instruct @ fp16
+    extractor      Qwen/Qwen2.5-3B-Instruct @ fp16
+    qa             Qwen/Qwen2.5-3B-Instruct @ fp16
+    [resume] found 12215 completed agent calls on disk
+
+--- stage planner @ Qwen/Qwen2.5-3B-Instruct fp16: 3000 calls, 0 pending ---
+    (already complete, skipping model load)
+
+--- stage step_definer @ Qwen/Qwen2.5-3B-Instruct fp16: 7553 calls, 0 pending ---
+    (already complete, skipping model load)
+
+--- stage extractor @ Qwen/Qwen2.5-3B-Instruct fp16: 7553 calls, 5891 pending ---
+Loading weights:   0%|                                                                                                                   | 0/434 [00:00<?, ?it/s]Loading weights:   0%|▏                                                                                                          | 1/434 [00:00<01:08,  6.31it/s]Loading weights:   9%|█████████▍                                                                                               | 39/434 [00:00<00:02, 165.42it/s]Loading weights:  17%|██████████████████▏                                                                                      | 75/434 [00:00<00:01, 225.64it/s]Loading weights:  25%|██████████████████████████                                                                              | 109/434 [00:00<00:01, 261.70it/s]Loading weights:  32%|████████████████████████████████▊                                                                       | 137/434 [00:00<00:01, 258.39it/s]Loading weights:  39%|████████████████████████████████████████▉                                                               | 171/434 [00:00<00:00, 269.37it/s]Loading weights:  48%|█████████████████████████████████████████████████▌                                                      | 207/434 [00:00<00:00, 273.66it/s]Loading weights:  56%|██████████████████████████████████████████████████████████▍                                             | 244/434 [00:00<00:00, 299.66it/s]Loading weights:  64%|██████████████████████████████████████████████████████████████████▊                                     | 279/434 [00:01<00:00, 299.65it/s]Loading weights:  73%|███████████████████████████████████████████████████████████████████████████▋                            | 316/434 [00:01<00:00, 310.65it/s]Loading weights:  83%|██████████████████████████████████████████████████████████████████████████████████████▌                 | 361/434 [00:01<00:00, 347.75it/s]Loading weights:  91%|███████████████████████████████████████████████████████████████████████████████████████████████▏        | 397/434 [00:01<00:00, 337.93it/s]Loading weights: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████▌| 432/434 [00:01<00:00, 332.53it/s]Loading weights: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████| 434/434 [00:01<00:00, 287.46it/s]
+    loaded in 3.1s
+    32/5891 (bs=32)    64/5891 (bs=32)    96/5891 (bs=32)    128/5891 (bs=32)    160/5891 (bs=32)    192/5891 (bs=32)    224/5891 (bs=32)    256/5891 (bs=32)    288/5891 (bs=32)    320/5891 (bs=32)    352/5891 (bs=32)    384/5891 (bs=32)    416/5891 (bs=32)    448/5891 (bs=32)    480/5891 (bs=32)    512/5891 (bs=32)    544/5891 (bs=32)    576/5891 (bs=32)    608/5891 (bs=32)    640/5891 (bs=32)    672/5891 (bs=32)    704/5891 (bs=32)    736/5891 (bs=32)    768/5891 (bs=32)
