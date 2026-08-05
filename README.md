@@ -1,108 +1,152 @@
-# marag-precision
+# Role-aware SLM multi-agent QA
 
-*(repo: Maxim-Mohareb-Michael-Zhang-Fun-Time)*
+Experimental harness for a workshop study of memory-aware capacity allocation
+across four SLM agent roles: Planner, Step Definer, Extractor, and QA.
 
-Experimental harness for **Role-Aware Capacity Allocation in Multi-Agent RAG**
-(NeurIPS 2026 workshop submission, deadline Aug 29 2026).
+The system answers HotpotQA distractor questions from the ten paragraphs supplied
+with each example. It has no retriever, so results concern provided-context,
+retrieval-free multi-agent QA rather than retrieval quality.
 
-At SLM scale, is a four-agent RAG pipeline better served by spending its memory
-budget unevenly across roles than evenly? Three sub-questions, in order:
+Read [SPEC.md](SPEC.md) before running anything. It is the authoritative
+scientific contract; [config/experiment.yaml](config/experiment.yaml) is its
+machine-readable counterpart.
 
-1. Which role is most sensitive to **quantization**? — answered for model 1 (SPEC §14)
-2. Which role is most sensitive to **parameter reduction**, measured in *this*
-   pipeline rather than borrowed from another paper? — Phase S, not yet run
-3. Does role-aware allocation beat uniform allocation at the same memory
-   footprint, and does either beat plain single-call RAG? — Phase D, not yet run
+## Final design
 
-**Read `SPEC.md` before changing anything.** The scientific design is locked, the
-build order is fixed, and there are mandatory human approval gates.
-`PROGRESS.md` is the session-to-session handoff.
+- Qwen2.5-3B-Instruct FP16 is the uniform multi-agent reference.
+- Primary role comparison: 3B 8-bit versus 1.5B FP16, described as
+  **near-memory-matched**.
+- 3B 4-bit is a mandatory secondary treatment.
+- Five 0.5B FP16 arms establish an appendix-only compliance/capacity floor and
+  never enter allocation selection.
+- A competitive single-call 3B FP16 arm is compared with uniform multi-agent 3B
+  FP16.
+- A role-aware allocation selected from non-tiny ablations is run once and
+  labelled in-sample/exploratory.
+- F1 is primary; Exact Match is co-reported.
 
-## Status
+All arms use the same frozen 1,500 questions. The manifest excludes the exact
+old n=3,000 design-pilot IDs and prompt-development questions:
 
-| Phase | What | State |
-|---|---|---|
-| Q | Quantization ablation, one role at 4-bit | **complete**, model 1, n=750 seed 7 |
-| S | Size ablation, one role at Qwen2.5-0.5B | wired, not run |
-| H | Q-vs-S head-to-head (re-analysis, no new runs) | blocked on S |
-| D | Role-aware vs uniform vs single-call RAG | blocked on H |
-
-Build steps 1–11 of SPEC §11 are done. Next is step 12 (`analyze.py`), then
-**Gate 3**. Phase Q's headline: quantizing the **Extractor** costs +3.20 EM pp
-[+0.67, +5.87] — the only role resolved on answer EM at n=750.
-
-## Setup
-
-```bash
-# Windows / local dev
-py -3.11 -m venv .venv
-.venv/Scripts/python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cu124
-.venv/Scripts/python.exe -m pip install -U "transformers==5.14.1" "bitsandbytes==0.50.0" \
-    "datasets==5.0.1" accelerate pyyaml
+```text
+config/manifests/final_n1500_seed20260805.json
+final ID SHA-256: 5d4cc24872aeb603cbd005f790958199ef4cc993a1e7f048403608603da602af
 ```
 
-Versions are pinned because they affect numerics, and they are recorded in every
-run's metadata. `transformers` 5.x is required: `models.py` passes `dtype=`,
-which replaced `torch_dtype=` in v5.
+The static matrix has 22 runs: the previous 21 arms plus `single_fp16`. The
+selector can add one distinct `ma_optimized_exploratory` execution, so the
+campaign maximum is 23. If it selects an existing uniform/reference arm, no new
+execution is added.
 
-Full sweeps run on Kaggle (T4), not locally — see `notebooks/kaggle_run.ipynb`.
-Local VRAM readings are not trustworthy (SPEC §14).
+## Environment
+
+Production runs target A100 GPUs. Known exercised core versions are Transformers
+5.14.1, bitsandbytes 0.50.0, datasets 5.0.1, and the prior A100 pilot's PyTorch
+2.13.0+cu130/CUDA 13.0 stack. These do not constitute a complete lock.
+
+Before production, run the A100 preflight and commit its complete environment
+artifact: immutable container digest, Python and full package lock, driver/CUDA,
+GPU SKU/UUID, model/tokenizer revisions, dataset revision, and repository commit.
+Every worker must match it. See SPEC section 11.
+
+The model and dataset revisions are already pinned in `config/experiment.yaml`.
+Do not replace them with floating `main` revisions.
 
 ## Running
 
+The runner reads the frozen manifest and fails before model loading if its count,
+hashes, exclusions, or dataset revision do not match.
+
 ```bash
-# one run
-python -m src.runner --config config/experiment.yaml --run stepdef_4bit
+# Smoke/preflight on excluded development data only
+python -X utf8 smoke_test.py --n 10 --run baseline
 
-# size-ablation run — loads two different models in one run
-python -m src.runner --config config/experiment.yaml --run stepdef_small
+# From a clean commit on the selected A100/container, generate and commit the lock
+python -m src.runner --write-environment-lock \
+  --container-ref REGISTRY/IMAGE:TAG --container-digest sha256:IMMUTABLE_DIGEST
+git add config/environment.lock.json && git commit -m "Lock final A100 environment"
+python -m src.runner --validate-environment-lock
 
-# smoke test: 10 questions, every raw output printed for inspection
-python -X utf8 smoke_test.py --n 10
+# First, certify every non-tiny configuration on excluded data and collect the
+# two-repeat reserved-A100 timing benchmark. No final question is touched.
+CUDA_VISIBLE_DEVICES=0 python scripts/run_campaign.py --kind timing --execute
 
-# ...at 4-bit throughout, if fp16 OOMs on a 4 GB card (SPEC §5b contingency)
-python -X utf8 smoke_test.py --n 10 --run ma_uniform_4bit
+# Deterministically inspect the exact 22-arm assignment for any GPU count
+python scripts/run_campaign.py --kind accuracy --workers 4
 
-# Gate 2 report over existing Phase Q results
-python gate2_report.py results --n 750 --seed 7
+# Launch one whole-arm worker per A100 (set a different index/device per process)
+CUDA_VISIBLE_DEVICES=0 python scripts/run_campaign.py \
+  --kind accuracy --workers 4 --worker-index 0 --execute
+
+# One production arm (after the launch gate passes)
+python -m src.runner --config config/experiment.yaml --run baseline
+
+# Examples of the primary near-match arms
+python -m src.runner --config config/experiment.yaml --run extractor_8bit
+python -m src.runner --config config/experiment.yaml --run extractor_small
+
+# Direct single-call architecture control
+python -m src.runner --config config/experiment.yaml --run single_fp16
+
+# Static paired analysis freezes the selector artifacts. It is explicitly
+# intermediate because a distinct selected run may still be pending.
+python analyze.py --config config/experiment.yaml --allow-incomplete
+
+# If the selector trace says materialized_new_run=true, commit both frozen
+# artifacts, then execute the distinct exploratory system once:
+python -m src.runner --config analysis/ma_optimized_exploratory.experiment.yaml \
+  --run ma_optimized_exploratory
+
+# If distinct, time the exploratory system on that same reserved A100 as well:
+python -m src.runner --config analysis/ma_optimized_exploratory.experiment.yaml \
+  --run ma_optimized_exploratory --timing-mode
+
+# Re-run analysis with the frozen config to add the actual exploratory comparison.
+python analyze.py --config analysis/ma_optimized_exploratory.experiment.yaml
 ```
 
-Resume is the default, not a flag: kill the process and rerun the same command.
-Never split one run across two machines (SPEC §6).
+Batch size is fixed at 32. An OOM must fail the run; no production arm may
+autotune to a different batch size. Resume is allowed only with the same manifest,
+model/prompt fingerprints, and canonical batch membership. Never merge one run
+from multiple GPUs or environments.
 
-## Layout
+## Timing and memory
+
+The paper's primary memory number is deduplicated concurrent model-footprint MiB:
+each exact configuration's measured parameters and buffers are charged once.
+Sequential peak VRAM and one-server-per-role totals are co-reported separately.
+
+One uncontended A100 benchmarks the non-tiny configurations twice on a frozen
+128-question excluded cohort at batch 32. These calls never enter accuracy or
+selection. Uniform four-role 3B FP16 is `1.00x`; other results are steady-state
+inverse-throughput ratios. Cold model loading is reported separately. These are
+A100 ratios, not edge-latency estimates.
+
+## Repository layout
 
 | Path | Purpose |
 |---|---|
-| `SPEC.md` | The locked design. Read first. |
-| `PROGRESS.md` | Handoff log — newest entry first. |
-| `config/experiment.yaml` | Models, runs, n, seeds, batch size. Everything is driven from here. |
-| `src/prompts.py` | One versioned prompt per role. **Frozen at v5.** Never tuned per precision or size. |
-| `src/parsing.py` | Parsers and the six-label failure taxonomy. **No retry path — SPEC §5.** |
-| `src/models.py` | Load a model at fp16/8bit/4bit; footprints; batched greedy generation. |
-| `src/agents.py` | Role call wrappers; degraded-propagation policy on parse failure. |
-| `src/pipeline.py` | Question sampling (incl. disjoint confirmation sets) and stage-major orchestration. |
-| `src/metrics.py` | HotpotQA EM/F1 normalization, bootstrap CIs, AUROC, ECE. |
-| `src/evidence.py` | Extraction accuracy vs gold `supporting_facts` (SPEC §5c). |
-| `src/mechanism.py` | Strict format, verbatim rate, selection churn (SPEC §5b). |
-| `src/runner.py` | Sweep driver: treatment resolution, checkpoint/resume, metadata. |
-| `smoke_test.py` | Gate smoke-test driver. |
-| `gate2_report.py` | Gate 2 report. **Superseded by `analyze.py`; kept for provenance.** |
-| `notebooks/kaggle_run.ipynb` | Thin Kaggle launcher. No logic lives there. |
-| `results/` | JSONL outputs. Committed — Kaggle pushes after every run. |
+| `SPEC.md` | Locked experiment and claim contract |
+| `PROGRESS.md` | Current handoff and launch blockers |
+| `config/experiment.yaml` | Models, revisions, matrix, metrics, selector, timing/memory policy |
+| `config/manifests/` | Frozen final question and exclusion IDs |
+| `ENVIRONMENT.md` | Production container/package/GPU lock contract |
+| `requirements-core.txt` | Recorded core inference versions (not a complete lock) |
+| `scripts/freeze_final_sample.py` | Reproduce/audit the committed sample manifest |
+| `src/` | Prompts, parsing, inference, pipeline, runner, and metrics |
+| `smoke_test.py` | Preflight plumbing checks on excluded development data |
+| `analyze.py` | Paired final analysis and allocation selection |
+| `results/` | Generated outputs; empty in the source branch except `.gitkeep` |
 
-`analyze.py` (SPEC §8, §10) is build step 12 and does not exist yet.
+Historical notebooks, interim results, and the obsolete Gate 2 report were
+removed from the active tree. They remain recoverable from Git history.
 
-## The rules that are easy to break
+## Controls that must not change
 
-1. **Never retry, resample, or regex-rescue a failed parse.** The parse-failure
-   rate is the experiment's mechanism evidence; a retry destroys it. SPEC §5.
-2. **Never use constrained or grammar-based decoding.** It drives parse failures
-   to zero by construction and deletes the same measurement. The temptation gets
-   worse in Phase S, where the 0.5B model is *expected* to parse worse — that is
-   the measurement, not a defect. SPEC §12.
-3. **Never compare accuracy across arms without the footprint beside it,** and
-   use `deduped_footprint_mb`, not `coresident_footprint_mb`. SPEC §5d explains
-   why the naive sum inverts the sign of the memory claim.
-4. **Never edit the prompts.** Frozen at v5; an edit invalidates every run
-   already collected.
+- no parse retries or regeneration;
+- no constrained/grammar decoding;
+- no model-, precision-, or size-specific prompt tuning;
+- no question replacement or resampling;
+- no variable production batch size;
+- no floating model or dataset revisions; and
+- no confirmatory claim from the post-selected optimized arm.

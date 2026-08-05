@@ -1,0 +1,3 @@
+# Only needed to regenerate/audit the already committed question-ID manifest.
+requests==2.34.2
+pyarrow==25.0.0

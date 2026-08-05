@@ -5,10 +5,11 @@ SPEC §7: the exact quantization config must land in the results metadata.
 """
 
 import gc
+import hashlib
+import json
 import time
 
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
 PRECISIONS = ("fp16", "8bit", "4bit")
 
@@ -44,6 +45,13 @@ def quant_config_metadata(precision: str) -> dict:
 
 
 def _bnb_config(precision: str):
+    try:
+        from transformers import BitsAndBytesConfig
+    except ImportError as exc:
+        raise RuntimeError(
+            "quantized inference requires transformers and bitsandbytes; "
+            "install the pinned experiment environment before A100 preflight"
+        ) from exc
     if precision == "fp16":
         return None
     if precision == "8bit":
@@ -58,9 +66,15 @@ def _bnb_config(precision: str):
     raise ValueError(f"unknown precision {precision!r}")
 
 
-def load_tokenizer(model_id: str):
+def load_tokenizer(model_id: str, revision: str | None = None):
     """Tokenizer configured for decoder-only *batched* generation (SPEC §6)."""
-    tok = AutoTokenizer.from_pretrained(model_id)
+    try:
+        from transformers import AutoTokenizer
+    except ImportError as exc:
+        raise RuntimeError(
+            "inference requires transformers; install the pinned experiment environment"
+        ) from exc
+    tok = AutoTokenizer.from_pretrained(model_id, revision=revision)
     # Left padding is mandatory: with right padding a decoder-only model
     # generates from the pad tokens and the output is garbage.
     tok.padding_side = "left"
@@ -69,12 +83,24 @@ def load_tokenizer(model_id: str):
     return tok
 
 
-def load_model(model_id: str, precision: str, device: str = "cuda:0"):
+def load_model(
+    model_id: str,
+    precision: str,
+    device: str = "cuda:0",
+    revision: str | None = None,
+    tokenizer_revision: str | None = None,
+):
     """Load `model_id` at `precision`. Returns (model, tokenizer)."""
     if precision not in PRECISIONS:
         raise ValueError(f"unknown precision {precision!r}; expected one of {PRECISIONS}")
 
-    tok = load_tokenizer(model_id)
+    try:
+        from transformers import AutoModelForCausalLM
+    except ImportError as exc:
+        raise RuntimeError(
+            "inference requires transformers; install the pinned experiment environment"
+        ) from exc
+    tok = load_tokenizer(model_id, revision=tokenizer_revision or revision)
     kwargs = {"dtype": torch.float16}
     qcfg = _bnb_config(precision)
     if qcfg is not None:
@@ -83,14 +109,14 @@ def load_model(model_id: str, precision: str, device: str = "cuda:0"):
     else:
         kwargs["device_map"] = {"": device}
 
-    model = AutoModelForCausalLM.from_pretrained(model_id, **kwargs)
+    model = AutoModelForCausalLM.from_pretrained(model_id, revision=revision, **kwargs)
     model.eval()
     model.generation_config.pad_token_id = tok.pad_token_id
     return model, tok
 
 
-def weight_footprint_mb(model, precision: str = None) -> float:
-    """Actual weight bytes, in MB (SPEC §7).
+def weight_footprint_mib(model, precision: str = None) -> float:
+    """Actual parameter tensor bytes, in binary MiB (SPEC §7).
 
     Summed per tensor as numel x element_size, which is exact at every precision
     and needs no special-casing: bitsandbytes stores 4-bit weights as uint8
@@ -111,6 +137,73 @@ def weight_footprint_mb(model, precision: str = None) -> float:
     Cross-checked against transformers' model.get_memory_footprint(): exact match.
     """
     return sum(p.numel() * p.element_size() for p in model.parameters()) / (1024 ** 2)
+
+
+def weight_footprint_mb(model, precision: str = None) -> float:
+    """Deprecated compatibility alias; the returned binary unit is MiB."""
+    return weight_footprint_mib(model, precision)
+
+
+def memory_footprint_mib(model) -> dict:
+    """Return binary-MiB resident tensor census, including model buffers."""
+    parameter_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
+    buffer_bytes = sum(b.numel() * b.element_size() for b in model.buffers())
+    fallback = parameter_bytes + buffer_bytes
+    try:
+        full_bytes = int(model.get_memory_footprint(return_buffers=True))
+    except (AttributeError, TypeError):
+        full_bytes = fallback
+    # Never let a library-version difference omit known resident buffers.
+    full_bytes = max(full_bytes, fallback)
+    mib = 1024 ** 2
+    return {
+        "parameter_mib": parameter_bytes / mib,
+        "parameter_bytes_mib": parameter_bytes / mib,
+        "buffer_mib": buffer_bytes / mib,
+        "buffer_bytes_mib": buffer_bytes / mib,
+        "model_footprint_mib": full_bytes / mib,
+        "model_footprint_bytes": full_bytes,
+    }
+
+
+def config_fingerprint(
+    model_id: str,
+    precision: str,
+    revision: str | None,
+    tokenizer_revision: str | None,
+) -> tuple[str, dict]:
+    """Complete model/config identity used for resident-weight deduplication."""
+    payload = {
+        "model_id": model_id,
+        "model_revision": revision,
+        "tokenizer_revision": tokenizer_revision or revision,
+        **quant_config_metadata(precision),
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest(), payload
+
+
+def resolved_revision_metadata(
+    model, tok, expected_model_revision: str, expected_tokenizer_revision: str
+) -> dict:
+    """Verify HF resolved commits when the installed library exposes them."""
+    resolved_model = getattr(getattr(model, "config", None), "_commit_hash", None)
+    resolved_tokenizer = (
+        getattr(tok, "init_kwargs", {}).get("_commit_hash")
+        or getattr(tok, "_commit_hash", None)
+    )
+    if resolved_model and resolved_model != expected_model_revision:
+        raise RuntimeError(
+            f"model resolved to {resolved_model}, expected {expected_model_revision}"
+        )
+    if resolved_tokenizer and resolved_tokenizer != expected_tokenizer_revision:
+        raise RuntimeError(
+            f"tokenizer resolved to {resolved_tokenizer}, expected {expected_tokenizer_revision}"
+        )
+    return {
+        "resolved_model_revision": resolved_model or expected_model_revision,
+        "resolved_tokenizer_revision": resolved_tokenizer or expected_tokenizer_revision,
+    }
 
 
 def param_census(model) -> dict:
@@ -261,6 +354,10 @@ def generate_batch(
         enc = {k: v.to(model.device) for k, v in enc.items()}
         in_len = enc["input_ids"].shape[1]
 
+        # CUDA kernels are asynchronous. Synchronizing on both sides isolates
+        # this batch from work queued by the preceding batch.
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         t0 = time.perf_counter()
         out = model.generate(
             **enc,
@@ -311,6 +408,9 @@ def generate_batch(
                 "prompt_tokens": int(attn.sum().item()),
                 "output_tokens": n_gen,
                 "latency_s": round(per_item, 4),
+                "batch_wall_s": elapsed,
+                "batch_size_actual": len(chunk),
+                "padded_input_tokens": int(in_len),
             })
 
         if log_confidence:

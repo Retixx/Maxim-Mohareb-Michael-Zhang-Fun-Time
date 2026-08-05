@@ -1,0 +1,11 @@
+# Core versions observed in the prior A100 pilot and retained for final preflight.
+# PyTorch 2.13.0+cu130 / CUDA 13.0 came from that A100 image; install it through
+# the selected immutable container rather than resolving a different wheel here.
+transformers==5.14.1
+bitsandbytes==0.50.0
+datasets==5.0.1
+
+# Accelerate, PyYAML, PyTorch transitive dependencies, Python, driver, and CUDA
+# must be frozen from the chosen A100 container in config/environment.lock.json
+# before production. Their prior exact versions were not recorded, so inventing
+# pins here would create a false reproducibility claim.

@@ -1,16 +1,24 @@
 .venv/
 __pycache__/
-*.pyc
-*.zip
-.ipynb_checkpoints/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
 
-# Sweep outputs ARE committed. The Kaggle notebook pushes results/ to GitHub
-# after every run because a session that dies otherwise loses everything — one
-# n=750 sweep was already lost that way (PROGRESS.md, 2026-07-29). `results/`
-# used to be ignored wholesale and every push needed `git add -f`, which meant a
-# plain `git add -A` silently skipped new results. Ignore only the dev-seed
-# scratch files instead; SPEC's seed hygiene keeps seeds 0 and 1234 out of the
-# experiment, so nothing ignored here is ever reportable.
-results/*_seed0.*
-results/*_seed1234.*
-results/smoke_*
+# Generated production/smoke outputs never belong in the active source tree.
+results/*
+!results/.gitkeep
+logs/
+figures/
+*.zip
+*.tmp
+*.partial
+*.lock.tmp
+
+# Analysis tables/figures are generated. The immutable selector trace and its
+# executable frozen config are deliberate commit artifacts and stay visible.
+analysis/*
+!analysis/ma_optimized_exploratory.selection.json
+!analysis/ma_optimized_exploratory.experiment.yaml
+
+.ipynb_checkpoints/

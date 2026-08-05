@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "purpose": "fixed excluded batch-32 A100 warm-up and smoke check; never scored",
+  "source": {
+    "final_manifest_path": "config/manifests/final_n1500_seed20260805.json",
+    "final_manifest_file_sha256": "841dbca9ac7e76c0277a5696fba9f7e254b973afb0b670efbc5edfc006b4af46",
+    "final_question_ids_sha256": "5d4cc24872aeb603cbd005f790958199ef4cc993a1e7f048403608603da602af",
+    "exclusion_ids_sha256": "a5cfacb84fa9a48217f3206a095706a6d48802bd244151c72f2eef08372c00a8"
+  },
+  "selection": {
+    "n": 32,
+    "algorithm": "first 32 IDs in final manifest exclusions.question_ids"
+  },
+  "question_ids_sha256": "089a12904a68ff69217bf5bad30456a0643d55913cb6651a941a4abe65909bc9",
+  "question_ids": [
+    "5a70f11a5542994082a3e40b",
+    "5a70f1685542994082a3e40f",
+    "5a70f39c5542994082a3e429",
+    "5a70f4c45542994082a3e437",
+    "5a70ff335542994082a3e49c",
+    "5a7108fa5542994082a3e4ef",
+    "5a7109e95542994082a3e4fa",
+    "5a710a915542994082a3e504",
+    "5a710bb15542994082a3e50d",
+    "5a71148b5542994082a3e567",
+    "5a71166d5542994082a3e576",
+    "5a7119095542994082a3e589",
+    "5a711c535542994082a3e59b",
+    "5a711cb45542994082a3e59f",
+    "5a71214d5542994082a3e5b9",
+    "5a71231a5542994082a3e5c4",
+    "5a7125b95542994082a3e5d5",
+    "5a7128b05542994082a3e5f2",
+    "5a7129685542994082a3e5fa",
+    "5a71299e5542994082a3e5fe",
+    "5a7130365542994082a3e645",
+    "5a7133565542994082a3e65c",
+    "5a7133fa5542994082a3e660",
+    "5a713f3c5542994082a3e6eb",
+    "5a713fb15542994082a3e6f0",
+    "5a7140585542994082a3e6fa",
+    "5a71443f5542994082a3e727",
+    "5a71446b5542994082a3e72a",
+    "5a7145d55542994082a3e73c",
+    "5a71474b5542994082a3e74f",
+    "5a7147fd5542994082a3e758",
+    "5a7148005542994082a3e759"
+  ]
+}

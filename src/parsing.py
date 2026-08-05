@@ -250,13 +250,7 @@ def salvage(role: str, raw_output: str) -> dict | None:
             subs = obj.get("sub_questions")
             if _is_str_list(subs):
                 out["sub_questions"] = [s.strip() for s in subs]
-        elif role == "extractor":
-            spans = obj.get("spans")
-            if isinstance(spans, list):
-                keep = [s.strip() for s in spans if isinstance(s, str) and s.strip()]
-                if keep:
-                    out["spans"] = keep
-        elif role == "qa":
+        elif role in ("qa", "solo"):
             ans = obj.get("answer")
             if isinstance(ans, (int, float)) and not isinstance(ans, bool):
                 ans = str(ans)
@@ -293,6 +287,9 @@ _VALIDATORS = {
     "step_definer": _validate_step_definer,
     "extractor": _validate_extractor,
     "qa": _validate_qa,
+    # The single-agent baseline intentionally has the same answer contract as
+    # QA; only its prompt and one-stage execution topology differ.
+    "solo": _validate_qa,
 }
 
 

@@ -32,8 +32,11 @@ came from and compares label sets. Labels are discrete and unambiguous, so
 fabrication cannot earn partial credit and paraphrase is not punished — the metric
 is immune to all three failures above by construction.
 
-This is also HotpotQA's own official supporting-facts metric, so the numbers are
-comparable to published work.
+The final set precision/recall/F1 calculation follows HotpotQA's supporting-facts
+formula. The preceding span-to-sentence attribution is specific to this project,
+however, so the resulting score must be described as an attribution-based proxy
+rather than presented as directly comparable to systems that predict sentence
+labels themselves.
 """
 
 import re
@@ -116,7 +119,7 @@ def predicted_evidence(spans: list[str], index: list[dict]) -> set:
 
 
 def prf(pred: set, gold: set) -> dict:
-    """Set precision/recall/F1 plus exact set match — HotpotQA's official form."""
+    """Set precision/recall/F1 plus exact match using HotpotQA's formula."""
     if not pred and not gold:
         return {"precision": 1.0, "recall": 1.0, "f1": 1.0, "em": 1.0}
     tp = len(pred & gold)

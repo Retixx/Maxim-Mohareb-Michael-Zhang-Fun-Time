@@ -1,166 +1,171 @@
-# Experiment configuration. Everything is driven from here (SPEC §8).
-#
-#   python -m src.runner --config config/experiment.yaml --run stepdef_4bit
+# Authoritative configuration for the one-shot A100 experiment.
+# See SPEC.md. Every accuracy arm uses the frozen 1,500-question manifest once.
 
-# The run's base model — the REFERENCE cell. A stage whose treatment is a bare
-# precision string gets this model at that precision. Overridable with --model-id.
-#
-# CHANGED 2026-08-03 (final run): 1.5B -> 3B.
-#
-# 1.5B was chosen in SPEC v1 for a constraint that no longer applies: the local
-# dev card had 4 GB, and §5a notes "Qwen2.5-1.5B at FP16 is ~3.1 GB against a
-# 4 GB card". Everything now runs on A100s. §5a's own contingency pre-authorised
-# this move ("move model 1 to Qwen/Qwen2.5-3B-Instruct for more parametric
-# redundancy"); it was never triggered because the floor effect appeared at 0.5B
-# rather than at the reference.
-#
-# Two measured reasons to move it now:
-#   1. all@3B-4bit scores 37.7 EM at 1917 MB against the 1.5B-fp16 reference's
-#      32.2 EM at 2944 MB — better accuracy AND less memory. The old reference is
-#      Pareto-dominated by one of our own runs.
-#   2. 32.2 EM sits on the bottom edge of §5a's healthy 30-45 band. A 3B reference
-#      sits mid-band, leaving headroom for degradation to register.
 model_id: Qwen/Qwen2.5-3B-Instruct
 
-# Aliases for the size axis (SPEC §2 Phase S, §8). `base` always resolves to
-# model_id above, so it does not need an entry. Same family, same tokenizer, same
-# instruct recipe as the base model — the closest available approximation to a
-# pure parameter-count intervention (SPEC §12's stated limitation).
-#
-# `small` is now 1.5B, not 0.5B. This is the whole point of re-basing. At 0.5B the
-# size arm was not measuring graded size sensitivity, it was measuring a phase
-# transition into format non-compliance: extractor parse success collapsed to
-# 56.2% (and to 28.3% at all@0.5B-4bit), and 91.9% of those failures were the
-# model emitting usable content in the wrong container. A 3B -> 1.5B step keeps
-# BOTH arms instruction-capable (both parse >94%), so the size cost measured is a
-# capability cost rather than a compliance cliff.
-#
-# The 0.5B tier is not deleted — it is a separate, already-collected tier and is
-# the right evidence for "where does the floor sit", just not for "how much does
-# shrinking cost".
 models:
   small: Qwen/Qwen2.5-1.5B-Instruct
-  tiny: Qwen/Qwen2.5-0.5B-Instruct   # the old `small`; floor-effect tier only
+  tiny: Qwen/Qwen2.5-0.5B-Instruct
+
+# Resolve model and tokenizer files at these immutable Hugging Face revisions.
+# The runner must record the resolved revision in every run metadata file.
+model_revisions:
+  Qwen/Qwen2.5-3B-Instruct: aa8e72537993ba99e69dfaafa59ed015b17504d1
+  Qwen/Qwen2.5-1.5B-Instruct: 989aa7980e4cf806f80c7fef2b1adb7bc71aa306
+  Qwen/Qwen2.5-0.5B-Instruct: 7ae557604adf67be50417f59c2c2f167def9a775
 
 dataset:
-  name: hotpot_qa
-  config: distractor    # SPEC §3: 2 gold + 8 distractor paragraphs, no retriever
+  name: hotpotqa/hotpot_qa
+  config: distractor
   split: validation
-  # Raised from SPEC §5's 300 to 750 by human decision at Gate 2. Reason: the
-  # n=300 tier returned a null with every CI spanning zero. Measured SE of the EM
-  # drop was 2.21 pp, so ~720 questions are needed for 80% power against a true
-  # 4 pp effect (~960 for 90%). For reference, MA-RAG evaluated on 5600 HotpotQA
-  # dev questions — 18.7x our original n — which is most of why they could resolve
-  # a four-way role ranking and we could not.
-  #
-  # Costs ~4.0 GPU-h for all five runs (measured 1.61 h at n=300, scaled).
+  revision: 1908d6afbbead072334abe2965f91bd2709910ab
   n: 1500
+  eval_seed: 20260805
 
-  # Seed for sampling the n evaluation questions.
-  #
-  # Deliberately NOT 0 and NOT 1234. Prompt development looked at failures from
-  # seed 0 (n=10) and seed 1234 (n=30); questions the prompts were shaped on must
-  # not be questions the experiment is scored on. Seed 7 has never been inspected.
-  # If you iterate on prompts again, do it on 0 or 1234 and leave this alone.
-  eval_seed: 7
+  # This file, rather than a fresh random draw, is authoritative. It contains
+  # exactly 1,500 ordered IDs and the exact 3,031-ID exclusion union. The old
+  # n=3,000 seed-7 pilot IDs come from the committed result blob; prompt-dev IDs
+  # are also excluded. The runner must validate n, uniqueness, both hashes, and
+  # zero final/exclusion overlap before loading any model.
+  manifest_path: config/manifests/final_n1500_seed20260805.json
+  manifest_file_sha256: 841dbca9ac7e76c0277a5696fba9f7e254b973afb0b670efbc5edfc006b4af46
+  manifest_sha256: 5d4cc24872aeb603cbd005f790958199ef4cc993a1e7f048403608603da602af
+  exclusion_sha256: a5cfacb84fa9a48217f3206a095706a6d48802bd244151c72f2eef08372c00a8
+  preflight_manifest_path: config/manifests/preflight_excluded32.json
+  preflight_manifest_file_sha256: bc517df47316867c2c8532f568a8d006e976603e517d4edc475b9a84df58a8db
+  preflight_manifest_sha256: 089a12904a68ff69217bf5bad30456a0643d55913cb6651a941a4abe65909bc9
 
 generation:
-  # PINNED to 32 for the entire final tier. The previous 3B attempt was
-  # invalidated because fp16/8bit autotuned to 32 while 4bit stayed at 64 — batch
-  # size varied WITH the arm being compared, so nothing in that tier was
-  # comparable. Every run here uses 32 so an OOM-autotune cannot reintroduce it.
+  # Scientific control, not an autotuning target. Preflight every configuration
+  # at 32; a production OOM must fail the arm and the campaign, never halve it.
   batch_size: 32
-  min_batch_size: 1
-
-  # Log per-call answer confidence (mean/min token logprob, mean entropy) so the
-  # CALIBRATION half of SPEC §1's mechanism claim can finally be tested — see the
-  # pre-registered prediction 4 in SPEC §5b. Format damage has already been ruled
-  # out on three instruments; calibration is the only part of §1 still live.
-  #
-  # Off by default. It costs roughly one extra prefill per batch, and turning it on
-  # mid-project would make wall-time comparisons across runs meaningless. Turn it on
-  # for the planned n=5000 rerun, where every run is generated from scratch anyway.
+  min_batch_size: 32
   log_confidence: false
 
 results_dir: results
 
-# SPEC §2, locked. Exactly one agent quantized per run; the rest stay FP16.
+analysis:
+  primary_metric: f1
+  co_report_metrics: [em]
+  noninferiority_margin_f1_points: 1.0
+  paired_bootstrap_replicates: 10000
+  primary_family: role_8bit_vs_small_fp16
+  multiplicity_correction: holm
+  secondary_families:
+    - role_4bit
+    - tiny_floor
+    - mechanism
+
+memory_accounting:
+  unit: MiB
+  primary_topology: concurrent_distinct_weights
+  primary_metric: deduplicated_concurrent_model_footprint_mib
+  co_report:
+    - isolated_role_service_model_footprint_mib
+    - sequential_peak_vram_allocated_mib
+    - sequential_peak_vram_reserved_mib
+    - stages.*.model_footprint_mib
+    - stages.*.parameter_mib
+    - stages.*.buffer_mib
+  measured_reference_mib:
+    base_3b_fp16: 5886.0
+    base_3b_8bit: 3240.0
+    base_3b_4bit: 1917.0
+    small_1_5b_fp16: 2944.4
+    tiny_0_5b_fp16: 942.3
+
+timing:
+  reference_run: baseline
+  reference_ratio: 1.0
+  primary_metric: steady_state_inverse_throughput_ratio
+  benchmark_device_policy: one_reserved_uncontended_a100
+  # Timing never reuses the final 1,500. It runs twice on a frozen excluded
+  # 128-question cohort after a separate excluded batch-32 warm-up.
+  manifest_path: config/manifests/timing_excluded128_seed20260805.json
+  manifest_file_sha256: 44f0cdf0b1e729861f38e86537b7f5e77cb3adf8a58c75db60d9d38811ef29ca
+  manifest_sha256: 3fce4065511c0959b86144179ff19144b85bea7dfb083495be695cd66c051de6
+  n: 128
+  seed: 20260805
+  repetitions: 2
+  fixed_batch_size: 32
+  warmup: true
+  cuda_synchronize: true
+  randomize_run_order: true
+  run_ids:
+    - baseline
+    - planner_8bit
+    - stepdef_8bit
+    - extractor_8bit
+    - qa_8bit
+    - planner_4bit
+    - stepdef_4bit
+    - extractor_4bit
+    - qa_4bit
+    - planner_small
+    - stepdef_small
+    - extractor_small
+    - qa_small
+    - ma_uniform_8bit
+    - ma_uniform_4bit
+    - ma_uniform_small
+    - single_fp16
+  post_selection_run_id: ma_optimized_exploratory
+  excluded_runs:
+    - planner_tiny
+    - stepdef_tiny
+    - extractor_tiny
+    - qa_tiny
+    - ma_uniform_tiny
+  model_load_time: co_report_separately
+  edge_latency_claim: false
+
+# Post-ablation exploratory selector. It is not the Q-vs-S near-memory-match.
+# It enumerates 4^4=256 complete allocations and charges each distinct resident
+# configuration once. The 0.5B tier is deliberately excluded. The selector may
+# return an existing uniform/reference run; otherwise it materializes one frozen
+# `ma_optimized_exploratory` run in the committed artifact below.
+allocation_selector:
+  enabled: true
+  status: pending_ablation_results
+  exploratory: true
+  noninferiority_margin_f1_points: 1.0
+  roles: [planner, step_definer, extractor, qa]
+  candidates:
+    base_fp16: {model: base, precision: fp16}
+    base_8bit: {model: base, precision: 8bit}
+    base_4bit: {model: base, precision: 4bit}
+    small_fp16: {model: small, precision: fp16}
+  excluded_candidates:
+    tiny_fp16: appendix_floor_only
+  candidate_allocation_count: 256
+  objective: minimize_deduplicated_concurrent_model_footprint_mib
+  constraint:
+    metric: f1
+    comparison: paired_bootstrap_95pct_lower_bound_noninferior_to_baseline
+    margin_points: 1.0
+  tie_breakers:
+    - higher_predicted_f1
+    - fewer_distinct_configurations
+    - lexical_allocation_id
+  output_run_id: ma_optimized_exploratory
+  output_artifacts:
+    selection_trace: analysis/ma_optimized_exploratory.selection.json
+    executable_config: analysis/ma_optimized_exploratory.experiment.yaml
+  reuse_existing_run_when_identical: true
+
+# Static matrix: 22 run IDs. The original 21 arms are retained, including all
+# five 0.5B floor arms, and single_fp16 is added. The selector can add at most
+# one distinct execution, for a campaign maximum of 23. If it selects an
+# existing static allocation, the maximum actually executed remains 22.
 runs:
+  # Reference: uniform four-role multi-agent system, 3B FP16.
   baseline:
     planner: fp16
     step_definer: fp16
     extractor: fp16
     qa: fp16
-  planner_4bit:
-    planner: 4bit
-    step_definer: fp16
-    extractor: fp16
-    qa: fp16
-  stepdef_4bit:
-    planner: fp16
-    step_definer: 4bit
-    extractor: fp16
-    qa: fp16
-  extractor_4bit:
-    planner: fp16
-    step_definer: fp16
-    extractor: 4bit
-    qa: fp16
-  qa_4bit:
-    planner: fp16
-    step_definer: fp16
-    extractor: fp16
-    qa: 4bit
 
-  # --- SPEC §2 Phase S — size ablation. Same shape as Phase Q, other axis.
-  # Shares the `baseline` run above; do NOT add a second baseline. The perturbed
-  # role holds 942.2 MB at 0.5B/fp16 against 1070.2 MB at 1.5B/4-bit, so the size
-  # arm runs on 13.6% FEWER bytes than the quantization arm — stated, not hidden
-  # (SPEC §2). analyze.py must print that gap beside every Q-vs-S comparison.
-  planner_small:
-    planner: {model: small, precision: fp16}
-    step_definer: fp16
-    extractor: fp16
-    qa: fp16
-  stepdef_small:
-    planner: fp16
-    step_definer: {model: small, precision: fp16}
-    extractor: fp16
-    qa: fp16
-  extractor_small:
-    planner: fp16
-    step_definer: fp16
-    extractor: {model: small, precision: fp16}
-    qa: fp16
-  qa_small:
-    planner: fp16
-    step_definer: fp16
-    extractor: fp16
-    qa: {model: small, precision: fp16}
-
-  # --- SPEC §2 Phase D — uniform arms. These are fixed by definition, not
-  # chosen from data, so defining them now does not pre-empt the §5e allocation
-  # rule (which still must be committed here BEFORE the role-aware arms run).
-  #
-  # Note the deduped footprints (SPEC §5d): a uniform run needs ONE resident
-  # instance, so ma_uniform_4bit sits at 1070.2 MB — below every single-role
-  # quantized run in Phase Q, which each need two. Uniform allocation is
-  # memory-efficient precisely because it is uniform. That is the frontier the
-  # role-aware arms have to beat.
-  ma_uniform_4bit:        # deduped 1070.2 MB
-    planner: 4bit
-    step_definer: 4bit
-    extractor: 4bit
-    qa: 4bit
-  ma_uniform_small:       # deduped 942.2 MB
-    planner: {model: small, precision: fp16}
-    step_definer: {model: small, precision: fp16}
-    extractor: {model: small, precision: fp16}
-    qa: {model: small, precision: fp16}
-
-  # --- 8-bit tier. LLM.int8 is SLOW (measured ~5-6x fp16 on the extractor stage);
-  # budget accordingly. Never run before 2026-08-02, so treat the first one as a
-  # smoke test.
+  # Primary near-memory-matched quantization side: one 3B 8-bit role.
   planner_8bit:
     planner: 8bit
     step_definer: fp16
@@ -182,23 +187,71 @@ runs:
     extractor: fp16
     qa: 8bit
 
-  # --- uniform arms at the reference size, for the memory frontier (SPEC 5d).
+  # Separate aggressive-quantization tier; not interpreted as a clean 8-to-4
+  # bit-width dose response because bitsandbytes uses different algorithms.
+  planner_4bit:
+    planner: 4bit
+    step_definer: fp16
+    extractor: fp16
+    qa: fp16
+  stepdef_4bit:
+    planner: fp16
+    step_definer: 4bit
+    extractor: fp16
+    qa: fp16
+  extractor_4bit:
+    planner: fp16
+    step_definer: fp16
+    extractor: 4bit
+    qa: fp16
+  qa_4bit:
+    planner: fp16
+    step_definer: fp16
+    extractor: fp16
+    qa: 4bit
+
+  # Primary near-memory-matched size side: one 1.5B FP16 role.
+  planner_small:
+    planner: {model: small, precision: fp16}
+    step_definer: fp16
+    extractor: fp16
+    qa: fp16
+  stepdef_small:
+    planner: fp16
+    step_definer: {model: small, precision: fp16}
+    extractor: fp16
+    qa: fp16
+  extractor_small:
+    planner: fp16
+    step_definer: fp16
+    extractor: {model: small, precision: fp16}
+    qa: fp16
+  qa_small:
+    planner: fp16
+    step_definer: fp16
+    extractor: fp16
+    qa: {model: small, precision: fp16}
+
+  # Prespecified uniform frontier controls.
   ma_uniform_8bit:
     planner: 8bit
     step_definer: 8bit
     extractor: 8bit
     qa: 8bit
+  ma_uniform_4bit:
+    planner: 4bit
+    step_definer: 4bit
+    extractor: 4bit
+    qa: 4bit
+  ma_uniform_small:
+    planner: {model: small, precision: fp16}
+    step_definer: {model: small, precision: fp16}
+    extractor: {model: small, precision: fp16}
+    qa: {model: small, precision: fp16}
 
-  ma_uniform_tiny:        # all@0.5B-fp16 — floor end of the memory frontier
-    planner: {model: tiny, precision: fp16}
-    step_definer: {model: tiny, precision: fp16}
-    extractor: {model: tiny, precision: fp16}
-    qa: {model: tiny, precision: fp16}
-
-  # --- second size step: 3B -> 0.5B. Crosses the compliance floor on purpose,
-  # so the size axis has a DOSE-RESPONSE (3B -> 1.5B -> 0.5B) rather than a
-  # single point. 1.5B stays compliant, 0.5B does not; that contrast is the
-  # measurement.
+  # Appendix-only 0.5B compliance/capacity floor. These five runs establish
+  # where functional role behavior breaks down. They are excluded from the
+  # selector, primary hypothesis family, and main-paper allocation claims.
   planner_tiny:
     planner: {model: tiny, precision: fp16}
     step_definer: fp16
@@ -219,3 +272,13 @@ runs:
     step_definer: fp16
     extractor: fp16
     qa: {model: tiny, precision: fp16}
+  ma_uniform_tiny:
+    planner: {model: tiny, precision: fp16}
+    step_definer: {model: tiny, precision: fp16}
+    extractor: {model: tiny, precision: fp16}
+    qa: {model: tiny, precision: fp16}
+
+  # Architecture control: one competitive direct-answer call over the same ten
+  # provided paragraphs, using the same 3B FP16 model and answer budget.
+  single_fp16:
+    solo: fp16

@@ -5,10 +5,11 @@ That turned out to be too blunt to test the mechanism. This module adds three
 sharper instruments, all computed from fields already in the JSONL — no extra
 generation, no GPU.
 
-    strict_format_ok   parse WITHOUT the tolerance parsing.py grants. The real
-                       parser strips markdown fences and surrounding prose, so a
-                       model that starts padding its JSON with chatter still
-                       scores `ok`. This catches that.
+    strict_format_ok   require the entire output to be the accepted JSON object,
+                       WITHOUT the fence/prose tolerance parsing.py grants. The
+                       role validators still intentionally tolerate extra keys
+                       and coerce a numeric QA answer; this is container-format
+                       compliance, not an exact-schema validator.
     verbatim_rate      fraction of Extractor spans that are exact substrings of
                        the paragraphs given to it. parsing.py deliberately does
                        not check this (a content error, not a format error), so
@@ -29,10 +30,13 @@ from .parsing import _VALIDATORS
 
 
 def strict_format_ok(role: str, raw_output: str) -> bool:
-    """True iff the whole raw output is exactly valid JSON of the right schema.
+    """True iff the whole raw output is accepted JSON for the role.
 
-    No fence stripping, no blob extraction, no prose tolerance. The gap between
-    this and parse_status == "ok" is precisely what the parser's leniency hides.
+    No fence stripping, no blob extraction, and no surrounding-prose tolerance.
+    Extra keys remain allowed and numeric QA answers remain coercible because
+    those are documented parser conventions, not container-format failures. The
+    gap between this and ``parse_status == "ok"`` therefore isolates wrapper and
+    chatter tolerance rather than claiming exact JSON-schema compliance.
     """
     text = (raw_output or "").strip()
     try:
@@ -109,4 +113,5 @@ SELECTION_FIELD = {
     "step_definer": "search_terms",
     "extractor": "spans",
     "qa": "answer",
+    "solo": "answer",
 }

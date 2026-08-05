@@ -6,7 +6,14 @@ used at FP16, 8-bit and 4-bit. Any change here must bump PROMPT_VERSION and be
 re-run across *all* precisions, otherwise it confounds the experiment.
 """
 
+import hashlib
+
+# The original four-role templates remain byte-for-byte v5.  ``solo-v1`` is a
+# new, separately versioned template for the prespecified single-agent control;
+# recording both the per-role version and a content hash prevents a bundle
+# version bump from implying that the four frozen templates changed.
 PROMPT_VERSION = "v5"
+PROMPT_BUNDLE_VERSION = "v5+solo-v1"
 
 # ==========================================================================
 #  PROMPTS ARE FROZEN AT v5. DO NOT EDIT THEM.
@@ -85,6 +92,8 @@ PROMPT_VERSION = "v5"
 
 # Roles, in pipeline order. Used everywhere as the canonical stage names.
 ROLES = ["planner", "step_definer", "extractor", "qa"]
+SOLO_ROLE = "solo"
+ALL_ROLES = [*ROLES, SOLO_ROLE]
 
 # Generation budget per role. `truncated` in the failure taxonomy means the
 # generation hit exactly this cap without emitting EOS.
@@ -93,6 +102,7 @@ MAX_NEW_TOKENS = {
     "step_definer": 160,
     "extractor": 320,
     "qa": 48,
+    "solo": 48,
 }
 
 
@@ -218,11 +228,52 @@ Question: {question}
 JSON:"""
 
 
+# --------------------------------------------------------------------------
+# Single-agent control
+# --------------------------------------------------------------------------
+
+# Frozen before the final evaluation manifest is generated.  The control sees
+# exactly the same ten provided paragraphs as the multi-agent Extractor and has
+# the same short-answer JSON contract and token budget as the final QA role.  It
+# performs one generation per question, so it measures the value/cost of the
+# architecture rather than silently substituting a QA-only call that never saw
+# the source context.
+SOLO_SYSTEM = """You are a single-agent question-answering system.
+Answer the question using the provided encyclopedia paragraphs.
+
+Rules:
+- Read all provided paragraphs and combine facts when the question requires multiple hops.
+- The answer must be SHORT: a name, a date, a number, a title, or "yes" / "no".
+- Never answer in a sentence. Never explain. Never restate the question.
+- If the paragraphs are insufficient, give your best short guess anyway.
+- Reply with JSON only. No explanation, no markdown fences.
+- The value of "answer" must be wrapped in double quotes, even for a single word.
+
+Reply with exactly this shape:
+{"answer": "..."}
+
+Example
+Paragraphs:
+[1] Jaws: Jaws is a 1975 American thriller film directed by Steven Spielberg.
+[2] Steven Spielberg: Spielberg attended California State University, Long Beach.
+Question: Which university did the director of Jaws attend?
+JSON:
+{"answer": "California State University, Long Beach"}"""
+
+SOLO_USER = """Paragraphs:
+{paragraphs}
+
+Question: {question}
+
+JSON:"""
+
+
 SYSTEM_PROMPTS = {
     "planner": PLANNER_SYSTEM,
     "step_definer": STEP_DEFINER_SYSTEM,
     "extractor": EXTRACTOR_SYSTEM,
     "qa": QA_SYSTEM,
+    "solo": SOLO_SYSTEM,
 }
 
 USER_PROMPTS = {
@@ -230,13 +281,35 @@ USER_PROMPTS = {
     "step_definer": STEP_DEFINER_USER,
     "extractor": EXTRACTOR_USER,
     "qa": QA_USER,
+    "solo": SOLO_USER,
 }
+
+ROLE_PROMPT_VERSIONS = {
+    "planner": "v5",
+    "step_definer": "v5",
+    "extractor": "v5",
+    "qa": "v5",
+    "solo": "solo-v1",
+}
+
+
+def prompt_template_sha256(role: str) -> str:
+    """Hash the exact system/user template pair used for ``role``."""
+    if role not in SYSTEM_PROMPTS:
+        raise KeyError(f"unknown role {role!r}; expected one of {ALL_ROLES}")
+    payload = (SYSTEM_PROMPTS[role] + "\0" + USER_PROMPTS[role]).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def prompt_template_hashes() -> dict[str, str]:
+    """Content hashes persisted in every run's metadata."""
+    return {role: prompt_template_sha256(role) for role in ALL_ROLES}
 
 
 def build_messages(role: str, **fields) -> list[dict]:
     """Return chat messages for `role` with the template fields filled in."""
     if role not in SYSTEM_PROMPTS:
-        raise KeyError(f"unknown role {role!r}; expected one of {ROLES}")
+        raise KeyError(f"unknown role {role!r}; expected one of {ALL_ROLES}")
     return [
         {"role": "system", "content": SYSTEM_PROMPTS[role]},
         {"role": "user", "content": USER_PROMPTS[role].format(**fields)},
