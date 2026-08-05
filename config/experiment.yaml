@@ -2,20 +2,45 @@
 #
 #   python -m src.runner --config config/experiment.yaml --run stepdef_4bit
 
-# The run's base model: what a stage gets when its treatment is a bare precision
-# string. Overridable with --model-id. Model 2 is a config value, not a plugin
-# (SPEC §12):  model_id: meta-llama/Llama-3.2-3B-Instruct
-model_id: Qwen/Qwen2.5-1.5B-Instruct
+# The run's base model — the REFERENCE cell. A stage whose treatment is a bare
+# precision string gets this model at that precision. Overridable with --model-id.
+#
+# CHANGED 2026-08-03 (final run): 1.5B -> 3B.
+#
+# 1.5B was chosen in SPEC v1 for a constraint that no longer applies: the local
+# dev card had 4 GB, and §5a notes "Qwen2.5-1.5B at FP16 is ~3.1 GB against a
+# 4 GB card". Everything now runs on A100s. §5a's own contingency pre-authorised
+# this move ("move model 1 to Qwen/Qwen2.5-3B-Instruct for more parametric
+# redundancy"); it was never triggered because the floor effect appeared at 0.5B
+# rather than at the reference.
+#
+# Two measured reasons to move it now:
+#   1. all@3B-4bit scores 37.7 EM at 1917 MB against the 1.5B-fp16 reference's
+#      32.2 EM at 2944 MB — better accuracy AND less memory. The old reference is
+#      Pareto-dominated by one of our own runs.
+#   2. 32.2 EM sits on the bottom edge of §5a's healthy 30-45 band. A 3B reference
+#      sits mid-band, leaving headroom for degradation to register.
+model_id: Qwen/Qwen2.5-3B-Instruct
 
 # Aliases for the size axis (SPEC §2 Phase S, §8). `base` always resolves to
 # model_id above, so it does not need an entry. Same family, same tokenizer, same
 # instruct recipe as the base model — the closest available approximation to a
 # pure parameter-count intervention (SPEC §12's stated limitation).
+#
+# `small` is now 1.5B, not 0.5B. This is the whole point of re-basing. At 0.5B the
+# size arm was not measuring graded size sensitivity, it was measuring a phase
+# transition into format non-compliance: extractor parse success collapsed to
+# 56.2% (and to 28.3% at all@0.5B-4bit), and 91.9% of those failures were the
+# model emitting usable content in the wrong container. A 3B -> 1.5B step keeps
+# BOTH arms instruction-capable (both parse >94%), so the size cost measured is a
+# capability cost rather than a compliance cliff.
+#
+# The 0.5B tier is not deleted — it is a separate, already-collected tier and is
+# the right evidence for "where does the floor sit", just not for "how much does
+# shrinking cost".
 models:
-  small: Qwen/Qwen2.5-0.5B-Instruct
-  # Model 2's pair, for build step 17:
-  #   base:  meta-llama/Llama-3.2-3B-Instruct   (via model_id)
-  #   small: meta-llama/Llama-3.2-1B-Instruct
+  small: Qwen/Qwen2.5-1.5B-Instruct
+  tiny: Qwen/Qwen2.5-0.5B-Instruct   # the old `small`; floor-effect tier only
 
 dataset:
   name: hotpot_qa
@@ -29,7 +54,7 @@ dataset:
   # a four-way role ranking and we could not.
   #
   # Costs ~4.0 GPU-h for all five runs (measured 1.61 h at n=300, scaled).
-  n: 750
+  n: 1500
 
   # Seed for sampling the n evaluation questions.
   #
@@ -40,7 +65,11 @@ dataset:
   eval_seed: 7
 
 generation:
-  batch_size: 16        # SPEC §6: start at 16, auto-reduce on OOM
+  # PINNED to 32 for the entire final tier. The previous 3B attempt was
+  # invalidated because fp16/8bit autotuned to 32 while 4bit stayed at 64 — batch
+  # size varied WITH the arm being compared, so nothing in that tier was
+  # comparable. Every run here uses 32 so an OOM-autotune cannot reintroduce it.
+  batch_size: 32
   min_batch_size: 1
 
   # Log per-call answer confidence (mean/min token logprob, mean entropy) so the
@@ -128,3 +157,65 @@ runs:
     step_definer: {model: small, precision: fp16}
     extractor: {model: small, precision: fp16}
     qa: {model: small, precision: fp16}
+
+  # --- 8-bit tier. LLM.int8 is SLOW (measured ~5-6x fp16 on the extractor stage);
+  # budget accordingly. Never run before 2026-08-02, so treat the first one as a
+  # smoke test.
+  planner_8bit:
+    planner: 8bit
+    step_definer: fp16
+    extractor: fp16
+    qa: fp16
+  stepdef_8bit:
+    planner: fp16
+    step_definer: 8bit
+    extractor: fp16
+    qa: fp16
+  extractor_8bit:
+    planner: fp16
+    step_definer: fp16
+    extractor: 8bit
+    qa: fp16
+  qa_8bit:
+    planner: fp16
+    step_definer: fp16
+    extractor: fp16
+    qa: 8bit
+
+  # --- uniform arms at the reference size, for the memory frontier (SPEC 5d).
+  ma_uniform_8bit:
+    planner: 8bit
+    step_definer: 8bit
+    extractor: 8bit
+    qa: 8bit
+
+  ma_uniform_tiny:        # all@0.5B-fp16 — floor end of the memory frontier
+    planner: {model: tiny, precision: fp16}
+    step_definer: {model: tiny, precision: fp16}
+    extractor: {model: tiny, precision: fp16}
+    qa: {model: tiny, precision: fp16}
+
+  # --- second size step: 3B -> 0.5B. Crosses the compliance floor on purpose,
+  # so the size axis has a DOSE-RESPONSE (3B -> 1.5B -> 0.5B) rather than a
+  # single point. 1.5B stays compliant, 0.5B does not; that contrast is the
+  # measurement.
+  planner_tiny:
+    planner: {model: tiny, precision: fp16}
+    step_definer: fp16
+    extractor: fp16
+    qa: fp16
+  stepdef_tiny:
+    planner: fp16
+    step_definer: {model: tiny, precision: fp16}
+    extractor: fp16
+    qa: fp16
+  extractor_tiny:
+    planner: fp16
+    step_definer: fp16
+    extractor: {model: tiny, precision: fp16}
+    qa: fp16
+  qa_tiny:
+    planner: fp16
+    step_definer: fp16
+    extractor: fp16
+    qa: {model: tiny, precision: fp16}

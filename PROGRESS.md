@@ -4,6 +4,73 @@ Handoff log. Read SPEC.md first, then the newest entry here, then `git log`.
 
 ---
 
+## 2026-08-03 — FINAL RUN CONFIG. Reference re-based to 3B. Nothing launched yet.
+
+Branch `final-3b-reference`. One 24-hour A100 window remains; this is the config that
+window will spend. **The tier is self-contained: every comparison lives inside it, and
+no earlier result is used as a control.** Prior tiers become legacy.
+
+### Reference moved 1.5B -> 3B (human decision)
+
+1.5B was chosen in SPEC v1 because the local dev card had 4 GB (§5a: "~3.1 GB against a
+4 GB card"). Everything runs on A100s now, and §5a pre-authorised this move. Two measured
+reasons: `all@3B-4bit` scored 37.7 EM at 1917 MB against the 1.5B reference's 32.2 EM at
+2944 MB — the old reference was Pareto-dominated by one of our own runs — and 32.2 sits
+on the bottom edge of §5a's healthy band.
+
+`small` alias moved 0.5B -> **1.5B**; 0.5B becomes `tiny`. At 0.5B the size arm measured a
+format-compliance cliff, not size sensitivity (extractor parse 56.2%, and 91.9% of those
+failures were usable content in the wrong container). 3B->1.5B keeps both arms compliant.
+Keeping 0.5B as `tiny` gives a **dose-response**: 3B -> 1.5B -> 0.5B.
+
+### Settings: n=1500, seed 7, batch 32 PINNED, log_confidence off, 21 runs
+
+**Batch 32 is pinned for the whole tier.** The previous 3B attempt was invalidated because
+fp16/8bit autotuned to 32 while 4bit stayed at 64 — batch size varied *with the arm being
+compared*. Pinning it means an OOM-autotune cannot reintroduce that.
+
+### The 3B parse problem: diagnosed, and half of it fixed
+
+3B fp16/8bit have a failure mode 1.5B does not. Extractor failures, n=3000:
+
+    1.5B fp16   4.8%    nested   0    unescaped-quote 303
+    3B  fp16   12.7%    nested 330    unescaped-quote 376
+    3B  8bit   19.5%    nested 600    unescaped-quote 685
+    3B  4bit    7.4%    nested  13    unescaped-quote 516
+
+**Cause A, unescaped quotes** — the Extractor is told to copy VERBATIM, HotpotQA is full of
+quoted titles, and copying `"Tunnels & Trolls"` into a JSON string without escaping breaks
+the JSON. This is a conflict between the task and the output format, hits every model size,
+and is NOT fixed. Repair means guessing span boundaries inside a broken string. Left as a
+measured limitation.
+
+**Cause B, nested arrays** `{"spans": [[...]]}` — a 3B fp16/8bit tic. FIXED in
+`parsing.salvage()`, together with bare arrays, single-wrong-key dicts, and bare `[]`/`{}`.
+
+`parse_status` is deliberately untouched — verified **0 changes across 369,728 records** —
+so the format metric stays comparable while the accuracy metric stops being taxed by a
+wrapper. On the real 3B corpus salvage recovers 580/956 (fp16) and 783/1468 (8bit), and
+**76% of recovered spans are verbatim-in-source, matching the 77.8% of cleanly-parsed
+calls** — recovered content is the same quality as content that never failed.
+
+### Verified locally before launch
+
+- 3B @ 4-bit: full 4-stage run, clean
+- 3B @ 8-bit: full 4-stage run, **nested tic reproduced live** (1 of 6 extractor calls),
+  labelled `schema_mismatch`, recovered by salvage
+- OOM autotune: forced a real OutOfMemoryError with `set_per_process_memory_fraction`;
+  halves correctly (16->8->4), 8 calls requested / 8 written / 0 duplicates / 0 missing
+- **3B @ fp16 is UNTESTED** — 6.2 GB will not fit a 4 GB card. This is the one remaining
+  unknown, and it is the reference cell. **Run `baseline` FIRST.**
+
+### Launch order (front-loads cheap, high-value cells)
+
+baseline -> 4x _4bit -> 4x _small -> 4x _8bit -> 4x _tiny -> uniform arms.
+~11.5 h estimated of the 24. `extractor_8bit` is the single most expensive run
+(LLM.int8 measured 5-6x slower than fp16).
+
+---
+
 ## 2026-08-01 (latest) — SPEC v2: SIZE AXIS ADDED. Repairs done. Next: analyze.py, Gate 3.
 
 **SPEC.md rewritten to v2.** v1 answered "which role is most sensitive to quantization?"

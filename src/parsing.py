@@ -197,10 +197,49 @@ def salvage(role: str, raw_output: str) -> dict | None:
             obj = json.loads(blob)
         except (json.JSONDecodeError, ValueError):
             continue
+        if isinstance(obj, list) and role == "extractor":
+            # A bare array IS the spans list, just unwrapped. The 0.5B signature.
+            keep = [s.strip() for s in obj if isinstance(s, str) and s.strip()]
+            return {"spans": keep}
         if not isinstance(obj, dict):
             continue
         out = {}
-        if role == "step_definer":
+        if role == "extractor":
+            # CONTAINER-ONLY failures: content is right, wrapper is wrong. Each of
+            # these was observed in real runs and is unambiguous to unwrap.
+            #
+            #   {"spans": [[...]]}   nested one level too deep. 330 calls at
+            #                        3B/fp16 and 600 at 3B/8bit; ~0 at 1.5B and
+            #                        at 3B/4bit. A scale-specific tic.
+            #   ["a", "b"]           bare array, no wrapper. The 0.5B signature.
+            #   {"other_key": ...}   right content under the wrong key.
+            #   []  or  {}           "no evidence", which the schema already
+            #                        allows as {"spans": []} — the model just
+            #                        omitted the wrapper.
+            #
+            # NOT handled here on purpose: unescaped inner double quotes, which
+            # are the largest bucket. Those need character-level repair of a
+            # string the model copied from the source, and guessing where one
+            # span ends and the next begins is speculative. See SPEC §13c.
+            v = obj.get("spans")
+            if isinstance(v, list):
+                flat = []
+                for e in v:
+                    if isinstance(e, str) and e.strip():
+                        flat.append(e.strip())
+                    elif isinstance(e, list):  # nested one level
+                        flat += [s.strip() for s in e if isinstance(s, str) and s.strip()]
+                out["spans"] = flat          # may legitimately be []
+            elif len(obj) == 1:
+                val = next(iter(obj.values()))
+                if isinstance(val, str) and val.strip():
+                    out["spans"] = [val.strip()]
+                elif isinstance(val, list):
+                    out["spans"] = [s.strip() for s in val
+                                    if isinstance(s, str) and s.strip()]
+            elif not obj:
+                out["spans"] = []
+        elif role == "step_definer":
             terms = obj.get("search_terms")
             if _is_str_list(terms):
                 out["search_terms"] = [t.strip() for t in terms]
