@@ -1,40 +1,54 @@
-"""Does iterative decomposition beat a single query on 2WikiMQA? CPU only.
+"""Does iterative decomposition beat a single query? CPU only, no GPU.
 
-WHY THIS DATASET
-----------------
-On HotpotQA distractor, decomposition lost at every k, on two independent BM25
-implementations, even with oracle bridge splicing. Cause: HotpotQA questions NAME
-both gold entities, so one query already carries the full lexical signal and
-splitting it strictly discards information. There was no hidden entity to find.
+THE BUG THIS DIAGNOSES
+----------------------
+SPEC §3 used HotpotQA's *distractor* setting, which hands over 10 paragraphs
+containing both gold. MA-RAG uses the *open-domain* setting and issues repeated
+targeted queries against millions of passages. With gold guaranteed present
+there is nothing to retrieve, so decomposition has no mechanism through which to
+help and the four agents are pure overhead -- hence single_fp16 winning by 9.2
+EM. The fix is to restore the haystack, not to change the pipeline.
 
-2WikiMQA -- also one of MA-RAG's evaluation sets -- is built from Wikidata
-entity->relation->entity chains, and three of its four question types leave the
-bridge entity UNNAMED:
+WHAT DECIDES WHETHER DECOMPOSITION PAYS
+---------------------------------------
+Whether the question NAMES the entity whose page you need.
 
-    compositional      "Who is the mother of the director of film X?"
-                       evidences = (X, director, B), (B, mother, ANS)
-                       B is never in the question; its page must be retrieved.
-    inference          "Who is X's paternal grandfather?"
-    bridge_comparison  four gold titles, two bridges, only two named
-    comparison         both named -- the HotpotQA-like control
+    "Which magazine started first, Arthur's Magazine or First for Women?"
+        both gold titles are in the question -- one query finds both, and
+        splitting it strictly discards lexical signal.
 
-`evidences[i].entity` gives the bridge entity exactly, so the ceiling is
-measurable without running a model.
+    "Who is the mother of the director of film Polish-Russian War?"
+        gold = [Polish-Russian War, Xawery Zulawski]. The director is NEVER
+        named. No single query can retrieve his page. You must read hop-1,
+        learn the name, and issue a second query.
 
-ARMS (equal read budget: every arm returns at most k passages)
--------------------------------------------------------------
-    SINGLE    one query = the question, top-k.
-    ORACLE    hop-1 = question, top-k/2; hop-2 = gold bridge entity + relation,
-              top-k/2. Bridge handed over for free. Upper bound only.
-    GROUNDED  identical, EXCEPT the bridge is spliced only when it literally
-              appears in the text of a passage hop-1 actually retrieved. This is
-              what a perfect Extractor could recover -- a real one does worse.
-              When the bridge is unrecoverable the arm falls back to top-k
-              single, so it is never given free information.
+So the arms are stratified by whether a gold title is HIDDEN (absent from the
+question text), and hidden-title recall is the number that matters -- it is
+precisely what the second hop exists to reach.
 
-GROUNDED is the number that decides the build. If it does not clear SINGLE on
-the hidden-bridge types by a useful margin, iteration cannot be rescued on this
-dataset either and the redesign stops here.
+ARMS -- equal read budget, every arm returns at most k passages
+---------------------------------------------------------------
+    SINGLE     one query = the question, top-k.
+    TWO_PASS   hop-1 = question, top-k/2. Then for each hidden gold title whose
+               name literally occurs in the text of a passage hop-1 ACTUALLY
+               RETRIEVED, issue a hop-2 query of that name plus the question.
+               Union, capped at k.
+               If nothing is recoverable it falls back to plain top-k, so the
+               arm is never handed information it could not have read.
+    ORACLE     same, but every hidden title is spliced whether or not hop-1
+               surfaced it. Upper bound; the gap to TWO_PASS is the cost of
+               imperfect resolution.
+
+Bridges are derived identically for both datasets (hidden gold title), so the
+comparison is like-for-like and 2WikiMQA gets no advantage from its `evidences`
+annotations.
+
+CAVEAT, stated because it bounds the claim
+------------------------------------------
+TWO_PASS assumes perfect entity SELECTION: a real Extractor reading hop-1 sees
+many entities and must choose which to follow. This measures the ceiling of that
+choice, not the choice itself. Degrading the Extractor is exactly what makes a
+real system fall short of it -- which is the experiment.
 """
 
 import argparse
@@ -44,41 +58,53 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-DATASET = "scholarly-shadows-syndicate/2wikimultihopqa_with_q_gpt35"
-TYPES = ["compositional", "inference", "bridge_comparison", "comparison", "ALL"]
+SETS = {
+    "hotpot": {
+        "path": ("hotpotqa/hotpot_qa", "distractor"),
+        "split": "validation",
+        "sents": "sentences",
+        "types": ["bridge", "comparison"],
+    },
+    "2wiki": {
+        "path": ("scholarly-shadows-syndicate/2wikimultihopqa_with_q_gpt35", None),
+        "split": "validation",
+        "sents": "content",
+        "types": ["compositional", "inference", "bridge_comparison", "comparison"],
+    },
+}
 
 
 def norm(s: str) -> str:
     return " ".join((s or "").lower().split())
 
 
-def named_in(title: str, question: str) -> bool:
-    """Is this gold title lexically present in the question itself?"""
-    return norm(title) in norm(question)
-
-
 def main() -> int:
     ap = argparse.ArgumentParser()
+    ap.add_argument("--set", choices=SETS, default="hotpot")
     ap.add_argument("--n", type=int, default=1500)
     ap.add_argument("--ks", default="10,20")
     args = ap.parse_args()
     ks = [int(k) for k in args.ks.split(",")]
+    cfg = SETS[args.set]
 
     from datasets import load_dataset
 
     from src.retrieval import BM25Index, Passage
 
-    ds = load_dataset(DATASET, split="validation")
+    name, sub = cfg["path"]
+    ds = load_dataset(name, sub, split=cfg["split"]) if sub else \
+        load_dataset(name, split=cfg["split"])
 
     seen: dict[str, str] = {}
     for row in ds:
         ctx = row["context"]
-        for title, sents in zip(ctx["title"], ctx["content"]):
+        for title, sents in zip(ctx["title"], ctx[cfg["sents"]]):
             if title not in seen:
                 seen[title] = " ".join(s.strip() for s in sents).strip()
     passages = [Passage(t, x) for t, x in seen.items()]
     text_of = {p.title: norm(p.text) for p in passages}
-    print(f"corpus: {len(passages):,} unique passages; indexing...", flush=True)
+    print(f"{args.set}: {len(ds):,} questions, {len(passages):,} unique passages")
+    print("indexing...", flush=True)
     index = BM25Index(passages)
     print("indexed\n", flush=True)
 
@@ -90,106 +116,94 @@ def main() -> int:
             print(f"  {i}/{len(rows)}", flush=True)
 
         q = row["question"]
+        qn = norm(q)
         gold = list(dict.fromkeys(row["supporting_facts"]["title"]))
         if len(gold) < 2:
             continue
         qtype = row["type"]
         gset = set(gold)
-
-        ev = row["evidences"]
-        # A bridge is a hop-1 object entity that the question does not name but
-        # whose page is gold. Those are exactly the titles decomposition exists
-        # to reach.
-        bridges = []
-        for fact, rel, ent in zip(ev["fact"], ev["relation"], ev["entity"]):
-            if named_in(ent, q):
-                continue
-            match = next((g for g in gold if norm(g).startswith(norm(ent))), None)
-            if match and match not in bridges:
-                bridges.append((match, ent, rel))
-        hidden = {g for g in gold if not named_in(g, q)}
+        hidden = [g for g in gold if norm(g) not in qn]
 
         single_full = index.search_titles(q, max(ks))
+        strat = "hidden-bridge" if hidden else "fully-named"
 
         for k in ks:
             half = max(1, k // 2)
             s_at_k = set(single_full[:k])
-
             hop1 = single_full[:half]
             hop1_text = " ".join(text_of.get(t, "") for t in hop1)
 
-            def follow(pairs, use_relation=True):
-                """Union hop-1 with one hop-2 query per resolved bridge."""
-                out = set(hop1)
-                if not pairs:
+            def follow(bridges):
+                if not bridges:
                     return set(single_full[:k])
-                per = max(1, half // len(pairs))
-                for _title, ent, rel in pairs:
-                    # REALISTIC mode spends no gold relation string: a refiner
-                    # only has the resolved entity and the question it started
-                    # from.
-                    tail = rel if use_relation else q
-                    out |= set(index.search_titles(f"{ent} {tail}", per))
+                out = set(hop1)
+                per = max(1, half // len(bridges))
+                for ent in bridges:
+                    out |= set(index.search_titles(f"{ent} {q}", per))
                 return out
 
-            oracle = follow(bridges)
-            # GROUNDED: keep only bridges a reader could actually have extracted
-            # from the passages hop-1 returned.
-            recoverable = [b for b in bridges if norm(b[1]) in hop1_text]
-            grounded = follow(recoverable)
-            realistic = follow(recoverable, use_relation=False)
+            oracle = follow(hidden)
+            # Only follow a bridge a reader could actually have read off hop-1.
+            recoverable = [h for h in hidden if norm(h) in hop1_text]
+            two_pass = follow(recoverable)
 
-            for scope, targets in (("all", gset), ("hidden", hidden)):
-                if not targets:
-                    continue
-                a = acc[(qtype, k, scope)]
-                b = acc[("ALL", k, scope)]
-                for key, got in (("single", s_at_k), ("oracle", oracle),
-                                 ("grounded", grounded), ("realistic", realistic)):
-                    v = len(targets & got) / len(targets)
-                    a[key] += v
-                    b[key] += v
-                    a[key + "_full"] += float(targets <= got)
-                    b[key + "_full"] += float(targets <= got)
+            for key in ((qtype, k), (strat, k), ("ALL", k)):
+                a = acc[key]
+                for arm, got in (("single", s_at_k), ("two_pass", two_pass),
+                                 ("oracle", oracle)):
+                    a[arm] += len(gset & got) / len(gset)
+                    a[arm + "_full"] += float(gset <= got)
+                    if hidden:
+                        hs = set(hidden)
+                        a[arm + "_hid"] += len(hs & got) / len(hs)
                 a["n"] += 1
-                b["n"] += 1
+                if hidden:
+                    a["n_hid"] += 1
+                    a["recoverable"] += len(recoverable) / len(hidden)
 
-            if bridges:
-                for d in (acc[(qtype, k, "all")], acc[("ALL", k, "all")]):
-                    d["bridged"] += 1
-                    d["recoverable"] += len(recoverable) / len(bridges)
-
-    hdr = (f"{'type':<19}{'k':>4}{'scope':>8}{'n':>6}{'SINGLE':>9}"
-           f"{'REALISTIC':>11}{'gain':>8}{'GROUNDED':>10}{'ORACLE':>9}")
-    print("\n" + hdr)
+    groups = cfg["types"] + ["hidden-bridge", "fully-named", "ALL"]
+    hdr = (f"{'stratum':<19}{'k':>4}{'n':>6}{'%hid':>7}"
+           f"{'SINGLE':>9}{'TWO_PASS':>10}{'gain':>8}{'ORACLE':>9}")
+    print("\n=== recall over ALL gold titles ===")
+    print(hdr)
     print("-" * len(hdr))
-    for qtype in TYPES:
+    for g in groups:
         for k in ks:
-            for scope in ("all", "hidden"):
-                a = acc.get((qtype, k, scope))
-                if not a or not a["n"]:
-                    continue
-                n = a["n"]
-                s, r = a["single"] / n, a["realistic"] / n
-                g, o = a["grounded"] / n, a["oracle"] / n
-                mark = "  <<<" if scope == "hidden" and r - s > 0.05 else ""
-                print(f"{qtype:<19}{k:>4}{scope:>8}{int(n):>6}{s:>9.3f}"
-                      f"{r:>11.3f}{r - s:>+8.3f}{g:>10.3f}{o:>9.3f}{mark}")
-        print()
-
-    print(f"{'type':<19}{'k':>4}{'all-gold SINGLE':>17}{'REALISTIC':>11}{'gain':>8}"
-          f"{'  bridge recoverable from hop-1':>32}")
-    for qtype in TYPES:
-        for k in ks:
-            a = acc.get((qtype, k, "all"))
+            a = acc.get((g, k))
             if not a or not a["n"]:
                 continue
             n = a["n"]
-            rec = (a["recoverable"] / a["bridged"]) if a["bridged"] else float("nan")
-            print(f"{qtype:<19}{k:>4}{a['single_full'] / n:>17.3f}"
-                  f"{a['realistic_full'] / n:>11.3f}"
-                  f"{a['realistic_full'] / n - a['single_full'] / n:>+8.3f}"
-                  f"{rec:>32.3f}")
+            s, t, o = a["single"] / n, a["two_pass"] / n, a["oracle"] / n
+            mark = "  <<<" if t - s > 0.05 else ""
+            print(f"{g:<19}{k:>4}{int(n):>6}{a['n_hid'] / n:>7.2f}"
+                  f"{s:>9.3f}{t:>10.3f}{t - s:>+8.3f}{o:>9.3f}{mark}")
+        print()
+
+    print("=== recall over HIDDEN gold titles only (what hop-2 exists for) ===")
+    print(hdr.replace("%hid", "recov"))
+    print("-" * len(hdr))
+    for g in groups:
+        for k in ks:
+            a = acc.get((g, k))
+            if not a or not a["n_hid"]:
+                continue
+            nh = a["n_hid"]
+            s, t, o = a["single_hid"] / nh, a["two_pass_hid"] / nh, a["oracle_hid"] / nh
+            mark = "  <<<" if t - s > 0.05 else ""
+            print(f"{g:<19}{k:>4}{int(nh):>6}{a['recoverable'] / nh:>7.2f}"
+                  f"{s:>9.3f}{t:>10.3f}{t - s:>+8.3f}{o:>9.3f}{mark}")
+        print()
+
+    print("=== ALL-gold-retrieved (can the question be answered at all?) ===")
+    print(f"{'stratum':<19}{'k':>4}{'n':>6}{'SINGLE':>9}{'TWO_PASS':>10}{'gain':>8}")
+    for g in groups:
+        for k in ks:
+            a = acc.get((g, k))
+            if not a or not a["n"]:
+                continue
+            n = a["n"]
+            s, t = a["single_full"] / n, a["two_pass_full"] / n
+            print(f"{g:<19}{k:>4}{int(n):>6}{s:>9.3f}{t:>10.3f}{t - s:>+8.3f}")
     return 0
 
 
