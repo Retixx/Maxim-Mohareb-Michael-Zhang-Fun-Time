@@ -297,7 +297,11 @@ def run(cfg: dict, run_id: str, n: int | None, seed: int | None, batch_size: int
     log_confidence = bool(cfg["generation"].get("log_confidence", False))
     results_dir = Path(cfg.get("results_dir", "results"))
 
-    print(f"=== run {run_id} | {model_id} | n={n} seed={seed} "
+    # Show the models this run ACTUALLY uses, not just the config's base model.
+    # The old header printed `model_id` alone, so a 3B run announced itself as
+    # "Qwen2.5-1.5B-Instruct" and looked like it was running the wrong model.
+    used = sorted({t["model_id"] for t in treatments.values()})
+    print(f"=== run {run_id} | {' + '.join(used)} | n={n} seed={seed} "
           f"batch={batch_size} prompts={prompts.PROMPT_VERSION} ===")
     for s, t in treatments.items():
         print(f"    {s:<14} {t['model_id']} @ {t['precision']}")
@@ -329,6 +333,30 @@ def run(cfg: dict, run_id: str, n: int | None, seed: int | None, batch_size: int
     meta_path = results_dir / f"{slug}.meta.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
     stage_meta = meta.get("stages", {})
+
+    # The slug carries run_id, model, n and seed — but NOT batch size. Resuming a
+    # run at a different batch size therefore silently appends incompatible
+    # records, or (if the run was already complete) reports "wall 0s" and exits
+    # having done nothing while looking like a success. That happened: a
+    # deliberate `--batch-size 32` baseline re-read the batch-64 file and
+    # reported the batch-64 numbers.
+    #
+    # Greedy decoding is deterministic for a fixed batch and NOT across
+    # re-batchings (SPEC §6), so mixing them inside one run is never valid.
+    # Refuse loudly instead.
+    prior_bs = meta.get("batch_size")
+    if prior_bs is not None and prior_bs != batch_size and existing:
+        raise SystemExit(
+            f"\nREFUSING TO RESUME: {slug} was generated at batch_size={prior_bs}, "
+            f"but you asked for {batch_size}.\n"
+            f"  Greedy output depends on batch composition, so the two are not "
+            f"interchangeable.\n"
+            f"  Either rerun at --batch-size {prior_bs}, or delete "
+            f"results/{slug}.* and start clean."
+        )
+    if not existing and prior_bs is not None:
+        # jsonl gone but meta left behind — stale metadata from a deleted run.
+        meta, stage_meta = {}, {}
 
     store.open()
     t_run = time.perf_counter()

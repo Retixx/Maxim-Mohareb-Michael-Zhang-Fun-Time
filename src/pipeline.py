@@ -157,6 +157,18 @@ def build_stage_calls(stage: str, questions: list[dict], idx: dict) -> list[dict
                 })
         return calls
 
+    if stage == "solo":
+        # SPEC §4a: one call per question, whole paragraph set in, short answer
+        # out. No planner, no sub-questions, no extraction — that absence IS the
+        # experiment.
+        for q in questions:
+            calls.append({
+                "question_id": q["question_id"],
+                "call_index": 0,
+                "fields": {"paragraphs": q["paragraphs"], "question": q["question"]},
+            })
+        return calls
+
     if stage == "qa":
         for q in questions:
             # NOT named `evidence`: that would bind a local of the same name as
@@ -181,7 +193,8 @@ def build_answer_records(questions: list[dict], idx: dict, run_id: str) -> list[
     """One scored record per question, from the QA stage's outputs (SPEC §7)."""
     out = []
     for q in questions:
-        rec = idx.get((q["question_id"], "qa", 0))
+        # A single-call run has no qa stage; its answer comes from `solo`.
+        rec = idx.get((q["question_id"], "qa", 0)) or idx.get((q["question_id"], "solo", 0))
         parsed = rec["parsed"] if rec else None
         pred = (parsed or {}).get("answer", "")
         out.append({
@@ -193,7 +206,8 @@ def build_answer_records(questions: list[dict], idx: dict, run_id: str) -> list[
             "predicted_answer": pred,
             "em": exact_match(pred, q["answer"]),
             "f1": f1_score(pred, q["answer"]),
-            "n_sub_questions": len(sub_questions_for(q, idx)),
+            "n_sub_questions": len(sub_questions_for(q, idx))
+                                if idx.get((q["question_id"], "planner", 0)) else 0,
             "level": q.get("level"),
             "type": q.get("type"),
         })

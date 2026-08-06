@@ -84,11 +84,20 @@ PROMPT_VERSION = "v5"
 # must bump this version and be re-run at every precision.
 
 # Roles, in pipeline order. Used everywhere as the canonical stage names.
-ROLES = ["planner", "step_definer", "extractor", "qa"]
+ROLES = ["planner", "step_definer", "extractor", "qa", "solo"]
+
+# `solo` is the single-call RAG baseline (SPEC §4a). It is NOT part of the
+# four-agent pipeline and never runs alongside the others — a `single_*` run
+# defines only this stage. It exists to answer the question the Planner result
+# raised: degrading the Planner never hurt accuracy, and at 0.5B it failed to
+# parse 37.6% of the time (falling back to no decomposition at all) while
+# accuracy went UP. If one call matches four agents, that is the most useful
+# finding in the project, and it has to be measured rather than inferred.
 
 # Generation budget per role. `truncated` in the failure taxonomy means the
 # generation hit exactly this cap without emitting EOS.
 MAX_NEW_TOKENS = {
+    "solo": 48,      # same budget as QA: both emit one short answer
     "planner": 160,
     "step_definer": 160,
     "extractor": 320,
@@ -218,7 +227,45 @@ Question: {question}
 JSON:"""
 
 
+# --------------------------------------------------------------------------
+# Solo  (single-call RAG baseline, SPEC §4a)
+# --------------------------------------------------------------------------
+# Deliberately mirrors QA's contract, rules and worked example so the comparison
+# isolates DECOMPOSITION, not prompt quality. The only difference is what it
+# reads: raw paragraphs instead of extracted evidence. Same output schema, same
+# parser, same failure taxonomy, same token budget.
+
+SOLO_SYSTEM = """You are a question-answering system.
+You give the final answer using the provided paragraphs.
+
+Rules:
+- The answer must be SHORT: a name, a date, a number, a title, or "yes" / "no".
+- Never answer in a sentence. Never explain. Never restate the question.
+- Base the answer on the paragraphs. If they are insufficient, give your best short guess anyway.
+- Reply with JSON only. No explanation, no markdown fences.
+- The value of "answer" must be wrapped in double quotes, even for a single word.
+
+Reply with exactly this shape:
+{"answer": "..."}
+
+Example
+Paragraphs:
+[1] Jaws: Jaws is a 1975 American thriller film directed by Steven Spielberg.
+[2] Steven Spielberg: Spielberg attended California State University, Long Beach.
+Question: Which university did the director of Jaws attend?
+JSON:
+{"answer": "California State University, Long Beach"}"""
+
+SOLO_USER = """Paragraphs:
+{paragraphs}
+
+Question: {question}
+
+JSON:"""
+
+
 SYSTEM_PROMPTS = {
+    "solo": SOLO_SYSTEM,
     "planner": PLANNER_SYSTEM,
     "step_definer": STEP_DEFINER_SYSTEM,
     "extractor": EXTRACTOR_SYSTEM,
@@ -226,6 +273,7 @@ SYSTEM_PROMPTS = {
 }
 
 USER_PROMPTS = {
+    "solo": SOLO_USER,
     "planner": PLANNER_USER,
     "step_definer": STEP_DEFINER_USER,
     "extractor": EXTRACTOR_USER,

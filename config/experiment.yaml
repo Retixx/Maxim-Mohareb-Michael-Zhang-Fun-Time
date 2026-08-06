@@ -218,3 +218,24 @@ runs:
     step_definer: {model: mid, precision: 4bit}
     extractor: {model: mid, precision: 4bit}
     qa: {model: mid, precision: 4bit}
+
+  # ================= SINGLE-CALL RAG BASELINE (SPEC §4a) =====================
+  # One `solo` stage: all 10 paragraphs + the question in, one short answer out.
+  # No planner, no sub-questions, no extraction. Same output schema, parser,
+  # taxonomy and token budget as QA, so the comparison isolates DECOMPOSITION
+  # rather than prompt quality.
+  #
+  # Why this matters now: degrading the Planner never hurt accuracy on either
+  # axis (-0.17 at 4-bit, -0.90 at 0.5B), and at 0.5B it failed to parse 37.6%
+  # of the time -- falling back to no decomposition at all -- while EM went UP.
+  # If one call matches four agents, that is the most useful finding in the
+  # project, and it must be measured rather than inferred.
+  #
+  # Cheap: 1 call/question instead of ~6.3, so roughly 1/6 the cost of a full run.
+  single_fp16:
+    solo: fp16
+  single_4bit:
+    solo: 4bit
+  single_small:
+    solo: {model: small, precision: fp16}
+

@@ -66,9 +66,36 @@ def discover(results_dir, n, seed):
     pat = re.compile(r"^(.+?)_([a-z0-9.\-+]+)_n%d_seed%d\.jsonl$" % (n, seed))
     for path in sorted(glob.glob(os.path.join(results_dir, "*.jsonl"))):
         m = pat.match(os.path.basename(path))
-        if m:
-            out[m.group(1)] = path
+        if not m:
+            continue
+        # A run without metadata never completed — the meta blob is written last.
+        # Including it yields a row of NaNs that looks like a result. Skip and say so.
+        if not os.path.exists(path[: -len(".jsonl")] + ".meta.json"):
+            print(f"  [skip] {m.group(1)}: no .meta.json — run did not complete")
+            continue
+        out[m.group(1)] = path
     return out
+
+
+def integrity(run):
+    """Reasons this run is not comparable to a clean batch-64 run.
+
+    Batch size changes greedy output (SPEC §6), so a run whose stages disagree —
+    or that autotuned after an OOM, or whose metadata is missing stages because
+    it was spliced across two invocations — cannot be pooled with the rest of the
+    tier without a caveat. Surface it rather than letting it into a figure.
+    """
+    st = (run["meta"].get("stages") or {})
+    problems = []
+    missing = [s for s in ROLES if s not in st]
+    if missing:
+        problems.append(f"metadata missing {missing} (spliced across invocations)")
+    sizes = {v.get("final_batch_size") for v in st.values() if v.get("final_batch_size")}
+    if len(sizes) > 1:
+        problems.append(f"mixed batch sizes {sorted(sizes)}")
+    if any(v.get("oom_autotuned") for v in st.values()):
+        problems.append("OOM autotune fired")
+    return problems
 
 
 def load_run(path):
@@ -277,6 +304,14 @@ def main():
     row("baseline", base)
     for rid in sorted(runs):
         row(rid, runs[rid])
+
+    suspect = {rid: integrity(r) for rid, r in [("baseline", base)] + sorted(runs.items())}
+    suspect = {k: v for k, v in suspect.items() if v}
+    if suspect:
+        print("\n  !! NOT COMPARABLE TO A CLEAN batch-64 RUN — caveat or re-run before")
+        print("     these appear in any figure (SPEC §6: greedy output depends on batch):")
+        for rid, why in suspect.items():
+            print(f"       {rid:<18} {'; '.join(why)}")
 
     # ---- Table 2: Phase H ---------------------------------------------------
     print("\n" + "-" * 78)
