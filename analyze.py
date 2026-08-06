@@ -8,10 +8,10 @@ The script deliberately keeps design decisions executable:
 * The four 3B-8bit versus 1.5B-FP16 role contrasts share one 10,000-draw
   question bootstrap and use Holm family-wise correction.
 * 3B-4bit is a separate secondary family.
-* 0.5B is an appendix floor only: it is never offered to the allocation
-  selector and never enters the main Pareto claim.
+* 0.5B remains a lower-limit arm and enters the exploratory selector only for
+  roles whose question-clustered strict-protocol lower bound clears its gate.
 * Call-level rates are clustered by question; timing uses batch records only.
-* The exploratory allocation selector enumerates exactly 4^4 assignments and
+* The exploratory allocation selector declares exactly 5^4 assignments and
   charges every distinct resident configuration once.
 
 Typical use after the static runs finish::
@@ -41,13 +41,15 @@ from typing import Any, Callable
 import numpy as np
 import yaml
 
-from src import evidence as evidence_metrics
+from src import evidence as evidence_metrics, prompts
 from src.mechanism import SELECTION_FIELD, selection_changed_set
 from src.metrics import (
     DEFAULT_BOOTSTRAP_RESAMPLES,
     bootstrap_ci,
     clustered_ratio_bootstrap,
     holm_adjust,
+    exact_match,
+    f1_score,
     joint_bootstrap_draws,
     joint_paired_bootstrap,
 )
@@ -74,25 +76,28 @@ STATIC_RUN_IDS = {
     "ma_uniform_tiny",
 }
 
-# Deliberately closed.  In particular, tiny/0.5B is not accepted here even if a
-# config contract accidentally lists it.
-SELECTOR_CONFIGS = ("base_fp16", "base_8bit", "base_4bit", "small_fp16")
+SELECTOR_CONFIGS = (
+    "base_fp16", "base_8bit", "base_4bit", "small_fp16", "tiny_fp16"
+)
 SELECTOR_RUN_SUFFIX = {
     "base_8bit": "8bit",
     "base_4bit": "4bit",
     "small_fp16": "small",
+    "tiny_fp16": "tiny",
 }
 UNIFORM_RUN = {
     "base_fp16": BASELINE_RUN,
     "base_8bit": "ma_uniform_8bit",
     "base_4bit": "ma_uniform_4bit",
     "small_fp16": "ma_uniform_small",
+    "tiny_fp16": "ma_uniform_tiny",
 }
 SELECTOR_TREATMENT = {
     "base_fp16": "fp16",
     "base_8bit": "8bit",
     "base_4bit": "4bit",
     "small_fp16": {"model": "small", "precision": "fp16"},
+    "tiny_fp16": {"model": "tiny", "precision": "fp16"},
 }
 
 EXPECTED_FINAL_MANIFEST_SHA256 = (
@@ -119,6 +124,8 @@ class RunData:
     timing_meta_path: Path | None = None
     timing_n_questions: int | None = None
     timing_repetitions: int | None = None
+    orchestration: tuple[dict[str, Any], ...] = ()
+    timing_orchestration: tuple[dict[str, Any], ...] = ()
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -155,6 +162,33 @@ def _repo_path(value: str | Path) -> Path:
     return path if path.is_absolute() else Path(__file__).resolve().parent / path
 
 
+def _validate_analysis_environment_lock(config: dict[str, Any]) -> str:
+    """Bind a final report to the committed runtime lock and current source.
+
+    Analysis is CPU-only, so it cannot reproduce the A100/software snapshot.
+    It can and must still prove that every artifact names the exact lock file
+    present in the checkout and that the experiment-defining source bundle has
+    not changed since that lock was generated.
+    """
+    lock_path = _repo_path(
+        config.get("environment_lock_path", "config/environment.lock.json")
+    )
+    if not lock_path.exists():
+        raise AnalysisError(f"production environment lock is missing: {lock_path}")
+    try:
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise AnalysisError(f"invalid production environment lock: {lock_path}") from exc
+    from src.runner import source_bundle_sha256
+
+    if lock.get("source_bundle_sha256") != source_bundle_sha256():
+        raise AnalysisError(
+            "current experiment source bundle differs from the production "
+            "environment lock"
+        )
+    return file_hash(lock_path)
+
+
 def _batch_record(record: dict[str, Any]) -> bool:
     return record.get("record_type") in {"batch", "batch_timing"}
 
@@ -172,6 +206,7 @@ def load_run(meta_path: Path) -> RunData:
     calls: list[dict[str, Any]] = []
     call_keys: set[tuple[str, str, int]] = set()
     batches: list[dict[str, Any]] = []
+    orchestration: list[dict[str, Any]] = []
     with jsonl_path.open(encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, 1):
             if not line.strip():
@@ -197,9 +232,25 @@ def load_run(meta_path: Path) -> RunData:
                         raise AnalysisError(
                             f"{jsonl_path}:{line_number}: invalid answer metric {metric}"
                         )
+                if "predicted_answer" in record and "gold_answer" in record:
+                    recomputed = {
+                        "f1": f1_score(record["predicted_answer"], record["gold_answer"]),
+                        "em": exact_match(record["predicted_answer"], record["gold_answer"]),
+                    }
+                    bad_metrics = [
+                        metric for metric, value in recomputed.items()
+                        if not math.isclose(float(record[metric]), float(value), abs_tol=1e-12)
+                    ]
+                    if bad_metrics:
+                        raise AnalysisError(
+                            f"{jsonl_path}:{line_number}: stored answer metrics do not "
+                            f"match prediction/gold: {bad_metrics}"
+                        )
                 answers[str(question_id)] = record
             elif _batch_record(record):
                 batches.append(record)
+            elif record.get("record_type") == "stage_timing":
+                orchestration.append(record)
             elif record.get("record_type") in (None, "call", "agent_call"):
                 key = (
                     str(record.get("question_id")),
@@ -228,6 +279,7 @@ def load_run(meta_path: Path) -> RunData:
         meta=meta,
         jsonl_path=jsonl_path,
         meta_path=meta_path,
+        orchestration=tuple(orchestration),
     )
 
 
@@ -297,6 +349,8 @@ def discover_runs(
                 timing_repetitions=int(
                     timing_repetitions or timed.meta.get("timing_repetitions") or 1
                 ),
+                orchestration=primary.orchestration,
+                timing_orchestration=timed.orchestration,
             )
         elif accuracy:
             output[run_id] = accuracy[0]
@@ -353,7 +407,29 @@ def validate_final_cohort(config: dict[str, Any], runs: dict[str, RunData]) -> N
     complete = [run for run in runs.values() if run.answers]
     if not complete:
         return
+    active_environment_lock_sha256 = _validate_analysis_environment_lock(config)
     reference = runs.get(BASELINE_RUN, complete[0])
+    manifest_path = _repo_path((config.get("dataset") or {}).get("manifest_path"))
+    manifest_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_ids = manifest_payload.get("question_ids", manifest_payload.get("ids"))
+    if not isinstance(manifest_ids, list):
+        raise AnalysisError("configured final manifest has no ordered question IDs")
+    reference_strata = {
+        question_id: answer.get("retrieval_stratum")
+        for question_id, answer in reference.answers.items()
+    }
+    observed_strata = {
+        label: sum(value == label for value in reference_strata.values())
+        for label in ("hidden_bridge", "fully_named")
+    }
+    if observed_strata != (config.get("dataset") or {}).get(
+        "retrieval_strata_counts"
+    ):
+        raise AnalysisError(
+            "final retrieval-stratum counts differ from the frozen config: "
+            f"{observed_strata}"
+        )
+    experiment_fingerprints: set[str] = set()
     expected_manifest_file = (config.get("dataset") or {}).get("manifest_file_sha256")
     timing_config = config.get("timing") or {}
     timing_cohort = timing_config.get("cohort") or {}
@@ -372,15 +448,88 @@ def validate_final_cohort(config: dict[str, Any], runs: dict[str, RunData]) -> N
     timing_gpu_names: set[str] = set()
     configured_timing_runs = set(timing_config.get("run_ids") or ())
     post_selection_timing_run = timing_config.get("post_selection_run_id")
+    selected_timing_run = (
+        (config.get("frozen_allocation") or {}).get("execution_run_id")
+        or timing_config.get("selected_execution_run_id")
+    )
     allowed_timing_runs = configured_timing_runs | (
         {str(post_selection_timing_run)} if post_selection_timing_run else set()
-    )
+    ) | ({str(selected_timing_run)} if selected_timing_run else set())
+    from src.runner import resolve_treatments
     for run in complete:
+        if list(run.answers) != manifest_ids:
+            raise AnalysisError(f"{run.run_id}: answer IDs/order differ from final manifest")
         if _run_manifest_hash(run) != configured_hash:
             raise AnalysisError(
                 f"{run.run_id}: missing or mismatched question-manifest hash in metadata"
             )
         _same_question_ids(reference, run)
+        for question_id, answer in run.answers.items():
+            if answer.get("retrieval_stratum") not in {"hidden_bridge", "fully_named"}:
+                raise AnalysisError(f"{run.run_id}/{question_id}: invalid retrieval stratum")
+            if answer.get("retrieval_stratum") != reference_strata[question_id]:
+                raise AnalysisError(f"{run.run_id}/{question_id}: retrieval stratum changed")
+            if "predicted_answer" not in answer or "gold_answer" not in answer:
+                raise AnalysisError(f"{run.run_id}/{question_id}: missing answer text")
+            if answer.get("question_manifest_sha256") != configured_hash:
+                raise AnalysisError(
+                    f"{run.run_id}/{question_id}: answer manifest fingerprint changed"
+                )
+        experiment_fingerprint = run.meta.get("experiment_fingerprint")
+        if not experiment_fingerprint:
+            raise AnalysisError(f"{run.run_id}: missing experiment fingerprint")
+        experiment_fingerprints.add(str(experiment_fingerprint))
+        fingerprint_payload = run.meta.get("experiment_fingerprint_payload")
+        if (
+            not isinstance(fingerprint_payload, dict)
+            or content_hash(fingerprint_payload) != experiment_fingerprint
+            or fingerprint_payload.get("schema") != "open_corpus_marag_v1"
+            or fingerprint_payload.get("architecture") != config.get("architecture")
+            or tuple(fingerprint_payload.get("pipeline_stages") or ())
+            != tuple(prompts.PIPELINE_STAGES)
+            or fingerprint_payload.get("stage_role") != prompts.STAGE_ROLE
+            or fingerprint_payload.get("prompt_bundle_version")
+            != prompts.PROMPT_BUNDLE_VERSION
+            or fingerprint_payload.get("prompt_template_sha256")
+            != prompts.prompt_template_hashes()
+        ):
+            raise AnalysisError(
+                f"{run.run_id}: experiment fingerprint payload does not match "
+                "the active MA-RAG graph"
+            )
+        for record in (*run.calls, *run.answers.values()):
+            if record.get("experiment_fingerprint") != experiment_fingerprint:
+                raise AnalysisError(
+                    f"{run.run_id}: accuracy record has a stale/missing experiment "
+                    "fingerprint"
+                )
+        expected_treatments = resolve_treatments(config, run.run_id)
+        expected_stage_fingerprints = {
+            stage: treatment["config_fingerprint"]
+            for stage, treatment in expected_treatments.items()
+        }
+        if run.meta.get("stage_config_fingerprints") != expected_stage_fingerprints:
+            raise AnalysisError(f"{run.run_id}: stage treatments differ from config")
+        retrieval_meta = run.meta.get("retrieval") or {}
+        retrieval_config = config.get("retrieval") or {}
+        if (
+            fingerprint_payload.get("retrieval") != retrieval_meta
+            or retrieval_meta.get("algorithm") != retrieval_config.get("algorithm")
+            or int(retrieval_meta.get("corpus_passages", -1))
+            != int(retrieval_config.get("expected_corpus_passages", -2))
+            or
+            retrieval_meta.get("corpus_sha256")
+            != retrieval_config.get("expected_corpus_sha256")
+            or retrieval_meta.get("query_policy") != retrieval_config.get("query_policy")
+            or int(retrieval_meta.get("k_per_step", -1))
+            != int(retrieval_config.get("k", -2))
+            or float(retrieval_meta.get("gold_sentence_coverage", -1))
+            != float(retrieval_config.get("required_gold_sentence_coverage", -2))
+            or retrieval_meta.get(
+                "gold_sentence_text_nfkc_whitespace_equivalent"
+            ) is not True
+        ):
+            raise AnalysisError(f"{run.run_id}: retrieval treatment differs from config")
         if run.meta.get("metadata_complete") is not True:
             raise AnalysisError(f"{run.run_id}: metadata_complete is not true")
         expected_jsonl_hash = run.meta.get("jsonl_sha256")
@@ -405,6 +554,16 @@ def validate_final_cohort(config: dict[str, Any], runs: dict[str, RunData]) -> N
             raise AnalysisError(f"{run.run_id}: missing stage configuration fingerprints")
         if run.timing_meta is not None:
             timing_meta = run.timing_meta
+            if timing_meta.get("experiment_fingerprint") != experiment_fingerprint:
+                raise AnalysisError(f"{run.run_id}: timing experiment fingerprint changed")
+            for record in (
+                *run.timing_calls, *run.batches, *run.timing_orchestration
+            ):
+                if record.get("experiment_fingerprint") != experiment_fingerprint:
+                    raise AnalysisError(
+                        f"{run.run_id}: timing record has a stale/missing experiment "
+                        "fingerprint"
+                    )
             if allowed_timing_runs and run.run_id not in allowed_timing_runs:
                 raise AnalysisError(
                     f"{run.run_id}: timing benchmark is outside timing.run_ids"
@@ -441,7 +600,18 @@ def validate_final_cohort(config: dict[str, Any], runs: dict[str, RunData]) -> N
             if timing_meta.get("environment_lock_sha256") != environment_hash:
                 raise AnalysisError(f"{run.run_id}: timing replay environment changed")
             if timing_meta.get("git_commit") != git_commit:
-                raise AnalysisError(f"{run.run_id}: timing replay code revision changed")
+                frozen = config.get("frozen_allocation") or {}
+                selected_replay = (
+                    run.run_id == frozen.get("execution_run_id")
+                    and timing_meta.get("allocation_selection_artifact_sha256")
+                    == frozen.get("selection_artifact_sha256")
+                    and timing_meta.get("allocation_run_config_sha256")
+                    == frozen.get("run_config_sha256")
+                )
+                if not selected_replay:
+                    raise AnalysisError(
+                        f"{run.run_id}: timing replay code revision changed"
+                    )
             timing_fingerprints = timing_meta.get("stage_config_fingerprints") or {}
             if not timing_fingerprints or any(
                 stage_fingerprints.get(stage) != fingerprint
@@ -490,14 +660,18 @@ def validate_final_cohort(config: dict[str, Any], runs: dict[str, RunData]) -> N
                 )
             timing_gpu_uuids.update(record_uuids)
             timing_gpu_names.update(record_names)
-    if len(environment_hashes) > 1:
-        raise AnalysisError("accuracy runs used different environment locks")
+    if environment_hashes != {active_environment_lock_sha256}:
+        raise AnalysisError(
+            "accuracy runs do not all reference the active committed environment lock"
+        )
     if len(git_commits) > 1:
         raise AnalysisError("accuracy runs were generated from different git commits")
     if len(timing_gpu_uuids) > 1 or len(timing_gpu_names) > 1:
         raise AnalysisError(
             "timing benchmarks were not run on the same reserved physical A100"
         )
+    if len(experiment_fingerprints) != 1:
+        raise AnalysisError("accuracy runs used different pipeline/retrieval fingerprints")
 
 
 def _existing_selection_artifact(config: dict[str, Any]) -> dict[str, Any] | None:
@@ -528,7 +702,19 @@ def validate_campaign_completeness(
 ) -> None:
     """Fail closed unless the entire publishable campaign is present."""
     artifact = _existing_selection_artifact(config)
-    materialized = bool(artifact and artifact.get("materialized_new_run") is True)
+    # A selector trace belongs to both the base source config and the derived
+    # executable config.  Its selected run becomes a completeness requirement
+    # only for the latter.  Otherwise a strict base-config rerun after freezing
+    # selection (or after a crash between artifact/report writes) would demand a
+    # run the base config does not declare.
+    current_config_hash = content_hash(config)
+    is_derived_config = bool(
+        artifact
+        and artifact.get("executable_config_sha256") == current_config_hash
+    )
+    materialized = bool(
+        is_derived_config and artifact.get("materialized_new_run") is True
+    )
     configured_runs = set(config.get("runs") or {})
     allowed_configured_matrices = {frozenset(STATIC_RUN_IDS)}
     if materialized:
@@ -555,8 +741,11 @@ def validate_campaign_completeness(
 
     timing = config.get("timing") or {}
     expected_timing = set(timing.get("run_ids") or ())
-    if materialized:
-        expected_timing.add(OPTIMIZED_RUN)
+    selected_execution = (
+        artifact.get("execution_run_id") if is_derived_config else None
+    )
+    if selected_execution:
+        expected_timing.add(str(selected_execution))
     present_timing = {
         run_id for run_id, run in runs.items() if run.timing_meta is not None
     }
@@ -740,10 +929,33 @@ def analyze_accuracy_runs(
                 "ci_lower": lower,
                 "ci_upper": upper,
             }
+        labels = {answer.get("retrieval_stratum") for answer in run.answers.values()}
+        if labels - {"hidden_bridge", "fully_named", None}:
+            raise AnalysisError(f"{run_id}: invalid retrieval stratum labels {labels}")
+        if None not in labels:
+            summary["strata"] = {}
+            for stratum_index, stratum in enumerate(("hidden_bridge", "fully_named")):
+                selected = [
+                    answer for answer in run.answers.values()
+                    if answer["retrieval_stratum"] == stratum
+                ]
+                if not selected:
+                    raise AnalysisError(f"{run_id}: retrieval stratum {stratum} is empty")
+                stratum_summary: dict[str, Any] = {"n_questions": len(selected)}
+                for metric_index, metric in enumerate(("f1", "em")):
+                    estimate, lower, upper = bootstrap_ci(
+                        [100 * float(answer[metric]) for answer in selected],
+                        n_resamples=n_resamples,
+                        seed=seed + 1000 + 4 * run_index + 2 * stratum_index + metric_index,
+                    )
+                    stratum_summary[metric] = {
+                        "estimate": estimate, "ci_lower": lower, "ci_upper": upper,
+                    }
+                summary["strata"][stratum] = stratum_summary
         summary["primary_metric"] = "f1"
         summary["em_inferential_status"] = "descriptive_co_reported"
         if "tiny" in run_id:
-            summary["scope"] = "lower_limit_appendix_only"
+            summary["scope"] = "lower_limit_appendix_and_selector_gate_source"
             appendix[run_id] = summary
         else:
             summary["scope"] = (
@@ -752,6 +964,65 @@ def analyze_accuracy_runs(
             )
             main[run_id] = summary
     return {"main": main, "tiny_floor_appendix": appendix}
+
+
+def analyze_retrieval(
+    runs: dict[str, RunData],
+    *,
+    n_resamples: int,
+    seed: int,
+) -> dict[str, Any]:
+    """Shared retrieval/exposure diagnostics for multi-agent and solo arms."""
+    output: dict[str, Any] = {}
+    metrics = (
+        "retrieval_gold_title_recall",
+        "retrieval_all_gold",
+        "retrieval_query_count",
+        "retrieval_zero_result_query_count",
+        "retrieval_aggregate_step_count",
+        "retrieval_passage_exposures",
+        "retrieval_unique_titles",
+        "plan_depth",
+        "planner_emitted_depth",
+        "executed_plan_depth",
+        "executed_steps",
+        "plan_was_clamped",
+    )
+    for run_index, (run_id, run) in enumerate(sorted(runs.items())):
+        if not run.answers:
+            continue
+        summaries: dict[str, Any] = {}
+        groups = {"all": list(run.answers.values())}
+        if all(answer.get("retrieval_stratum") in {"hidden_bridge", "fully_named"}
+               for answer in run.answers.values()):
+            groups.update({
+                stratum: [
+                    answer for answer in run.answers.values()
+                    if answer["retrieval_stratum"] == stratum
+                ]
+                for stratum in ("hidden_bridge", "fully_named")
+            })
+        for group_index, (group_name, answers) in enumerate(groups.items()):
+            group: dict[str, Any] = {"n_questions": len(answers)}
+            for metric_index, metric in enumerate(metrics):
+                present = [answer for answer in answers if answer.get(metric) is not None]
+                if not present:
+                    continue
+                values = {
+                    str(answer["question_id"]): float(answer[metric]) for answer in present
+                }
+                group[metric] = _question_mean_summary(
+                    values,
+                    n_resamples=n_resamples,
+                    seed=seed + 100 * run_index + 10 * group_index + metric_index,
+                )
+            summaries[group_name] = group
+        output[run_id] = summaries
+    return {
+        "retrieval_unit": "configured_top_k_query_per_question_answering_plan_step",
+        "comparison_scope": "system_level_not_context_budget_matched",
+        "runs": output,
+    }
 
 
 def _rank_summary(
@@ -888,6 +1159,34 @@ def analyze_solo(
         )["single_minus_multiagent"]
         estimates.pop("p_value", None)
         output[metric] = estimates
+    output["strata"] = {}
+    baseline = runs[BASELINE_RUN]
+    solo = runs[SOLO_RUN]
+    for stratum_index, stratum in enumerate(("hidden_bridge", "fully_named")):
+        ids = [
+            question_id for question_id, answer in baseline.answers.items()
+            if answer.get("retrieval_stratum") == stratum
+        ]
+        if not ids:
+            continue
+        if any(solo.answers[question_id].get("retrieval_stratum") != stratum for question_id in ids):
+            raise AnalysisError(f"single/multi retrieval strata differ for {stratum}")
+        output["strata"][stratum] = {"n_questions": len(ids)}
+        for metric_index, metric in enumerate(("f1", "em")):
+            differences = {
+                question_id: 100 * (
+                    float(solo.answers[question_id][metric])
+                    - float(baseline.answers[question_id][metric])
+                )
+                for question_id in ids
+            }
+            result = joint_paired_bootstrap(
+                {"single_minus_multiagent": differences},
+                n_resamples=n_resamples,
+                seed=seed + 100 + 2 * stratum_index + metric_index,
+            )["single_minus_multiagent"]
+            result.pop("p_value", None)
+            output["strata"][stratum][metric] = result
     return output
 
 
@@ -1125,6 +1424,7 @@ def analyze_parse_failures(
 ) -> dict[str, Any]:
     """Mechanism telemetry; fan-out roles are question-clustered."""
     output: dict[str, Any] = {}
+    role_rollup: dict[str, Any] = {}
     for run_index, (run_id, run) in enumerate(sorted(runs.items())):
         stages: dict[str, Any] = {}
         present_stages = sorted(
@@ -1173,6 +1473,37 @@ def analyze_parse_failures(
                         n_resamples=n_resamples,
                         seed=seed + 10 * run_index + role_index + 3_000,
                     )
+                strict_success = clustered_call_rate(
+                    records,
+                    lambda record: record.get("strict_format_ok") is True,
+                    n_resamples=n_resamples,
+                    seed=seed + 10 * run_index + role_index + 4_000,
+                )
+                protocol_success = clustered_call_rate(
+                    records,
+                    lambda record: record.get("protocol_ok") is True,
+                    n_resamples=n_resamples,
+                    seed=seed + 10 * run_index + role_index + 5_000,
+                )
+                copy_records = [
+                    record for record in records
+                    if record.get("verbatim_copy_rate") is not None
+                ]
+                verbatim = None
+                if copy_records:
+                    by_question_copy: dict[str, list[float]] = defaultdict(list)
+                    for record in copy_records:
+                        by_question_copy[str(record["question_id"])].append(
+                            float(record["verbatim_copy_rate"])
+                        )
+                    verbatim = _question_mean_summary(
+                        {
+                            question_id: float(np.mean(values))
+                            for question_id, values in by_question_copy.items()
+                        },
+                        n_resamples=n_resamples,
+                        seed=seed + 10 * run_index + role_index + 6_000,
+                    )
                 stages[role] = {
                     "per_call_failure_rate": failure,
                     "per_call_success_rate": {
@@ -1186,6 +1517,9 @@ def analyze_parse_failures(
                     "per_question_any_failure_rate": any_failure,
                     "salvage_available_among_parse_failures": salvage_available,
                     "downstream_input_used_salvage_rate": consumed_salvage,
+                    "strict_format_success_rate": strict_success,
+                    "strict_protocol_success_rate": protocol_success,
+                    "extractor_verbatim_copy_rate": verbatim,
                     "salvage_interpretation": (
                         "Salvage availability/consumption is reported separately. A "
                         "salvaged payload never changes parse_status into success."
@@ -1193,10 +1527,33 @@ def analyze_parse_failures(
                 }
         if stages:
             output[run_id] = stages
+        conceptual: dict[str, Any] = {}
+        for role_index, role in enumerate((*ROLES, "solo")):
+            records = [record for record in run.calls if _conceptual_role(record) == role]
+            if not records:
+                continue
+            conceptual[role] = {
+                "stages": sorted({str(record["stage"]) for record in records}),
+                "strict_protocol_success_rate": clustered_call_rate(
+                    records,
+                    lambda record: record.get("protocol_ok") is True,
+                    n_resamples=n_resamples,
+                    seed=seed + 100_000 + 10 * run_index + role_index,
+                ),
+                "parse_failure_rate": clustered_call_rate(
+                    records,
+                    lambda record: record.get("parse_status") != "ok",
+                    n_resamples=n_resamples,
+                    seed=seed + 110_000 + 10 * run_index + role_index,
+                ),
+            }
+        if conceptual:
+            role_rollup[run_id] = conceptual
     return {
         "metric": "parse_failure_rate",
         "estimand": "failed_calls_over_all_calls",
         "runs": output,
+        "conceptual_role_rollup": role_rollup,
     }
 
 
@@ -1238,6 +1595,9 @@ def analyze_call_counts(
         per_stage: dict[str, dict[str, float]] = defaultdict(
             lambda: {question_id: 0.0 for question_id in run.answers}
         )
+        per_role: dict[str, dict[str, float]] = defaultdict(
+            lambda: {question_id: 0.0 for question_id in run.answers}
+        )
         for record in run.calls:
             question_id = str(record["question_id"])
             if question_id not in run.answers:
@@ -1246,6 +1606,7 @@ def analyze_call_counts(
             by_metric["prompt_tokens"][question_id] += float(record.get("prompt_tokens") or 0)
             by_metric["output_tokens"][question_id] += float(record.get("output_tokens") or 0)
             per_stage[str(record["stage"])][question_id] += 1
+            per_role[_conceptual_role(record)][question_id] += 1
         summary = {
             metric: _question_mean_summary(
                 values,
@@ -1262,6 +1623,14 @@ def analyze_call_counts(
             )
             for stage_index, (stage, values) in enumerate(sorted(per_stage.items()))
         }
+        summary["calls_by_conceptual_role"] = {
+            role: _question_mean_summary(
+                values,
+                n_resamples=n_resamples,
+                seed=seed + 100 * run_index + 50 + role_index,
+            )
+            for role_index, (role, values) in enumerate(sorted(per_role.items()))
+        }
         if "tiny" in run_id:
             appendix[run_id] = summary
         else:
@@ -1269,14 +1638,31 @@ def analyze_call_counts(
     return {"main": main, "tiny_floor_appendix": appendix}
 
 
-def _call_index(run: RunData, stage: str) -> dict[tuple[str, int], dict[str, Any]]:
+def _conceptual_call_index(
+    run: RunData, role: str
+) -> dict[tuple[str, str, int], dict[str, Any]]:
+    """Index every repeated invocation of a conceptual MA-RAG role.
+
+    The concrete stage is part of the key because per-document Extractor ranks
+    restart at zero for every reasoning step.  Plan summary is implemented by
+    the Step Definer service but has a different output contract, so it is not
+    mixed into Step Definer task-routing churn.
+    """
     output = {}
     for record in run.calls:
-        if record.get("stage") != stage:
+        if record.get("stage") == prompts.PLAN_SUMMARY_STAGE:
             continue
-        key = (str(record["question_id"]), int(record["call_index"]))
+        if _conceptual_role(record) != role or record.get("prompt_role") not in {
+            None, role
+        }:
+            continue
+        key = (
+            str(record["question_id"]),
+            str(record["stage"]),
+            int(record["call_index"]),
+        )
         if key in output:
-            raise AnalysisError(f"{run.run_id}/{stage}: duplicate call key {key}")
+            raise AnalysisError(f"{run.run_id}/{role}: duplicate call key {key}")
         output[key] = record
     return output
 
@@ -1304,17 +1690,18 @@ def analyze_selection_churn(
             run_id = role_run(role, suffix)
             if run_id not in runs:
                 continue
-            baseline_index = _call_index(runs[BASELINE_RUN], role)
-            treatment_index = _call_index(runs[run_id], role)
+            baseline_index = _conceptual_call_index(runs[BASELINE_RUN], role)
+            treatment_index = _conceptual_call_index(runs[run_id], role)
             shared = sorted(set(baseline_index) & set(treatment_index))
             if not shared:
                 continue
             strict_records = []
             effective_records = []
             field = SELECTION_FIELD[role]
-            for question_id, call_index in shared:
-                baseline_record = baseline_index[(question_id, call_index)]
-                treatment_record = treatment_index[(question_id, call_index)]
+            route_records = []
+            for question_id, stage, call_index in shared:
+                baseline_record = baseline_index[(question_id, stage, call_index)]
+                treatment_record = treatment_index[(question_id, stage, call_index)]
                 strict_records.append({
                     "question_id": question_id,
                     "changed": selection_changed_set(baseline_record, treatment_record, field),
@@ -1327,6 +1714,15 @@ def analyze_selection_churn(
                         field,
                     ),
                 })
+                if role == "step_definer":
+                    route_records.append({
+                        "question_id": question_id,
+                        "changed": selection_changed_set(
+                            _effective_record(baseline_record),
+                            _effective_record(treatment_record),
+                            "type",
+                        ),
+                    })
             strict = clustered_call_rate(
                 strict_records,
                 lambda record: bool(record["changed"]),
@@ -1344,11 +1740,21 @@ def analyze_selection_churn(
                 "selection_field": field,
                 "parser_success_payload_churn": strict,
                 "downstream_effective_payload_churn": effective,
+                "routing_type_churn": (
+                    clustered_call_rate(
+                        route_records,
+                        lambda record: bool(record["changed"]),
+                        n_resamples=n_resamples,
+                        seed=seed + 20_000 + comparison_index,
+                    )
+                    if route_records else None
+                ),
                 "shared_calls": len(shared),
                 "baseline_only_calls": len(set(baseline_index) - set(treatment_index)),
                 "treatment_only_calls": len(set(treatment_index) - set(baseline_index)),
                 "interpretation": (
-                    "Calls are intersected by (question_id, call_index). Effective "
+                    "Calls are intersected by (question_id, concrete_stage, "
+                    "call_index). Effective "
                     "churn uses parsed-or-salvaged payloads but does not relabel parse status."
                 ),
             }
@@ -1409,7 +1815,10 @@ def analyze_evidence(
         if any(answer.get("evidence_status") == "not_applicable" for answer in run.answers.values()):
             # Solo has no extractor and must not be assigned a fake zero score.
             continue
-        extractor_calls = [r for r in run.calls if r.get("stage") == "extractor"]
+        extractor_calls = [
+            record for record in run.calls
+            if _conceptual_role(record) == "extractor"
+        ]
         if not extractor_calls:
             continue
         spans_by_question: dict[str, list[str]] = defaultdict(list)
@@ -1476,6 +1885,13 @@ def _batch_wall(record: dict[str, Any]) -> float:
         if isinstance(value, (int, float)) and math.isfinite(value) and value >= 0:
             return float(value)
     raise AnalysisError("batch timing record has no finite batch wall time")
+
+
+def _service_wall(record: dict[str, Any]) -> float:
+    value = record.get("service_wall_s")
+    if isinstance(value, (int, float)) and math.isfinite(value) and value >= 0:
+        return float(value)
+    raise AnalysisError("timed batch has no finite service_wall_s")
 
 
 def _timing_batches(run: RunData) -> list[dict[str, Any]]:
@@ -1603,6 +2019,54 @@ def _timing_batches(run: RunData) -> list[dict[str, Any]]:
     return selected
 
 
+def _timing_orchestration(run: RunData) -> list[dict[str, Any]]:
+    """Validate one retrieval/routing/state-build record per stage and repeat."""
+    records = list(run.timing_orchestration)
+    if not records:
+        # Legacy/synthetic unit fixtures can still exercise generation timing;
+        # finalized open_corpus_marag_v1 artifacts must carry service records.
+        payload = (run.timing_meta or {}).get("experiment_fingerprint_payload") or {}
+        if payload.get("schema") == "open_corpus_marag_v1":
+            raise AnalysisError(f"{run.run_id}: missing orchestration timing records")
+        return []
+    meta = run.timing_meta or run.meta
+    repeats = int(run.timing_repetitions or meta.get("timing_repetitions") or 1)
+    expected_stages = set((meta.get("stage_config_fingerprints") or {}).keys())
+    if not expected_stages:
+        raise AnalysisError(f"{run.run_id}: no timed stage fingerprint contract")
+    by_repeat: dict[int, dict[str, dict[str, Any]]] = defaultdict(dict)
+    for record in records:
+        repeat = record.get("timing_repeat")
+        stage = str(record.get("stage"))
+        wall = record.get("orchestration_wall_s")
+        if (
+            not isinstance(repeat, int)
+            or not 0 <= repeat < repeats
+            or stage not in expected_stages
+            or stage in by_repeat[repeat]
+            or not isinstance(wall, (int, float))
+            or not math.isfinite(float(wall))
+            or float(wall) < 0
+            or record.get("timing_eligible") is not True
+            or record.get("phase") != "timing_benchmark"
+            or record.get("question_manifest_sha256") != _meta_manifest_hash(meta)
+            or record.get("experiment_fingerprint") != meta.get("experiment_fingerprint")
+            or record.get("config_fingerprint")
+            != (meta.get("stage_config_fingerprints") or {}).get(stage)
+        ):
+            raise AnalysisError(f"{run.run_id}/{stage}: invalid orchestration timing")
+        by_repeat[repeat][stage] = record
+    if set(by_repeat) != set(range(repeats)) or any(
+        set(stages) != expected_stages for stages in by_repeat.values()
+    ):
+        raise AnalysisError(f"{run.run_id}: incomplete stage orchestration timing")
+    for stage in expected_stages:
+        hashes = {by_repeat[repeat][stage].get("call_graph_sha256") for repeat in by_repeat}
+        if len(hashes) != 1 or None in hashes:
+            raise AnalysisError(f"{run.run_id}/{stage}: timing call graph changed")
+    return records
+
+
 def _system_time_draws(
     records: list[dict[str, Any]],
     *,
@@ -1636,15 +2100,19 @@ def analyze_latency_batches(
 ) -> dict[str, Any]:
     """Analyze explicit batch timings and never duplicated call ``latency_s``."""
     output: dict[str, Any] = {
-        "primary_metric": "whole_system_steady_state_inverse_throughput",
+        "primary_metric": "steady_state_end_to_end_service_inverse_throughput",
         "primary_unit": "seconds_per_excluded_timing_question_on_A100",
-        "resampling_unit": "recorded_batch",
+        "resampling_unit": "recorded_batch_stratified_by_stage_and_repeat",
+        "generation_only_metric": "model_generate_inverse_throughput",
         "call_latency_fields_used": False,
         "baseline_run": BASELINE_RUN,
         "runs": {},
     }
     eligible_by_run = {
         run_id: _timing_batches(run) for run_id, run in sorted(runs.items())
+    }
+    orchestration_by_run = {
+        run_id: _timing_orchestration(run) for run_id, run in sorted(runs.items())
     }
     baseline_rates: dict[str, float] = {}
     if BASELINE_RUN in runs:
@@ -1660,6 +2128,7 @@ def analyze_latency_batches(
     system_estimates: dict[str, float] = {}
     for run_index, (run_id, run) in enumerate(sorted(runs.items())):
         records_for_run = eligible_by_run[run_id]
+        orchestration_records = orchestration_by_run[run_id]
         grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for record in records_for_run:
             grouped[str(record.get("stage", "system"))].append(record)
@@ -1699,6 +2168,36 @@ def analyze_latency_batches(
             n_resamples=n_resamples,
             seed=seed + 10_000 + run_index,
         )
+        generation_estimate, generation_draws = system_estimate, draws
+        service_records = (
+            [
+                {**record, "batch_wall_s": _service_wall(record)}
+                for record in records_for_run
+            ]
+            if orchestration_records else []
+        )
+        if orchestration_records:
+            service_records.extend(
+                {
+                    "stage": f"orchestration:{record['stage']}",
+                    "timing_repeat": record["timing_repeat"],
+                    "batch_wall_s": float(record["orchestration_wall_s"]),
+                }
+                for record in orchestration_records
+            )
+        if service_records and orchestration_records:
+            system_estimate, draws = _system_time_draws(
+                service_records,
+                n_questions=int(run.timing_n_questions or len(run.answers)),
+                n_resamples=n_resamples,
+                seed=seed + 20_000 + run_index,
+            )
+            timing_scope = (
+                "retrieval+routing+state_build+prompt_render+tokenize+h2d+"
+                "generate+decode+parse; excludes model_load_and_durable_logging"
+            )
+        else:
+            timing_scope = "legacy_generation_only_no_orchestration_records"
         system_estimates[run_id] = system_estimate
         system_draws[run_id] = draws
         ordered = np.sort(draws)
@@ -1749,6 +2248,27 @@ def analyze_latency_batches(
                     if not stage.get("model_load_reused", False)
                 ),
                 "model_load_included_in_primary_timing": False,
+                "timing_scope": timing_scope,
+                "generation_only": {
+                    "estimate_seconds_per_question": generation_estimate,
+                    "ci_lower": float(np.sort(generation_draws)[int(0.025 * n_resamples)]),
+                    "ci_upper": float(np.sort(generation_draws)[
+                        min(int(0.975 * n_resamples), n_resamples - 1)
+                    ]),
+                    "batch_wall_field": "batch_wall_s",
+                },
+                "orchestration_seconds_per_question": (
+                    sum(float(record["orchestration_wall_s"])
+                        for record in orchestration_records)
+                    / int(run.timing_n_questions or len(run.answers))
+                    if orchestration_records else None
+                ),
+                "non_generation_batch_service_seconds_per_question": (
+                    sum(_service_wall(record) - _batch_wall(record)
+                        for record in records_for_run)
+                    / int(run.timing_n_questions or len(run.answers))
+                    if orchestration_records else None
+                ),
             },
             "stages": stages,
         }
@@ -1784,8 +2304,11 @@ def analyze_latency_batches(
         output["status"] = "available"
         output["interpretation"] = (
             "Ratios are relative inverse throughput on the recorded A100, not "
-            "edge-device latency estimates. Model loading is excluded here and "
-            "must be co-reported from run metadata."
+            "edge-device latency estimates. Primary service time includes BM25 "
+            "retrieval/routing/state construction and the complete in-process "
+            "batch path through parsing; durable logging and model loading are "
+            "excluded and model loading is co-reported. Generation-only GPU "
+            "throughput remains a separate nested metric."
         )
     return output
 
@@ -1840,6 +2363,75 @@ def selector_effects(
     return baseline_f1, effects, effect_draws, len(question_ids)
 
 
+def _conceptual_role(record: dict[str, Any]) -> str:
+    role = record.get("conceptual_role")
+    if role:
+        return str(role)
+    try:
+        return prompts.role_for(str(record.get("stage")))
+    except KeyError as exc:
+        raise AnalysisError(f"unknown call stage {record.get('stage')!r}") from exc
+
+
+def tiny_role_eligibility(
+    runs: dict[str, RunData],
+    *,
+    threshold: float,
+    n_resamples: int,
+    seed: int,
+) -> dict[str, Any]:
+    """Pre-registered 0.5B failsafe, pooled by conceptual role/question."""
+    if not 0 <= threshold <= 1:
+        raise AnalysisError("tiny eligibility threshold must be in [0, 1]")
+    decisions: dict[str, Any] = {}
+    eligible = []
+    for role_index, role in enumerate(ROLES):
+        run_id = role_run(role, "tiny")
+        if run_id not in runs or not runs[run_id].answers:
+            decisions[role] = {
+                "run_id": run_id,
+                "eligible": False,
+                "reason": "missing_or_incomplete_tiny_role_ablation",
+            }
+            continue
+        records = [
+            record for record in runs[run_id].calls
+            if _conceptual_role(record) == role
+        ]
+        if not records:
+            decisions[role] = {
+                "run_id": run_id,
+                "eligible": False,
+                "reason": "no_conceptual_role_calls",
+            }
+            continue
+        estimate = clustered_call_rate(
+            records,
+            lambda record: record.get("protocol_ok") is True,
+            n_resamples=n_resamples,
+            seed=seed + role_index,
+        )
+        passed = float(estimate["ci_lower"]) >= threshold
+        decisions[role] = {
+            "run_id": run_id,
+            "eligible": passed,
+            "reason": "lower_bound_passed" if passed else "lower_bound_below_threshold",
+            "threshold": threshold,
+            "strict_protocol_success": estimate,
+            "pooled_stages": sorted({str(record["stage"]) for record in records}),
+        }
+        if passed:
+            eligible.append(role)
+    return {
+        "metric": "strict_protocol_success",
+        "resampling_unit": "question",
+        "confidence_interval": "question_clustered_95pct",
+        "threshold": threshold,
+        "eligible_roles": eligible,
+        "decisions": decisions,
+    }
+
+
 def selector_footprints(runs: dict[str, RunData]) -> dict[str, float]:
     _require_runs(
         runs,
@@ -1860,8 +2452,9 @@ def select_allocation(
     footprints_mib: dict[str, float],
     margin_points: float = 1.0,
     alpha: float = 0.05,
+    eligible_tiny_roles: set[str] | None = None,
 ) -> dict[str, Any]:
-    """Enumerate exactly 4^4 allocations with a fixed charge per config.
+    """Enumerate the 5^4 universe, then apply role-specific tiny feasibility.
 
     Candidate F1 is the prespecified additive approximation from single-role
     effects.  Memory is the sum of *distinct* configuration footprints, so using
@@ -1900,12 +2493,24 @@ def select_allocation(
                 raise AnalysisError("selector bootstrap columns have unequal draw counts")
 
     assert draw_count is not None
+    eligible_tiny_roles = set(ROLES) if eligible_tiny_roles is None else set(
+        eligible_tiny_roles
+    )
+    if not eligible_tiny_roles <= set(ROLES):
+        raise AnalysisError("eligible_tiny_roles contains an unknown role")
     threshold = baseline_f1_points - margin_points
     lower_index = int((alpha / 2) * draw_count)
     upper_index = min(int((1 - alpha / 2) * draw_count), draw_count - 1)
     feasible: list[dict[str, Any]] = []
+    eligibility_filtered = 0
     for choices in itertools.product(SELECTOR_CONFIGS, repeat=len(ROLES)):
         allocation = dict(zip(ROLES, choices))
+        if any(
+            allocation[role] == "tiny_fp16" and role not in eligible_tiny_roles
+            for role in ROLES
+        ):
+            eligibility_filtered += 1
+            continue
         predicted_effect = sum(
             role_effects_points[role][allocation[role]] for role in ROLES
         )
@@ -1950,6 +2555,12 @@ def select_allocation(
     )
     return {
         "candidate_count": len(SELECTOR_CONFIGS) ** len(ROLES),
+        "eligibility_filtered_count": eligibility_filtered,
+        "eligible_candidate_count": (
+            len(SELECTOR_CONFIGS) ** len(ROLES) - eligibility_filtered
+        ),
+        "considered_count": len(SELECTOR_CONFIGS) ** len(ROLES) - eligibility_filtered,
+        "eligible_tiny_roles": sorted(eligible_tiny_roles),
         "feasible_count": len(feasible),
         "criterion": {
             "primary_metric": "f1",
@@ -1964,7 +2575,7 @@ def select_allocation(
                 "at_least_negative_margin"
             ),
             "bootstrap_draws": draw_count,
-            "bootstrap_shared_across_all_12_nonzero_role_effects": True,
+            "bootstrap_shared_across_all_16_nonzero_role_effects": True,
         },
         "tie_break": [
             "minimum_memory",
@@ -1995,14 +2606,17 @@ def validate_selector_contract(config: dict[str, Any]) -> dict[str, Any]:
     if set((contract.get("candidates") or {}).keys()) != set(SELECTOR_CONFIGS):
         raise AnalysisError(
             "allocation_selector.candidates must be the closed set "
-            f"{SELECTOR_CONFIGS}; 0.5B is appendix-only"
+            f"{SELECTOR_CONFIGS}"
         )
     if contract.get("candidate_allocation_count") != len(SELECTOR_CONFIGS) ** len(ROLES):
-        raise AnalysisError("allocation_selector candidate count must be exactly 256")
+        raise AnalysisError("allocation_selector candidate count must be exactly 625")
     if contract.get("output_run_id") != OPTIMIZED_RUN:
         raise AnalysisError(f"allocation_selector output_run_id must be {OPTIMIZED_RUN}")
-    if "tiny_fp16" not in (contract.get("excluded_candidates") or {}):
-        raise AnalysisError("allocation_selector must explicitly exclude tiny_fp16")
+    gate = contract.get("tiny_eligibility_gate") or {}
+    if gate.get("metric") != "strict_protocol_success":
+        raise AnalysisError("allocation_selector must gate tiny on strict_protocol_success")
+    if float(gate.get("question_clustered_95pct_lower_bound_min", -1)) != 0.90:
+        raise AnalysisError("tiny strict-protocol lower-bound gate must be exactly 0.90")
     outputs = contract.get("output_artifacts") or {}
     if set(outputs) != {"selection_trace", "executable_config"}:
         raise AnalysisError(
@@ -2010,6 +2624,23 @@ def validate_selector_contract(config: dict[str, Any]) -> dict[str, Any]:
             "executable_config"
         )
     return contract
+
+
+def _complete_matching_accuracy_run(
+    config: dict[str, Any],
+    runs: dict[str, RunData],
+    run_definition: dict[str, Any],
+) -> str | None:
+    """Return an identical static arm with validated accuracy, if one exists."""
+    for run_id, candidate_definition in (config.get("runs") or {}).items():
+        candidate = runs.get(run_id)
+        if (
+            candidate_definition == run_definition
+            and candidate is not None
+            and bool(candidate.answers)
+        ):
+            return run_id
+    return None
 
 
 def materialize_selection(
@@ -2038,22 +2669,49 @@ def materialize_selection(
     )
     footprints = selector_footprints(runs)
     margin = _selector_margin(config)
+    gate_threshold = float(
+        contract["tiny_eligibility_gate"]["question_clustered_95pct_lower_bound_min"]
+    )
+    tiny_gate = tiny_role_eligibility(
+        runs,
+        threshold=gate_threshold,
+        n_resamples=n_resamples,
+        seed=bootstrap_seed + 500,
+    )
     result = select_allocation(
         baseline_f1_points=baseline_f1,
         role_effects_points=effects,
         role_effect_draws_points=effect_draws,
         footprints_mib=footprints,
         margin_points=margin,
+        eligible_tiny_roles=set(tiny_gate["eligible_roles"]),
+    )
+    no_tiny_sensitivity = select_allocation(
+        baseline_f1_points=baseline_f1,
+        role_effects_points=effects,
+        role_effect_draws_points=effect_draws,
+        footprints_mib=footprints,
+        margin_points=margin,
+        eligible_tiny_roles=set(),
     )
     allocation = result["selected"]["allocation"]
     run_definition = {
         role: copy.deepcopy(SELECTOR_TREATMENT[allocation[role]]) for role in ROLES
     }
     run_config_hash = content_hash(run_definition)
-    distinct = set(allocation.values())
     reuse_existing = bool(contract.get("reuse_existing_run_when_identical", True))
-    existing_run_id = UNIFORM_RUN[next(iter(distinct))] if len(distinct) == 1 else None
-    execution_run_id = existing_run_id if reuse_existing and existing_run_id else OPTIMIZED_RUN
+    # Accuracy and timing are separate artifacts.  Every static arm has a
+    # validated accuracy run before selection, while tiny arms are deliberately
+    # absent from the prespecified timing matrix.  Reuse an identical static
+    # accuracy result and let the derived config schedule only its missing
+    # selected-system timing run.
+    existing_run_id = _complete_matching_accuracy_run(
+        config, runs, run_definition
+    )
+    execution_run_id = (
+        existing_run_id
+        if reuse_existing and existing_run_id is not None else OPTIMIZED_RUN
+    )
     materialized_new_run = execution_run_id == OPTIMIZED_RUN
     input_ids = [BASELINE_RUN] + sorted(
         role_run(role, SELECTOR_RUN_SUFFIX[configuration])
@@ -2088,7 +2746,8 @@ def materialize_selection(
         "materialized_new_run": materialized_new_run,
         "status": "frozen",
         "claim_status": "exploratory_same_sample_post_selection",
-        "zero_point_five_b_excluded": True,
+        "tiny_role_eligibility": tiny_gate,
+        "sensitivity_without_tiny": no_tiny_sensitivity,
         "question_manifest_sha256": configured_manifest_hash,
         "n_questions": n_questions,
         "bootstrap_seed": bootstrap_seed,
@@ -2113,6 +2772,10 @@ def materialize_selection(
         "selected_allocation": allocation,
         "selected_run_config_sha256": run_config_hash,
     })
+    frozen_config.setdefault("timing", {})["selected_execution_run_id"] = (
+        execution_run_id
+    )
+    frozen_config["timing"]["selected_system_timing_required"] = True
     # Hash the semantic selection payload first. The executable config can then
     # reference that immutable decision hash without creating a circular hash.
     artifact["artifact_sha256"] = content_hash(artifact)
@@ -2272,6 +2935,32 @@ def _markdown(report: dict[str, Any]) -> str:
                 f"- {metric.upper()}: {estimate['estimate']:.2f} pp "
                 f"[{estimate['ci_lower']:.2f}, {estimate['ci_upper']:.2f}]"
             )
+        for stratum, summary in comparison.get("strata", {}).items():
+            lines.append(
+                f"- {stratum}: F1 {summary['f1']['estimate']:.2f} pp "
+                f"[{summary['f1']['ci_lower']:.2f}, "
+                f"{summary['f1']['ci_upper']:.2f}], n={summary['n_questions']}"
+            )
+        lines.append("")
+    retrieval_runs = (report.get("retrieval") or {}).get("runs", {})
+    if retrieval_runs:
+        lines.extend([
+            "## Retrieval and passage exposure",
+            "",
+            "System-level comparison; the arms are not passage-budget matched.",
+            "",
+            "| Run | Gold-title recall | All gold | Queries/question | Passages/question |",
+            "|---|---:|---:|---:|---:|",
+        ])
+        for run_id, groups in sorted(retrieval_runs.items()):
+            summary = groups["all"]
+            lines.append(
+                f"| {run_id} | "
+                f"{100*summary['retrieval_gold_title_recall']['estimate']:.2f}% | "
+                f"{100*summary['retrieval_all_gold']['estimate']:.2f}% | "
+                f"{summary['retrieval_query_count']['estimate']:.2f} | "
+                f"{summary['retrieval_passage_exposures']['estimate']:.2f} |"
+            )
         lines.append("")
     selection = report.get("allocation_selection")
     if selection:
@@ -2383,9 +3072,9 @@ def _markdown(report: dict[str, Any]) -> str:
     latency_runs = (report.get("latency") or {}).get("runs", {})
     if latency_runs:
         lines.extend([
-            "## A100 whole-system inverse throughput",
+            "## A100 steady-state end-to-end service inverse throughput",
             "",
-            "| Run | seconds/question (95% CI) | ratio to uniform MA 3B FP16 | calls/question |",
+            "| Run | service seconds/question (95% CI) | ratio to uniform MA 3B FP16 | calls/question |",
             "|---|---:|---:|---:|",
         ])
         for run_id, timing in sorted(latency_runs.items()):
@@ -2426,7 +3115,9 @@ def build_report(
             "n_resamples": n_resamples,
             "bootstrap_seed": bootstrap_seed,
             "ci_overlap_used_for_inference": False,
-            "zero_point_five_b_scope": "lower_limit_appendix_only",
+            "zero_point_five_b_scope": (
+                "lower_limit_appendix_plus_role_specific_protocol_gate_for_selector"
+            ),
         },
         "runs_loaded": sorted(runs),
     }
@@ -2455,6 +3146,9 @@ def build_report(
 
     report["solo_vs_multiagent"] = analyze_solo(
         runs, n_resamples=n_resamples, seed=bootstrap_seed + 200
+    )
+    report["retrieval"] = analyze_retrieval(
+        runs, n_resamples=n_resamples, seed=bootstrap_seed + 210
     )
     report["optimized_vs_baseline"] = analyze_optimized_system(
         runs, n_resamples=n_resamples, seed=bootstrap_seed + 225
@@ -2530,26 +3224,19 @@ def build_report(
             seed=bootstrap_seed + 625,
             selected_run_id=execution_run_id,
         )
-        if (
-            require_complete
-            and report["allocation_selection"].get("materialized_new_run") is True
-            and (
-                OPTIMIZED_RUN not in runs
-                or not runs[OPTIMIZED_RUN].answers
-                or runs[OPTIMIZED_RUN].timing_meta is None
-            )
-        ):
-            raise AnalysisError(
-                "selector materialized a distinct optimized allocation; run both its "
-                "accuracy and excluded-cohort timing artifacts, then rerun analysis"
-            )
+        # On the base config, strict completeness covers the declared static
+        # campaign and this call freezes the future selected run.  The derived
+        # config declares that selected run; its later strict analysis therefore
+        # requires both selected accuracy and timing in
+        # validate_campaign_completeness(), before any report is built.
     else:
         report["allocation_selection_status"] = {
             "status": "disabled" if not freeze_selection else "incomplete",
             "missing_runs": [run_id for run_id in selector_ids if run_id not in runs],
             "eligible_configurations": list(SELECTOR_CONFIGS),
             "candidate_count": len(SELECTOR_CONFIGS) ** len(ROLES),
-            "zero_point_five_b_excluded": True,
+            "tiny_role_eligibility_status": "pending_or_incomplete",
+            "tiny_is_not_categorically_excluded": True,
         }
     return report
 

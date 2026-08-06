@@ -5,6 +5,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from src import prompts
+from src import mechanism
+from src import models
 from src.pipeline import (
     build_answer_records,
     build_stage_calls,
@@ -17,6 +19,9 @@ from src.runner import (
     _content_hash,
     _derived_config_matches_lock,
     _run_stage,
+    _resolve_cohort_seeds,
+    _validate_architecture_contract,
+    _validate_gold_sentence_coverage,
     result_slug,
 )
 
@@ -39,6 +44,83 @@ class MemoryStore:
 
 
 class ExecutionIntegrityTests(unittest.TestCase):
+    def test_pinned_bitsandbytes_configs_match_the_quantization_contract(self):
+        int8 = models._bnb_config("8bit").to_dict()
+        self.assertTrue(int8["load_in_8bit"])
+        self.assertFalse(int8["load_in_4bit"])
+        self.assertEqual(int8["llm_int8_threshold"], 6.0)
+
+        nf4 = models._bnb_config("4bit").to_dict()
+        self.assertTrue(nf4["load_in_4bit"])
+        self.assertFalse(nf4["load_in_8bit"])
+        self.assertEqual(nf4["bnb_4bit_quant_type"], "nf4")
+        self.assertEqual(nf4["bnb_4bit_compute_dtype"], "float16")
+        self.assertTrue(nf4["bnb_4bit_use_double_quant"])
+
+    def test_pilot_artifact_seed_does_not_change_final_manifest_load_seed(self):
+        dataset = {"n": 1500, "eval_seed": 20260805}
+        pilot = {"n": 200, "seed": 20260806}
+        self.assertEqual(
+            _resolve_cohort_seeds(dataset, pilot, None, None, pilot_mode=True),
+            (1500, 20260806, 20260805),
+        )
+
+    def test_gold_sentence_coverage_detects_same_title_split_drift(self):
+        from src.retrieval import Passage, RetrievalContext
+
+        question = {
+            "question_id": "q1",
+            "supporting_facts": {"title": ["Gold"], "sent_id": [1]},
+            "sentence_index": [
+                {"title": "Gold", "sent_id": 0, "text": "First."},
+                {"title": "Gold", "sent_id": 1, "text": "Exact gold."},
+            ],
+        }
+        good = RetrievalContext([Passage("Gold", ["First.", "Exact gold."])])
+        self.assertEqual(
+            _validate_gold_sentence_coverage([question], good)["gold_sentence_coverage"],
+            1.0,
+        )
+        nbsp = RetrievalContext([Passage("Gold", ["First.", "Exact\u00a0gold."])])
+        self.assertTrue(
+            _validate_gold_sentence_coverage([question], nbsp)[
+                "gold_sentence_text_nfkc_whitespace_equivalent"
+            ]
+        )
+        drifted = RetrievalContext([Passage("Gold", ["First. Exact gold."])])
+        with self.assertRaisesRegex(AssertionError, "supporting-sentence"):
+            _validate_gold_sentence_coverage([question], drifted)
+
+    def test_architecture_contract_fails_closed_on_every_ma_rag_principle(self):
+        architecture = {
+            "framework": "ma-rag",
+            "conceptual_agents": prompts.ROLES,
+            "max_plan_steps": prompts.MAX_PLAN_STEPS,
+            "plan_step_routing": ["question-answering", "aggregate"],
+            "extractor_granularity": "per_document",
+            "semantic_stop_on_qa_success_no": True,
+            "finalizer": "step_definer_plan_summary",
+        }
+        _validate_architecture_contract({"architecture": architecture})
+        for key in architecture:
+            broken = {"architecture": {**architecture, key: "wrong"}}
+            with self.assertRaisesRegex(ValueError, key):
+                _validate_architecture_contract(broken)
+
+    def test_plan_summary_protocol_enforces_short_answer_contract(self):
+        short = {"output": "Successful", "answer": "Paris", "score": 10}
+        verbose = {
+            "output": "Successful",
+            "answer": "one two three four five six seven eight nine ten eleven twelve thirteen",
+            "score": 10,
+        }
+        self.assertTrue(
+            mechanism.protocol_ok("plan_summary", json.dumps(short), short)
+        )
+        self.assertFalse(
+            mechanism.protocol_ok("plan_summary", json.dumps(verbose), verbose)
+        )
+
     def test_frozen_manifest_and_exclusions_validate(self):
         ids, meta = load_id_manifest(
             ROOT / "config/manifests/final_n1500_seed20260805.json"
@@ -75,6 +157,37 @@ class ExecutionIntegrityTests(unittest.TestCase):
             call["consumer_input"]["evidence_blocks"][0]["spans"],
             ["supporting sentence"],
         )
+
+    def test_final_answer_comes_from_plan_summary(self):
+        question = {
+            "question_id": "q1", "question": "Q?", "answer": "final",
+            "level": "hard", "type": "bridge",
+            "supporting_facts": {"title": [], "sent_id": []},
+            "sentence_index": [], "retrieval_stratum": "hidden_bridge",
+        }
+        idx = {
+            ("q1", "planner", 0): {
+                "parsed": {"sub_questions": ["first?", "second?"]},
+                "salvaged": None,
+            },
+            ("q1", "qa", 0): {"stage": "qa", "parsed": {
+                "answer": "bridge", "success": "yes", "rating": 8,
+            }},
+            ("q1", "qa_step2", 1): {
+                "stage": "qa_step2", "parsed": {
+                    "answer": "final", "success": "yes", "rating": 9,
+                },
+            },
+            ("q1", "plan_summary", 0): {
+                "stage": "plan_summary",
+                "parsed": {"output": "Successful", "answer": "final", "score": 9},
+                "consumer_input": {"stop_reason": "plan_complete"},
+            },
+        }
+        answer = build_answer_records([question], idx, "baseline")[0]
+        self.assertEqual(answer["answer_stage"], "plan_summary")
+        self.assertEqual(answer["predicted_answer"], "final")
+        self.assertEqual(answer["plan_depth"], 2)
 
     def test_solo_answer_has_no_fake_subquestions_or_evidence_metric(self):
         question = {
@@ -174,10 +287,11 @@ class ExecutionIntegrityTests(unittest.TestCase):
             result_slug("x", 10, 1234, "Qwen/Qwen2.5-3B-Instruct", treatments),
         )
         self.assertEqual(prompts.prompt_template_hashes() | {}, {
-            "planner": "35f6d9e8bc089bbaf8a7ad6dc722f380892a1d7a0af7a4bd04ad01355cc59614",
-            "step_definer": "8fe9b8a6ba665ae608601e296b6001ec07485d1615ea0ef826f17bbf2489a695",
+            "planner": "c91c48626dd0b17c8ba3d29ce30ea216762404b24da3f88ddd689c71056bbc03",
+            "step_definer": "9ef3f1c68808719f05c8f860a98c6e1cf4bc61df370419ec3be291b2b8c8b156",
             "extractor": "8f84d86ae84278916dcb483b5ba8891f65360327701048d48c4a7d4df403018c",
-            "qa": "ef42a3d19aef7c9669407bc5478bf680ac8fc62d8dd2dd070543af200b0971a6",
+            "qa": "29fec31ad932c0992fe5e3629bddcf6e55fa7d850b170d076dec68de8b84b422",
+            "plan_summary": "12f441ef882350502fe6842e32ff6969847937d7a16194446f4129d0870f260f",
             "solo": "337626135fa3a5054bb5a065cc638a9ca05c4e1f21b44977b4700c5a0cba94cb",
         })
 
@@ -185,23 +299,43 @@ class ExecutionIntegrityTests(unittest.TestCase):
         base = {
             "models": {"small": "m1"},
             "dataset": {"manifest_sha256": "manifest"},
-            "allocation_selector": {"status": "pending"},
+            "allocation_selector": {"enabled": True, "status": "pending"},
+            "timing": {"run_ids": ["baseline"]},
             "runs": {"baseline": {"qa": "fp16"}},
         }
         run_def = {"qa": "8bit"}
+        allocation = {"qa": "base_8bit"}
         artifact = {
+            "run_id": "ma_optimized_exploratory",
             "source_config_sha256": _content_hash(base),
             "execution_run_id": "ma_optimized_exploratory",
+            "materialized_new_run": True,
+            "claim_status": "exploratory_same_sample_post_selection",
+            "question_manifest_sha256": "manifest",
+            "selection": {"selected": {"allocation": allocation}},
             "run_definition": run_def,
             "run_config_sha256": _content_hash(run_def),
         }
         artifact["artifact_sha256"] = _content_hash(artifact)
         derived = json.loads(json.dumps(base))
         derived["runs"]["ma_optimized_exploratory"] = run_def
-        derived["allocation_selector"] = {"status": "frozen"}
+        derived["allocation_selector"].update({
+            "status": "frozen",
+            "selected_execution_run_id": "ma_optimized_exploratory",
+            "selected_allocation": allocation,
+            "selected_run_config_sha256": artifact["run_config_sha256"],
+        })
+        derived["timing"].update({
+            "selected_execution_run_id": "ma_optimized_exploratory",
+            "selected_system_timing_required": True,
+        })
         derived["frozen_allocation"] = {
+            "run_id": "ma_optimized_exploratory",
+            "execution_run_id": "ma_optimized_exploratory",
+            "materialized_new_run": True,
             "selection_artifact_sha256": artifact["artifact_sha256"],
             "run_config_sha256": artifact["run_config_sha256"],
+            "claim_status": artifact["claim_status"],
             "question_manifest_sha256": "manifest",
         }
         artifact["executable_config_sha256"] = _content_hash(derived)
@@ -217,6 +351,62 @@ class ExecutionIntegrityTests(unittest.TestCase):
         tampered_artifact["executable_config_sha256"] = _content_hash(tampered)
         self.assertFalse(
             _derived_config_matches_lock(tampered, lock, tampered_artifact)
+        )
+
+    def test_derived_allocation_link_authorizes_selected_static_timing_only(self):
+        baseline_definition = {"qa": "fp16"}
+        base = {
+            "dataset": {"manifest_sha256": "manifest"},
+            "allocation_selector": {"enabled": True, "status": "pending"},
+            "timing": {"run_ids": ["baseline"]},
+            "runs": {"baseline": baseline_definition},
+        }
+        allocation = {"qa": "base_fp16"}
+        artifact = {
+            "run_id": "ma_optimized_exploratory",
+            "source_config_sha256": _content_hash(base),
+            "execution_run_id": "baseline",
+            "materialized_new_run": False,
+            "claim_status": "exploratory_same_sample_post_selection",
+            "question_manifest_sha256": "manifest",
+            "selection": {"selected": {"allocation": allocation}},
+            "run_definition": baseline_definition,
+            "run_config_sha256": _content_hash(baseline_definition),
+        }
+        artifact["artifact_sha256"] = _content_hash(artifact)
+        derived = json.loads(json.dumps(base))
+        derived["allocation_selector"].update({
+            "status": "frozen",
+            "selected_execution_run_id": "baseline",
+            "selected_allocation": allocation,
+            "selected_run_config_sha256": artifact["run_config_sha256"],
+        })
+        derived["timing"].update({
+            "selected_execution_run_id": "baseline",
+            "selected_system_timing_required": True,
+        })
+        derived["frozen_allocation"] = {
+            "run_id": "ma_optimized_exploratory",
+            "execution_run_id": "baseline",
+            "materialized_new_run": False,
+            "run_config_sha256": artifact["run_config_sha256"],
+            "selection_artifact_sha256": artifact["artifact_sha256"],
+            "claim_status": artifact["claim_status"],
+            "question_manifest_sha256": "manifest",
+        }
+        artifact["executable_config_sha256"] = _content_hash(derived)
+        lock = {
+            "experiment_config_contract": base,
+            "experiment_config_content_sha256": _content_hash(base),
+            "final_manifest_ids_sha256": "manifest",
+        }
+        self.assertTrue(_derived_config_matches_lock(derived, lock, artifact))
+        unauthorized = json.loads(json.dumps(derived))
+        unauthorized["timing"]["run_ids"].append("unselected_tiny")
+        altered_artifact = dict(artifact)
+        altered_artifact["executable_config_sha256"] = _content_hash(unauthorized)
+        self.assertFalse(
+            _derived_config_matches_lock(unauthorized, lock, altered_artifact)
         )
 
 

@@ -146,28 +146,25 @@ def _validate_planner(obj):
     if not isinstance(obj, dict):
         return False, None
     subs = obj.get("sub_questions")
-    if not _is_str_list(subs):
+    analysis = obj.get("analysis")
+    if not isinstance(analysis, str) or not analysis.strip() or not _is_str_list(subs):
         return False, None
-    return True, {"sub_questions": [s.strip() for s in subs]}
+    return True, {
+        "analysis": analysis.strip(),
+        "sub_questions": [s.strip() for s in subs],
+    }
 
 
 def _validate_step_definer(obj):
     if not isinstance(obj, dict):
         return False, None
-    terms = obj.get("search_terms")
-    entity = obj.get("target_entity")
-    atype = obj.get("answer_type")
-    if not _is_str_list(terms):
+    task_type = obj.get("type")
+    task = obj.get("task")
+    if task_type not in {"aggregate", "question-answering"}:
         return False, None
-    if not isinstance(entity, str) or not entity.strip():
+    if not isinstance(task, str) or not task.strip():
         return False, None
-    if not isinstance(atype, str) or not atype.strip():
-        return False, None
-    return True, {
-        "search_terms": [t.strip() for t in terms],
-        "target_entity": entity.strip(),
-        "answer_type": atype.strip().lower(),
-    }
+    return True, {"type": task_type, "task": task.strip()}
 
 
 def salvage(role: str, raw_output: str) -> dict | None:
@@ -240,22 +237,28 @@ def salvage(role: str, raw_output: str) -> dict | None:
             elif not obj:
                 out["spans"] = []
         elif role == "step_definer":
-            terms = obj.get("search_terms")
-            if _is_str_list(terms):
-                out["search_terms"] = [t.strip() for t in terms]
-            ent = obj.get("target_entity")
-            if isinstance(ent, str) and ent.strip():
-                out["target_entity"] = ent.strip()
+            task_type = obj.get("type")
+            task = obj.get("task")
+            if task_type in {"aggregate", "question-answering"}:
+                out["type"] = task_type
+            if isinstance(task, str) and task.strip():
+                out["task"] = task.strip()
         elif role == "planner":
             subs = obj.get("sub_questions")
             if _is_str_list(subs):
                 out["sub_questions"] = [s.strip() for s in subs]
-        elif role in ("qa", "solo"):
+            analysis = obj.get("analysis")
+            if isinstance(analysis, str) and analysis.strip():
+                out["analysis"] = analysis.strip()
+        elif role in ("qa", "solo", "plan_summary"):
             ans = obj.get("answer")
             if isinstance(ans, (int, float)) and not isinstance(ans, bool):
                 ans = str(ans)
             if isinstance(ans, str) and ans.strip():
                 out["answer"] = ans.strip()
+            success = obj.get("success")
+            if role == "qa" and isinstance(success, str) and success.lower() in {"yes", "no"}:
+                out["success"] = success.lower()
         if out:
             return out
     return None
@@ -277,9 +280,53 @@ def _validate_qa(obj):
     ans = obj.get("answer")
     if isinstance(ans, (int, float)) and not isinstance(ans, bool):
         ans = str(ans)  # {"answer": 1969} is a well-formed answer
+    analysis = obj.get("analysis")
+    success = obj.get("success")
+    rating = obj.get("rating")
+    if not isinstance(ans, str) or not ans.strip():
+        return False, None
+    if not isinstance(analysis, str) or not analysis.strip():
+        return False, None
+    if not isinstance(success, str) or success.lower() not in {"yes", "no"}:
+        return False, None
+    if isinstance(rating, bool) or not isinstance(rating, int) or not 0 <= rating <= 10:
+        return False, None
+    return True, {
+        "analysis": analysis.strip(),
+        "answer": ans.strip(),
+        "success": success.lower(),
+        "rating": rating,
+    }
+
+
+def _validate_solo(obj):
+    if not isinstance(obj, dict):
+        return False, None
+    ans = obj.get("answer")
+    if isinstance(ans, (int, float)) and not isinstance(ans, bool):
+        ans = str(ans)
     if not isinstance(ans, str) or not ans.strip():
         return False, None
     return True, {"answer": ans.strip()}
+
+
+def _validate_plan_summary(obj):
+    if not isinstance(obj, dict):
+        return False, None
+    output = obj.get("output")
+    answer = obj.get("answer")
+    score = obj.get("score")
+    if output not in {"Successful", "Unsuccessful"}:
+        return False, None
+    if not isinstance(answer, str):
+        return False, None
+    if isinstance(score, bool) or not isinstance(score, int) or not 0 <= score <= 10:
+        return False, None
+    if output == "Successful" and not answer.strip():
+        return False, None
+    if output == "Unsuccessful" and score != 0:
+        return False, None
+    return True, {"output": output, "answer": answer.strip(), "score": score}
 
 
 _VALIDATORS = {
@@ -287,9 +334,8 @@ _VALIDATORS = {
     "step_definer": _validate_step_definer,
     "extractor": _validate_extractor,
     "qa": _validate_qa,
-    # The single-agent baseline intentionally has the same answer contract as
-    # QA; only its prompt and one-stage execution topology differ.
-    "solo": _validate_qa,
+    "plan_summary": _validate_plan_summary,
+    "solo": _validate_solo,
 }
 
 

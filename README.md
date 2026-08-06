@@ -1,161 +1,242 @@
-# Role-aware SLM multi-agent QA
+# Role-aware SLM multi-agent RAG
 
-Experimental harness for a workshop study of memory-aware capacity allocation
-across four SLM agent roles: Planner, Step Definer, Extractor, and QA.
+This repository evaluates whether a MA-RAG-style system can assign smaller or
+quantized language models to different agent roles while retaining answer
+quality and reducing memory and inference work.
 
-The system answers HotpotQA distractor questions from the ten paragraphs supplied
-with each example. It has no retriever, so results concern provided-context,
-retrieval-free multi-agent QA rather than retrieval quality.
+It is a real multi-agent, multi-hop RAG pipeline. Within this experiment the
+number of reasoning steps comes from each question's one-through-five-step plan;
+it is not hard-coded to a double hop.
 
-The co-developer/operator should follow [RUNBOOK.md](RUNBOOK.md) from top to
-bottom. [SPEC.md](SPEC.md) is the authoritative scientific contract;
-[config/experiment.yaml](config/experiment.yaml) is its machine-readable
-counterpart. Old notebooks and n=3,000 commands are not execution instructions.
+## Architecture
 
-## Final design
+The four conceptual agents are Planner, Step Definer, Extractor, and QA:
 
-- Qwen2.5-3B-Instruct FP16 is the uniform multi-agent reference.
-- Primary role comparison: 3B 8-bit versus 1.5B FP16, described as
-  **near-memory-matched**.
-- 3B 4-bit is a mandatory secondary treatment.
-- Five 0.5B FP16 arms establish an appendix-only compliance/capacity floor and
-  never enter allocation selection.
-- A competitive single-call 3B FP16 arm is compared with uniform multi-agent 3B
-  FP16.
-- A role-aware allocation selected from non-tiny ablations is run once and
-  labelled in-sample/exploratory.
-- F1 is primary; Exact Match is co-reported.
+    question
+       |
+       v
+    Planner -> ordered plan
+       |
+       v
+    Step Definer (repeated for each active plan step)
+       |-- question-answering -> BM25 top-k -> Extractor per document -> QA
+       |-- aggregate -----------------------------------------------> QA
+       |
+       +-- append QA answer/success/rating to state
+       +-- continue, plan complete, or stop on success=no
+       |
+       v
+    Step Definer plan summary -> scored short answer
 
-All arms use the same frozen 1,500 questions. The manifest excludes the exact
-old n=3,000 design-pilot IDs and prompt-development questions:
+For every question-answering step, the exact Step Definer task becomes a new
+top-10 retrieval query. Each returned document gets its own Extractor call, then
+QA produces step feedback that the next Step Definer receives. Aggregate steps
+reuse earlier answers without retrieval or extraction. The final answer always
+comes from the Step Definer summary call.
 
-```text
-config/manifests/final_n1500_seed20260805.json
-final ID SHA-256: 5d4cc24872aeb603cbd005f790958199ef4cc993a1e7f048403608603da602af
-```
+The runner preserves those state dependencies while executing stage-major:
+homogeneous calls are batched across questions and retrieved documents, inactive
+steps are skipped, and one model configuration is resident at a time. Repeated
+stage labels still map to the same four conceptual role treatments.
 
-The static matrix has 22 runs: the previous 21 arms plus `single_fp16`. The
-selector can add one distinct `ma_optimized_exploratory` execution, so the
-campaign maximum is 23. If it selects an existing uniform/reference arm, no new
-execution is added.
+## Relationship to MA-RAG
+
+Reference MA-RAG is plan-driven and supports question-dependent plan depth; it
+is not limited to two steps. This implementation follows that principle and
+adds a five-step ceiling solely as an explicit edge-resource cap for this frozen
+experiment. The cap must not be described as a MA-RAG limit.
+
+Two other adaptations are deliberate:
+
+| Reference MA-RAG | This experiment |
+|---|---|
+| Dense inner-product retrieval with FAISS | Deterministic sparse BM25 |
+| Much larger knowledge base | 72,094 controlled HotpotQA passages |
+| Context-dependent plan length | Context-dependent plan length, capped at five |
+| Per-step routing, retrieval, extraction, QA, and summary | Same logical control flow |
+
+These choices make the role-allocation experiment reproducible and affordable
+for SLM/edge research. They do not establish equivalence to dense retrieval or
+Wikipedia-scale performance.
+
+## Data and exposure boundary
+
+Accuracy uses a frozen ordered sample of 1,500 HotpotQA validation questions.
+The search corpus is the first-occurrence union of validation passages from the
+distractor and fullwiki configurations:
+
+    passages: 72,094
+    retrieval k: 10 per question-answering plan step
+    final retrieval strata: hidden_bridge 1097, fully_named 403
+    pilot retrieval strata: hidden_bridge 160, fully_named 40
+    final ordered-ID SHA-256:
+    5d4cc24872aeb603cbd005f790958199ef4cc993a1e7f048403608603da602af
+
+The fullwiki label is a HotpotQA configuration name; the corpus is not the full
+Wikipedia dump. The corpus contains evaluation-set target pages, but no
+question-to-context mapping, supporting-fact label, or gold answer enters a
+model prompt. Treat results as controlled, target-reachable retrieval with
+validation-split exposure, not unseen-corpus evidence.
+
+The pilot manifest deterministically replaces malformed source ID
+5ae61bfd5542992663a4f261 with 5ae622495542995703ce8b20. The original annotation
+names sentence 902 on a five-sentence gold page; the committed manifest records
+the replacement and reason so every system is not forced to fail an impossible
+gold-sentence reachability check. Its file and ordered-ID SHA-256 values are,
+respectively, 975210805c382788bb39c800266ae22a88cc526e0626bd8a0106c35d316a8bb1
+and f8c3f16458340cb0bc74aa827e3b51528ba351963a46dba456ac4e68ad20f7d7.
+
+## Experiment
+
+The static matrix contains 22 runs:
+
+- uniform four-agent 3B FP16 reference;
+- one-role 3B 8-bit, 3B 4-bit, 1.5B FP16, and 0.5B FP16 ablations;
+- uniform 8-bit, 4-bit, 1.5B, and 0.5B controls; and
+- a one-call 3B FP16 architecture control.
+
+The one-call control issues one original-question BM25 query and reads its top
+10 passages. The multi-agent system may issue one query per question-answering
+step, so the comparison reports passage exposure, query count, model calls,
+tokens, F1, EM, memory, and timing rather than pretending the two architectures
+have identical work budgets.
+
+F1 is primary and Exact Match is co-reported. Results are also split into
+hidden_bridge and fully_named strata. The primary role comparison is 3B 8-bit
+versus the near-memory-matched 1.5B FP16 sibling; 4-bit and 0.5B findings are
+secondary.
+
+After the static runs, a guarded selector evaluates 5^4 = 625 role allocations.
+A role may use the 0.5B model only if its one-role ablation clears the frozen
+question-clustered protocol-success gate. Any selected mixed run is explicitly
+in-sample and exploratory.
+
+Tiny arms are not in the prespecified timing matrix. If selection reuses a tiny
+static accuracy arm, accuracy can be reused but timing cannot. Selection
+materialization now writes the selected execution and timing requirement into
+the derived config; campaign planning and the runner authorize exactly that
+separately labelled post-selection run, while strict analysis checks its frozen
+selection and run-config hashes before reporting exploratory throughput.
+
+## Safety gates
+
+No final timing or accuracy run may start before all of these hold:
+
+1. corpus count, corpus fingerprint, and gold-title and supporting-sentence
+   reachability validate;
+2. the immutable A100 environment lock validates on every worker;
+3. every active stage shape passes excluded batch-32 preflight;
+4. the excluded 200-question pilot manifest
+   config/manifests/pilot_excluded200_seed20260806.json runs baseline then
+   single_fp16; and
+5. the persisted pilot certificate says GO.
+
+Pilot GO requires multi-agent F1 to be at least the one-call F1 both overall and
+on hidden_bridge. A missing, stale, incomplete, or failed pilot is STOP. Do not
+touch final IDs while diagnosing it.
+
+See [RUNBOOK.md](RUNBOOK.md) for the normative command order and
+[SPEC.md](SPEC.md) for the complete scientific contract.
 
 ## Environment
 
-Production runs target A100 GPUs. Known exercised core versions are Transformers
-5.14.1, bitsandbytes 0.50.0, datasets 5.0.1, and the prior A100 pilot's PyTorch
-2.13.0+cu130/CUDA 13.0 stack. These do not constitute a complete lock.
+Model, tokenizer, and dataset revisions are immutable in
+config/experiment.yaml. Production also requires a committed environment lock
+created from the selected A100/container. Historical package versions in the
+repository are not a substitute for that resolved lock.
 
-Before production, run the A100 preflight and commit its complete environment
-artifact: immutable container digest, Python and full package lock, driver/CUDA,
-GPU SKU/UUID, model/tokenizer revisions, dataset revision, and repository commit.
-Every worker must match it. See SPEC section 11.
+For local integrity checks:
 
-The model and dataset revisions are already pinned in `config/experiment.yaml`.
-Do not replace them with floating `main` revisions.
+    python -X utf8 -m pytest -q
+    python -X utf8 smoke_test.py --n 10 --run baseline
 
-## Running
+The smoke path uses excluded development data. It is a plumbing check, not
+accuracy evidence.
 
-The runner reads the frozen manifest and fails before model loading if its count,
-hashes, exclusions, or dataset revision do not match.
+## Production outline
 
-**Use the complete [RUNBOOK.md](RUNBOOK.md) for production.** The commands below
-are only a compact reference; the runbook contains restart, multi-GPU, artifact
-preservation, selector, and hard-stop instructions.
+Use the full runbook; this is only an orientation:
 
-```bash
-# Smoke/preflight on excluded development data only
-python -X utf8 smoke_test.py --n 10 --run baseline
+    export EXPERIMENT_CONTAINER_REF=REGISTRY/IMAGE:TAG
+    export EXPERIMENT_CONTAINER_DIGEST=sha256:IMMUTABLE_DIGEST
 
-# From a clean commit on the selected A100/container, generate and commit the lock
-python -m src.runner --write-environment-lock \
-  --container-ref REGISTRY/IMAGE:TAG --container-digest sha256:IMMUTABLE_DIGEST
-git add config/environment.lock.json && git commit -m "Lock final A100 environment"
-# Validation reads container identity from these variables on every worker.
-export EXPERIMENT_CONTAINER_REF=REGISTRY/IMAGE:TAG
-export EXPERIMENT_CONTAINER_DIGEST=sha256:IMMUTABLE_DIGEST
-python -m src.runner --validate-environment-lock
+    python scripts/prefetch_assets.py
 
-# First, certify every non-tiny configuration on excluded data and collect the
-# two-repeat reserved-A100 timing benchmark. No final question is touched.
-CUDA_VISIBLE_DEVICES=0 python scripts/run_campaign.py --kind timing --execute
+    python scripts/a100_entrypoint.py prepare \
+      --container-ref "$EXPERIMENT_CONTAINER_REF" \
+      --container-digest "$EXPERIMENT_CONTAINER_DIGEST"
 
-# Deterministically inspect the exact 22-arm assignment for any GPU count
-python scripts/run_campaign.py --kind accuracy --workers 4
+Commit and distribute the generated environment lock, then run the pilot on its
+single reserved A100:
 
-# Launch one whole-arm worker per A100 (set a different index/device per process)
-CUDA_VISIBLE_DEVICES=0 python scripts/run_campaign.py \
-  --kind accuracy --workers 4 --worker-index 0 --execute
+    python scripts/a100_entrypoint.py pilot \
+      --container-ref "$EXPERIMENT_CONTAINER_REF" \
+      --container-digest "$EXPERIMENT_CONTAINER_DIGEST"
 
-# One production arm (after the launch gate passes)
-python -m src.runner --config config/experiment.yaml --run baseline
+Pilot execution is fixed to baseline then single_fp16 and automatically invokes
+scripts/check_pilot.py. Commit and distribute the resulting unchanged GO
+certificate before any final worker proceeds. Then use the same entrypoint for
+the frozen timing and accuracy assignments:
 
-# Examples of the primary near-match arms
-python -m src.runner --config config/experiment.yaml --run extractor_8bit
-python -m src.runner --config config/experiment.yaml --run extractor_small
+    python scripts/a100_entrypoint.py timing \
+      --container-ref "$EXPERIMENT_CONTAINER_REF" \
+      --container-digest "$EXPERIMENT_CONTAINER_DIGEST"
 
-# Direct single-call architecture control
-python -m src.runner --config config/experiment.yaml --run single_fp16
+    python scripts/a100_entrypoint.py accuracy --workers 4 --worker-index 0 \
+      --container-ref "$EXPERIMENT_CONTAINER_REF" \
+      --container-digest "$EXPERIMENT_CONTAINER_DIGEST"
 
-# Static paired analysis freezes the selector artifacts. It is explicitly
-# intermediate because a distinct selected run may still be pending.
-python analyze.py --config config/experiment.yaml --allow-incomplete
+    python analyze.py --config config/experiment.yaml
 
-# If the selector trace says materialized_new_run=true, commit both frozen
-# artifacts, then execute the distinct exploratory system once:
-python -m src.runner --config analysis/ma_optimized_exploratory.experiment.yaml \
-  --run ma_optimized_exploratory
+Run the accuracy command once per worker index. Do not run timing or accuracy
+unless the campaign entrypoint validates a committed, unchanged
+analysis/pilot_gate.json. Prefetch, the A100 wrapper, pilot mode/checking, and
+gate enforcement are implemented and covered by CPU tests; the target-A100
+pilot/GO, timing matrix, final accuracy matrix, selector execution, and strict
+final analysis have not yet been run.
 
-# If distinct, time the exploratory system on that same reserved A100 as well:
-python -m src.runner --config analysis/ma_optimized_exploratory.experiment.yaml \
-  --run ma_optimized_exploratory --timing-mode
+## Timing, memory, and edge interpretation
 
-# Re-run analysis with the frozen config to add the actual exploratory comparison.
-python analyze.py --config analysis/ma_optimized_exploratory.experiment.yaml
-```
+The primary memory metric charges each distinct resident model configuration
+once. Sequential peak VRAM, isolated role-service memory, parameters, buffers,
+activation peaks, and cold loading are separate diagnostics.
 
-Batch size is fixed at 32. An OOM must fail the run; no production arm may
-autotune to a different batch size. Resume is allowed only with the same manifest,
-model/prompt fingerprints, and canonical batch membership. Never merge one run
-from multiple GPUs or environments.
-
-## Timing and memory
-
-The paper's primary memory number is deduplicated concurrent model-footprint MiB:
-each exact configuration's measured parameters and buffers are charged once.
-Sequential peak VRAM and one-server-per-role totals are co-reported separately.
-
-One uncontended A100 benchmarks the non-tiny configurations twice on a frozen
-128-question excluded cohort at batch 32. These calls never enter accuracy or
-selection. Uniform four-role 3B FP16 is `1.00x`; other results are steady-state
-inverse-throughput ratios. Cold model loading is reported separately. These are
-A100 ratios, not edge-latency estimates.
+One reserved A100 measures two repetitions over a frozen excluded 128-question
+cohort. The primary metric is steady-state end-to-end service inverse
+throughput relative to uniform four-agent 3B FP16 at 1.00x. It includes
+retrieval, routing, state and prompt construction, tokenization/H2D, generation,
+decode, parse/salvage, and protocol accounting; model loading and durable JSONL
+logging are excluded and reported separately. Each run also reports a nested
+generation-only estimate from raw generation batch time. This is a controlled
+accelerator proxy for comparing model allocation and stage scheduling, not
+phone, embedded-GPU, CPU, NPU, energy, thermal, or device wall-time evidence.
 
 ## Repository layout
 
 | Path | Purpose |
 |---|---|
-| `SPEC.md` | Locked experiment and claim contract |
-| `RUNBOOK.md` | Exact operator handoff and ordered A100 commands |
-| `PROGRESS.md` | Current handoff and launch blockers |
-| `config/experiment.yaml` | Models, revisions, matrix, metrics, selector, timing/memory policy |
-| `config/manifests/` | Frozen final question and exclusion IDs |
-| `ENVIRONMENT.md` | Production container/package/GPU lock contract |
-| `requirements-core.txt` | Recorded core inference versions (not a complete lock) |
-| `scripts/freeze_final_sample.py` | Reproduce/audit the committed sample manifest |
-| `src/` | Prompts, parsing, inference, pipeline, runner, and metrics |
-| `smoke_test.py` | Preflight plumbing checks on excluded development data |
-| `analyze.py` | Paired final analysis and allocation selection |
-| `results/` | Generated outputs; empty in the source branch except `.gitkeep` |
-
-Historical notebooks, interim results, and the obsolete Gate 2 report were
-removed from the active tree. They remain recoverable from Git history.
+| SPEC.md | Authoritative architecture, experiment, and claim contract |
+| RUNBOOK.md | Ordered production procedure and hard stops |
+| PROGRESS.md | Current implementation and launch status |
+| config/experiment.yaml | Frozen models, architecture, retrieval, matrix, and metrics |
+| config/manifests/ | Final, warm-up, timing, and pilot cohort identities |
+| src/prompts.py | Four agent contracts, repeated-stage map, and plan summary |
+| src/pipeline.py | Stateful call construction, routing, retrieval, and answer records |
+| src/retrieval.py | Deterministic BM25 corpus and index |
+| src/runner.py | Stage-major batching, resume integrity, memory, and timing |
+| scripts/prefetch_assets.py | Pinned-asset download and offline cache verification |
+| scripts/a100_entrypoint.py | Fail-closed prepare, pilot, accuracy, and timing wrapper |
+| scripts/check_pilot.py | Pilot recomputation and content-addressed GO/STOP gate |
+| analyze.py | Paired analysis, diagnostics, and exploratory selection |
 
 ## Controls that must not change
 
-- no parse retries or regeneration;
-- no constrained/grammar decoding;
-- no model-, precision-, or size-specific prompt tuning;
+- no generation retries or regeneration;
+- no constrained decoding;
+- no treatment-specific prompt tuning;
 - no question replacement or resampling;
-- no variable production batch size;
-- no floating model or dataset revisions; and
-- no confirmatory claim from the post-selected optimized arm.
+- no reduction of the production batch size after OOM;
+- no floating model, dataset, corpus, or prompt revision;
+- no independent configuration of repeated role stages;
+- no final execution without pilot GO; and
+- no literal edge-device claim from the A100 proxy.

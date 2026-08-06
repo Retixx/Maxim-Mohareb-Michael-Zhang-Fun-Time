@@ -3,10 +3,12 @@
 Follow `RUNBOOK.md` for the exact ordered commands. This file defines what the
 environment lock means; it is not a substitute for the operator runbook.
 
-`requirements-core.txt` pins only versions that were recorded in the prior A100
-pilot. It is intentionally not presented as a complete lock: the earlier run did
-not record exact Accelerate, PyYAML, Python, container, driver, or transitive
-dependency versions.
+`requirements-core.txt` pins the direct Python dependencies needed by the
+campaign, including Transformers, bitsandbytes, datasets, Accelerate, PyYAML,
+NumPy, SciPy, huggingface-hub, and pytest. It is not a complete runtime lock:
+PyTorch/CUDA must come from the chosen immutable A100 container, and every
+transitive dependency, driver, platform field, and GPU property is captured from
+that real worker in `config/environment.lock.json`.
 
 Before any final-manifest run, select one immutable A100 container and create
 `config/environment.lock.json` from the actual preflight worker. Commit it before
@@ -21,7 +23,8 @@ production. At minimum it must contain:
 - GPU name, SKU, total memory, UUID, and driver-visible CUDA version;
 - repository commit and whether the worktree was dirty;
 - all model/tokenizer resolved revisions and dataset revision;
-- prompt version/hash, experiment-config hash, and final-manifest hash.
+- prompt version/hash, experiment-config hash, source-bundle hash, all frozen
+  cohort file/ID hashes, and the retrieval/corpus contract through the config.
 
 Generate it with `python -m src.runner --write-environment-lock --container-ref
 ... --container-digest sha256:...`. The lock binds a deterministic source-bundle
@@ -34,11 +37,13 @@ production run, export the same immutable identity as
 closed when those values do not match the committed lock.
 
 Every accuracy worker must compare itself with this artifact before loading a
-model and fail on a mismatch. Timing uses one reserved uncontended A100 from the
-same lock. If more than one A100 SKU is unavoidable, record the block assignment
-and run the common baseline calibration batch on every SKU.
+model and fail on a mismatch. Timing uses one reserved uncontended A100 matching
+the same lock. Worker UUIDs may differ, but GPU SKU, memory, compute capability,
+driver, container, and software must match; a resumed arm remains bound to its
+original physical GPU UUID.
 
-Known prior-pilot values, pending confirmation in the chosen final container:
+Pinned direct-package values and the expected PyTorch container baseline,
+pending confirmation by the generated lock:
 
 ```text
 torch          2.13.0+cu130
@@ -46,6 +51,12 @@ CUDA runtime   13.0
 transformers   5.14.1
 bitsandbytes   0.50.0
 datasets       5.0.1
+accelerate     1.14.0
+PyYAML         6.0.3
+numpy          2.5.1
+scipy          1.18.0
+huggingface-hub 1.26.0
+pytest         9.1.1
 ```
 
 Do not create a lock by filling unknown fields with guessed versions. A lock is

@@ -1,11 +1,11 @@
-"""Sweep driver: stage-major execution with checkpoint/resume.
+"""Dynamic MA-RAG sweep driver with stage-major checkpoint/resume.
 
     python -m src.runner --config config/experiment.yaml --run stepdef_4bit
 
-SPEC §6. Walks the four stages in order. For each stage it loads the base model
-at the precision this run assigns to that stage, processes every question, writes
-records to disk, and unloads before moving on — so exactly one model is resident
-at any moment.
+For each active Planner/step-round/summary stage it loads the model treatment
+assigned to that conceptual agent, processes the active question wavefront,
+writes records, and unloads or reuses before moving on. Exactly one model is
+resident at a time; repeated stages remain the same four conceptual services.
 
 Resuming is the default, not a flag. On startup the existing JSONL is read and
 any (question_id, stage, call_index) already present is skipped. Killing the
@@ -19,10 +19,12 @@ import importlib.metadata
 import json
 import os
 import platform
+import re
 import socket
 import subprocess
 import sys
 import time
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,7 +32,7 @@ from pathlib import Path
 import torch
 import yaml
 
-from . import agents, models, prompts
+from . import agents, models, prompts, retrieval
 from .pipeline import (
     build_answer_records,
     build_stage_calls,
@@ -41,6 +43,102 @@ from .pipeline import (
 )
 
 FLUSH_EVERY = 50  # SPEC §6
+
+
+def _validate_architecture_contract(cfg: dict) -> None:
+    """Fail before data/model work if config and executor describe different DAGs."""
+    architecture = cfg.get("architecture") or {}
+    expected = {
+        "framework": "ma-rag",
+        "conceptual_agents": prompts.ROLES,
+        "max_plan_steps": prompts.MAX_PLAN_STEPS,
+        "plan_step_routing": ["question-answering", "aggregate"],
+        "extractor_granularity": "per_document",
+        "semantic_stop_on_qa_success_no": True,
+        "finalizer": "step_definer_plan_summary",
+    }
+    mismatches = {
+        key: {"expected": value, "configured": architecture.get(key)}
+        for key, value in expected.items()
+        if architecture.get(key) != value
+    }
+    if mismatches:
+        raise ValueError(
+            "architecture config does not match the frozen MA-RAG executor: "
+            + "; ".join(
+                f"{key}={item['configured']!r} (expected {item['expected']!r})"
+                for key, item in mismatches.items()
+            )
+        )
+
+
+def _resolve_cohort_seeds(
+    dataset: dict,
+    pilot: dict,
+    requested_n: int | None,
+    requested_seed: int | None,
+    *,
+    pilot_mode: bool,
+) -> tuple[int, int, int]:
+    """Return (final-load n, artifact seed, final-manifest load seed)."""
+    if pilot_mode:
+        if requested_n not in (None, int(pilot.get("n", -1))):
+            raise ValueError("--n cannot override the frozen pilot manifest")
+        if requested_seed not in (None, int(pilot.get("seed", -1))):
+            raise ValueError("--seed cannot override the frozen pilot manifest")
+        return (
+            int(dataset["n"]),
+            int(pilot["seed"]),
+            int(dataset["eval_seed"]),
+        )
+    artifact_n = requested_n if requested_n is not None else int(dataset["n"])
+    artifact_seed = (
+        requested_seed if requested_seed is not None else int(dataset["eval_seed"])
+    )
+    return int(artifact_n), int(artifact_seed), int(artifact_seed)
+
+
+def _validate_gold_sentence_coverage(
+    questions: list[dict], retriever: retrieval.RetrievalContext
+) -> dict:
+    """Assert every gold label resolves to the exact distractor sentence text."""
+    total = 0
+    mismatches: list[str] = []
+    equivalent = lambda value: re.sub(  # noqa: E731
+        r"\s+", " ", unicodedata.normalize("NFKC", value or "")
+    ).strip()
+    for question in questions:
+        source = {
+            (str(sentence["title"]), int(sentence["sent_id"])): sentence["text"]
+            for sentence in question.get("sentence_index") or ()
+        }
+        supporting = question.get("supporting_facts") or {}
+        for title, sent_id in zip(
+            supporting.get("title") or (), supporting.get("sent_id") or ()
+        ):
+            total += 1
+            key = (str(title), int(sent_id))
+            expected = source.get(key)
+            passage = retriever.index.get(str(title))
+            actual = None
+            if passage is not None and 0 <= int(sent_id) < len(passage.sentences):
+                actual = passage.sentences[int(sent_id)]
+            if expected is None or actual is None or equivalent(actual) != equivalent(expected):
+                mismatches.append(
+                    f"{question['question_id']}:{title}[{sent_id}]"
+                )
+    if mismatches:
+        raise AssertionError(
+            "gold supporting-sentence text differs from pooled corpus for "
+            f"{len(mismatches)} labels; examples: {mismatches[:5]}"
+        )
+    if total <= 0:
+        raise AssertionError("gold sentence coverage check saw no supporting labels")
+    return {
+        "gold_sentence_labels_checked": total,
+        "gold_sentence_coverage": 1.0,
+        "gold_sentence_text_nfkc_whitespace_equivalent": True,
+    }
 
 
 def resolve_treatments(cfg: dict, run_id: str) -> dict:
@@ -70,6 +168,7 @@ def resolve_treatments(cfg: dict, run_id: str) -> dict:
                 f"run {run_id!r}: unknown stage {stage!r}; "
                 f"expected one of {prompts.ALL_ROLES}"
             )
+
         if isinstance(spec, str):
             model_id, precision = base, spec
         elif isinstance(spec, dict):
@@ -117,6 +216,17 @@ def resolve_treatments(cfg: dict, run_id: str) -> dict:
             "config_fingerprint": fingerprint,
             "config_fingerprint_payload": fingerprint_payload,
         }
+
+    # Every repeated reasoning-round invocation and the plan summary mirror the
+    # same conceptual agent treatment; rounds are not independent ablation roles.
+    for mirror, source in prompts.STAGE_MIRRORS.items():
+        if mirror in cfg["runs"][run_id]:
+            raise SystemExit(
+                f"run {run_id!r}: stage {mirror!r} is not configurable; it mirrors "
+                f"{source!r} because it is the same agent making a second pass"
+            )
+        if source in out:
+            out[mirror] = dict(out[source])
     return out
 
 
@@ -141,6 +251,29 @@ def deduplicated_footprint_mib(stage_meta: dict) -> float:
             )
             seen[key] = fp
     return sum(seen.values())
+
+
+def isolated_role_service_footprint_mib(stage_meta: dict) -> float:
+    """One resident weight copy per conceptual service, independent of steps."""
+    by_role: dict[str, tuple[object, float]] = {}
+    for stage, metadata in stage_meta.items():
+        footprint = metadata.get(
+            "model_footprint_mib", metadata.get("weight_footprint_mb")
+        )
+        if footprint is None:
+            continue
+        role = metadata.get("conceptual_role") or prompts.role_for(stage)
+        fingerprint = metadata.get("config_fingerprint") or (
+            metadata.get("model_id"), metadata.get("precision"),
+            metadata.get("model_revision"),
+        )
+        existing = by_role.get(role)
+        if existing and existing[0] != fingerprint:
+            raise RuntimeError(
+                f"conceptual role {role!r} changed treatment across repeated stages"
+            )
+        by_role[role] = (fingerprint, float(footprint))
+    return sum(value for _, value in by_role.values())
 
 
 def model_slug(model_id: str) -> str:
@@ -169,8 +302,8 @@ def result_slug(run_id: str, n: int, seed: int, model_id: str,
     Since Phase S a run can use more than one model, and the base model alone no
     longer identifies it. Every additional model is appended:
 
-        stepdef_4bit   -> stepdef_4bit_qwen2.5-1.5b_n750_seed7
-        stepdef_small  -> stepdef_small_qwen2.5-1.5b+qwen2.5-0.5b_n750_seed7
+        stepdef_4bit   -> stepdef_4bit_qwen2.5-3b_n1500_seed20260805
+        stepdef_small  -> stepdef_small_qwen2.5-3b+qwen2.5-1.5b_n1500_seed20260805
 
     Single-model runs are unaffected, so every Phase Q file keeps its name. This
     is what stops `--model-id meta-llama/Llama-3.2-3B-Instruct --run stepdef_small`
@@ -310,10 +443,11 @@ def _order_batches_largest_first(
     """Execute the highest estimated padded-token batch first, IDs unchanged."""
     scored = []
     try:
+        prompt_role = prompts.prompt_for(stage)
         for batch_no, chunk, missing in batches:
             texts = [
                 tok.apply_chat_template(
-                    prompts.build_messages(stage, **call["fields"]),
+                    prompts.build_messages(prompt_role, **call["fields"]),
                     tokenize=False,
                     add_generation_prompt=True,
                 )
@@ -340,6 +474,7 @@ def _order_batches_largest_first(
 def _certified_batch_ids(
     records: list[dict], stage: str, calls: list[dict], batch_size: int,
     *, config_fingerprint: str, question_manifest_sha256: str,
+    experiment_fingerprint: str | None = None,
 ) -> set[str]:
     """Validate durable scored-batch certificates already on disk."""
     by_id: dict[str, list[dict]] = {}
@@ -371,6 +506,7 @@ def _certified_batch_ids(
             "members": expected_members,
             "config_fingerprint": config_fingerprint,
             "question_manifest_sha256": question_manifest_sha256,
+            "experiment_fingerprint": experiment_fingerprint,
             "batch_size_requested": batch_size,
             "batch_ordinal": batch_no,
         }
@@ -386,27 +522,33 @@ def _certified_batch_ids(
 def _validate_existing_stage_calls(
     records: list[dict], stage: str, calls: list[dict], batch_size: int,
     *, run_id: str, treatment: dict, question_manifest_sha256: str,
+    experiment_fingerprint: str | None = None,
 ) -> None:
     """Validate every persisted call before it can influence resume/upstream state."""
     expected = {}
+    prompt_role = prompts.prompt_for(stage)
+    conceptual_role = prompts.role_for(stage)
     for ordinal, call in enumerate(calls):
         key = (call["question_id"], call["call_index"])
         expected[key] = {
             "run_id": run_id,
             "stage": stage,
+            "conceptual_role": conceptual_role,
+            "prompt_role": prompt_role,
             "model_id": treatment["model_id"],
             "precision": treatment["precision"],
             "model_revision": treatment["model_revision"],
             "tokenizer_revision": treatment["tokenizer_revision"],
             "config_fingerprint": treatment["config_fingerprint"],
             "question_manifest_sha256": question_manifest_sha256,
+            "experiment_fingerprint": experiment_fingerprint,
             "batch_id": f"{stage}:{ordinal // batch_size:06d}",
             "batch_member_index": ordinal % batch_size,
-            "prompt_version": prompts.ROLE_PROMPT_VERSIONS[stage],
+            "prompt_version": prompts.ROLE_PROMPT_VERSIONS[prompt_role],
             "prompt_bundle_version": prompts.PROMPT_BUNDLE_VERSION,
-            "prompt_template_sha256": prompts.prompt_template_sha256(stage),
+            "prompt_template_sha256": prompts.prompt_template_sha256(prompt_role),
             "rendered_prompt_sha256": agents.rendered_prompt_sha256(
-                prompts.build_messages(stage, **call["fields"])
+                prompts.build_messages(prompt_role, **call["fields"])
             ),
         }
     seen = set()
@@ -441,7 +583,8 @@ def _assert_regenerated_matches(
     fields = (
         "raw_output", "parse_status", "parsed", "salvaged",
         "rendered_prompt_sha256", "batch_member_index",
-        "config_fingerprint", "question_manifest_sha256", "model_revision",
+        "config_fingerprint", "experiment_fingerprint",
+        "question_manifest_sha256", "model_revision",
         "tokenizer_revision", "prompt_template_sha256", "prompt_bundle_version",
     )
     if not allow_repeat_batch_id:
@@ -455,6 +598,32 @@ def _assert_regenerated_matches(
         )
 
 
+def _validate_existing_answers(existing: list[dict], answers: list[dict]) -> set[str]:
+    """Reject stale/duplicate answer records before resume can preserve them."""
+    expected = {answer["question_id"]: answer for answer in answers}
+    found: dict[str, dict] = {}
+    for record in existing:
+        if record.get("record_type") != "answer":
+            continue
+        qid = record.get("question_id")
+        if qid in found:
+            raise RuntimeError(f"duplicate persisted answer for {qid}")
+        if qid not in expected:
+            raise RuntimeError(f"unexpected persisted answer for {qid}")
+        found[qid] = record
+    ignored = {"execution_session_id"}
+    for qid, record in found.items():
+        canonical = expected[qid]
+        keys = (set(canonical) | set(record)) - ignored
+        bad = [key for key in keys if record.get(key) != canonical.get(key)]
+        if bad:
+            raise RuntimeError(
+                f"persisted answer integrity failure for {qid}: "
+                + ", ".join(sorted(bad))
+            )
+    return set(found)
+
+
 def _oom_batch_record(
     *, stage: str, run_id: str, model_id: str, precision: str,
     batch_id: str, calls: list[dict], phase: str,
@@ -463,6 +632,7 @@ def _oom_batch_record(
     config_fingerprint: str | None, model_revision: str | None,
     tokenizer_revision: str | None, question_manifest_sha256: str | None,
     timing_repeat: int | None = None,
+    experiment_fingerprint: str | None = None,
 ) -> dict:
     return {
         "record_type": "batch", "run_id": run_id, "stage": stage,
@@ -483,8 +653,44 @@ def _oom_batch_record(
         "model_revision": model_revision,
         "tokenizer_revision": tokenizer_revision,
         "question_manifest_sha256": question_manifest_sha256,
+        "experiment_fingerprint": experiment_fingerprint,
         "error": f"{type(error).__name__}: {error}",
         "timestamp": datetime.now(timezone.utc).isoformat(), **gpu_metadata,
+    }
+
+
+def _stage_timing_record(
+    *,
+    run_id: str,
+    stage: str,
+    repeat: int,
+    calls: list[dict],
+    orchestration_wall_s: float,
+    execution_session_id: str,
+    question_manifest_sha256: str,
+    config_fingerprint: str,
+    experiment_fingerprint: str,
+    gpu_metadata: dict,
+) -> dict:
+    """Non-generation service cost for one deterministic stage-wave rebuild."""
+    return {
+        "record_type": "stage_timing",
+        "run_id": run_id,
+        "stage": stage,
+        "conceptual_role": prompts.role_for(stage),
+        "prompt_role": prompts.prompt_for(stage),
+        "phase": "timing_benchmark",
+        "timing_eligible": True,
+        "timing_repeat": repeat,
+        "execution_session_id": execution_session_id,
+        "question_manifest_sha256": question_manifest_sha256,
+        "config_fingerprint": config_fingerprint,
+        "experiment_fingerprint": experiment_fingerprint,
+        "orchestration_wall_s": orchestration_wall_s,
+        "n_calls": len(calls),
+        "call_graph_sha256": _content_hash(calls),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        **gpu_metadata,
     }
 
 
@@ -495,7 +701,7 @@ def _run_stage(
     timing_eligible=False,
     config_fingerprint=None, model_revision=None, tokenizer_revision=None,
     question_manifest_sha256=None, certified_batch_ids=None,
-    phase="scored", timing_repeat=None,
+    phase="scored", timing_repeat=None, experiment_fingerprint=None,
 ) -> int:
     """Run fixed canonical batches, regenerating a whole partial resume batch.
 
@@ -528,7 +734,10 @@ def _run_stage(
             work.append((batch_no, chunk, missing))
     if not work:
         return batch_size
-    work = _order_batches_largest_first(tok, stage, work)
+    # Canonical batch order is shared by scored and timing execution. The
+    # excluded preflight already certifies the worst prompt/output shape, so a
+    # second full render/tokenize scheduling pass adds cost without safety and
+    # would make the measured replay a different service path.
 
     missing_total = sum(len(missing) for _, _, missing in work)
     completed = 0
@@ -549,6 +758,7 @@ def _run_stage(
                 batch_ordinal=batch_no,
                 timing_repeat=timing_repeat,
                 execution_ordinal=execution_ordinal,
+                experiment_fingerprint=experiment_fingerprint,
             )
         except torch.cuda.OutOfMemoryError as exc:
             torch.cuda.empty_cache()
@@ -563,6 +773,7 @@ def _run_stage(
                 tokenizer_revision=tokenizer_revision,
                 question_manifest_sha256=question_manifest_sha256,
                 timing_repeat=timing_repeat,
+                experiment_fingerprint=experiment_fingerprint,
             )])
             store.durable_flush()
             raise RuntimeError(
@@ -606,14 +817,52 @@ def _preflight_stage(
     execution_session_id: str, gpu_metadata: dict, config_fingerprint: str,
     model_revision: str, tokenizer_revision: str,
     question_manifest_sha256: str, preflight_manifest_sha256: str,
+    state_calls: list[dict] | None = None,
+    shape_calls: list[dict] | None = None,
+    experiment_fingerprint: str | None = None,
 ) -> None:
-    """Warm up and prove batch-32 viability only on frozen excluded questions."""
-    chunk = calls[:batch_size]
-    if len(chunk) != batch_size:
-        raise RuntimeError(
-            f"{stage} preflight produced {len(chunk)} calls; exactly {batch_size} "
-            "excluded calls are required"
+    """Prove batch viability with excluded calls padded to the scored max shape."""
+    if not calls:
+        raise RuntimeError(f"{stage} has scored calls but no reusable preflight template")
+    state_calls = calls if state_calls is None else state_calls
+    natural_keys = {_member_key(call) for call in state_calls}
+    prompt_role = prompts.prompt_for(stage)
+
+    def rendered_tokens(call: dict) -> int:
+        messages = prompts.build_messages(prompt_role, **call["fields"])
+        text = tok.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
         )
+        encoded = tok(
+            text, padding=False, truncation=False, add_special_tokens=False
+        )["input_ids"]
+        return len(encoded)
+
+    chunk = [copy.deepcopy(call) for call in calls[:batch_size]]
+    while len(chunk) < batch_size:
+        duplicate = copy.deepcopy(max(chunk, key=rendered_tokens))
+        duplicate["question_id"] = (
+            f"{duplicate['question_id']}#preflight-pad-{len(chunk)}"
+        )
+        chunk.append(duplicate)
+
+    # Tokenize scored prompts only to learn the worst shape; no scored output is
+    # generated. Pad one excluded prompt beyond that length and duplicate it,
+    # which is conservative for activation memory at the fixed batch size.
+    shape_calls = shape_calls or []
+    if shape_calls:
+        target = max(rendered_tokens(call) for call in shape_calls)
+        longest = max(range(len(chunk)), key=lambda i: rendered_tokens(chunk[i]))
+        pad_fields = {
+            "planner": "question", "step_definer": "prior_state",
+            "extractor": "paragraphs", "qa": "evidence",
+            "plan_summary": "prior_state", "solo": "paragraphs",
+        }
+        field = pad_fields[prompt_role]
+        current = rendered_tokens(chunk[longest])
+        while current < target:
+            chunk[longest]["fields"][field] += " x" * (target - current + 8)
+            current = rendered_tokens(chunk[longest])
     batch_id = f"{stage}:excluded-preflight:{execution_session_id}"
     try:
         recs, batch_record = agents.run_calls(
@@ -627,6 +876,8 @@ def _preflight_stage(
             tokenizer_revision=tokenizer_revision,
             question_manifest_sha256=question_manifest_sha256,
             batch_ordinal=0,
+            experiment_fingerprint=experiment_fingerprint,
+            force_full_generation=True,
         )
     except torch.cuda.OutOfMemoryError as exc:
         torch.cuda.empty_cache()
@@ -640,6 +891,7 @@ def _preflight_stage(
             model_revision=model_revision,
             tokenizer_revision=tokenizer_revision,
             question_manifest_sha256=question_manifest_sha256,
+            experiment_fingerprint=experiment_fingerprint,
         )])
         store.durable_flush()
         raise RuntimeError(
@@ -648,12 +900,35 @@ def _preflight_stage(
 
     batch_record["canonical_batch_sha256"] = _batch_hash(chunk)
     batch_record["preflight_manifest_sha256"] = preflight_manifest_sha256
+    if batch_record.get("forced_full_generation") is not True:
+        raise RuntimeError(f"{run_id}/{stage}: preflight did not force the token cap")
+    expected_output_tokens = len(chunk) * prompts.MAX_NEW_TOKENS[prompt_role]
+    if int(batch_record.get("generated_sequence_tokens_total") or -1) != expected_output_tokens:
+        raise RuntimeError(
+            f"{run_id}/{stage}: preflight generated "
+            f"{batch_record.get('generated_sequence_tokens_total')} tokens, expected "
+            f"worst-case {expected_output_tokens}"
+        )
     for record in recs:
         record["record_type"] = "warmup_call"
         record["preflight_manifest_sha256"] = preflight_manifest_sha256
-        warmup_idx[(record["question_id"], stage, record["call_index"])] = record
+        if (record["question_id"], record["call_index"]) in natural_keys:
+            warmup_idx[(record["question_id"], stage, record["call_index"])] = record
     store.write([*recs, batch_record])
     store.durable_flush()
+
+
+def _shape_only_preflight_call(call: dict, question_id: str) -> dict:
+    """Create an excluded placeholder with a scored call's field shape only."""
+    clone = copy.deepcopy(call)
+    clone["question_id"] = question_id
+    clone["call_index"] = 0
+    for key, value in clone.get("fields", {}).items():
+        if isinstance(value, str):
+            clone["fields"][key] = "x " * max(1, len(value) // 2)
+    clone["consumer_payload_source"] = "shape_only_preflight"
+    clone["consumer_input"] = {"shape_only": True}
+    return clone
 
 
 def _run_timing_repeat(
@@ -662,13 +937,13 @@ def _run_timing_repeat(
     model_id: str, execution_session_id: str, gpu_metadata: dict,
     config_fingerprint: str, model_revision: str, tokenizer_revision: str,
     question_manifest_sha256: str,
+    experiment_fingerprint: str | None = None,
 ) -> None:
     """Replay identical canonical timing calls without duplicating call records."""
     batches = [
         (batch_no, calls[start : start + batch_size], [])
         for batch_no, start in enumerate(range(0, len(calls), batch_size))
     ]
-    batches = _order_batches_largest_first(tok, stage, batches)
     for execution_ordinal, (batch_no, chunk, _) in enumerate(batches):
         batch_id = _execution_batch_id(stage, batch_no, "timing_benchmark", repeat)
         try:
@@ -684,6 +959,7 @@ def _run_timing_repeat(
                 question_manifest_sha256=question_manifest_sha256,
                 batch_ordinal=batch_no, timing_repeat=repeat,
                 execution_ordinal=execution_ordinal,
+                experiment_fingerprint=experiment_fingerprint,
             )
         except torch.cuda.OutOfMemoryError as exc:
             torch.cuda.empty_cache()
@@ -699,6 +975,7 @@ def _run_timing_repeat(
                 tokenizer_revision=tokenizer_revision,
                 question_manifest_sha256=question_manifest_sha256,
                 timing_repeat=repeat,
+                experiment_fingerprint=experiment_fingerprint,
             )])
             store.durable_flush()
             raise RuntimeError(
@@ -836,7 +1113,7 @@ def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _source_bundle_sha256() -> str:
+def source_bundle_sha256() -> str:
     """Hash all experiment-defining source/artifacts, excluding the lock itself."""
     root = Path(__file__).resolve().parent.parent
     candidates = []
@@ -875,39 +1152,74 @@ def _content_hash(value) -> str:
 def _derived_config_matches_lock(cfg: dict, lock: dict, artifact: dict) -> bool:
     """Allow only the analyzer's cryptographically linked allocation delta."""
     current_cfg = {key: value for key, value in cfg.items() if not key.startswith("_")}
-    frozen = current_cfg.get("frozen_allocation") or {}
     base_cfg = lock.get("experiment_config_contract")
-    if not frozen or not isinstance(base_cfg, dict):
+    if not isinstance(base_cfg, dict):
         return False
 
     semantic = dict(artifact)
     executable_hash = semantic.pop("executable_config_sha256", None)
     artifact_hash = semantic.pop("artifact_sha256", None)
     execution_run_id = artifact.get("execution_run_id")
-    actual_run = (current_cfg.get("runs") or {}).get(execution_run_id)
+    base_runs = base_cfg.get("runs") or {}
+    materialized_new_run = execution_run_id not in base_runs
+    selection = artifact.get("selection") or {}
+    selected = selection.get("selected") or {}
+    selected_allocation = selected.get("allocation")
+    run_definition = artifact.get("run_definition")
+    run_config_hash = artifact.get("run_config_sha256")
     if not all((
+        isinstance(execution_run_id, str) and bool(execution_run_id),
         artifact_hash == _content_hash(semantic),
         executable_hash == _content_hash(current_cfg),
-        frozen.get("selection_artifact_sha256") == artifact_hash,
         artifact.get("source_config_sha256")
         == lock.get("experiment_config_content_sha256"),
-        frozen.get("run_config_sha256") == artifact.get("run_config_sha256"),
-        actual_run == artifact.get("run_definition"),
-        actual_run is not None,
-        _content_hash(actual_run) == artifact.get("run_config_sha256"),
-        frozen.get("question_manifest_sha256")
+        artifact.get("run_id") == "ma_optimized_exploratory",
+        artifact.get("materialized_new_run") is materialized_new_run,
+        artifact.get("claim_status") == "exploratory_same_sample_post_selection",
+        artifact.get("question_manifest_sha256")
         == lock.get("final_manifest_ids_sha256"),
+        isinstance(selected_allocation, dict),
+        isinstance(run_definition, dict),
+        _content_hash(run_definition) == run_config_hash,
     )):
         return False
 
-    # Reduce the derived config back to the locked base. No model alias,
-    # revision, prompt, dataset, static arm, or memory/timing field may change.
-    reduced = copy.deepcopy(current_cfg)
-    reduced.pop("frozen_allocation", None)
-    reduced["allocation_selector"] = copy.deepcopy(base_cfg["allocation_selector"])
-    if execution_run_id not in (base_cfg.get("runs") or {}):
-        reduced.get("runs", {}).pop(execution_run_id, None)
-    return reduced == base_cfg
+    # Reconstruct the sole authorized executable config from the immutable
+    # locked base.  Comparing the whole object is stricter than deleting known
+    # fields from the submitted config: an unrelated model, prompt, cohort,
+    # timing, or matrix change cannot hide behind the selection exception.
+    expected = copy.deepcopy(base_cfg)
+    if materialized_new_run:
+        expected.setdefault("runs", {})[str(execution_run_id)] = copy.deepcopy(
+            run_definition
+        )
+    elif base_runs.get(execution_run_id) != run_definition:
+        return False
+
+    expected_selector = copy.deepcopy(base_cfg.get("allocation_selector") or {})
+    expected_selector.update({
+        "status": "frozen",
+        "selected_execution_run_id": execution_run_id,
+        "selected_allocation": copy.deepcopy(selected_allocation),
+        "selected_run_config_sha256": run_config_hash,
+    })
+    expected["allocation_selector"] = expected_selector
+
+    expected_timing = copy.deepcopy(base_cfg.get("timing") or {})
+    expected_timing["selected_execution_run_id"] = execution_run_id
+    expected_timing["selected_system_timing_required"] = True
+    expected["timing"] = expected_timing
+
+    expected["frozen_allocation"] = {
+        "run_id": "ma_optimized_exploratory",
+        "execution_run_id": execution_run_id,
+        "materialized_new_run": materialized_new_run,
+        "run_config_sha256": run_config_hash,
+        "selection_artifact_sha256": artifact_hash,
+        "claim_status": artifact["claim_status"],
+        "question_manifest_sha256": artifact["question_manifest_sha256"],
+    }
+    return current_cfg == expected
 
 
 def _package_version(name: str) -> str | None:
@@ -950,7 +1262,7 @@ def _environment_snapshot(
             name: _package_version(name)
             for name in (
                 "torch", "transformers", "bitsandbytes", "datasets",
-                "accelerate", "PyYAML", "huggingface-hub",
+                "accelerate", "PyYAML", "huggingface-hub", "numpy", "scipy",
             )
         },
         "torch_cuda_runtime": torch.version.cuda,
@@ -972,7 +1284,7 @@ def _environment_snapshot(
         "dataset_revision": cfg["dataset"].get("revision"),
         "prompt_bundle_version": prompts.PROMPT_BUNDLE_VERSION,
         "prompt_template_sha256": prompts.prompt_template_hashes(),
-        "source_bundle_sha256": _source_bundle_sha256(),
+        "source_bundle_sha256": source_bundle_sha256(),
         "preflight_manifest_file_sha256": _sha256_file(
             _resolve_repo_path(
                 cfg,
@@ -990,6 +1302,10 @@ def _environment_snapshot(
         ),
         "timing_manifest_ids_sha256": cfg.get("timing", {}).get("manifest_sha256"),
         "timing_repetitions": cfg.get("timing", {}).get("repetitions"),
+        "pilot_manifest_file_sha256": _sha256_file(
+            _resolve_repo_path(cfg, cfg.get("pilot", {})["manifest_path"])
+        ),
+        "pilot_manifest_ids_sha256": cfg.get("pilot", {}).get("manifest_sha256"),
     }
     if include_freeze:
         snapshot["pip_freeze"] = freeze
@@ -1070,6 +1386,7 @@ def validate_environment_lock(cfg: dict, config_path: Path, lock_path: Path) -> 
         "preflight_manifest_ids_sha256",
         "timing_manifest_file_sha256", "timing_manifest_ids_sha256",
         "timing_repetitions",
+        "pilot_manifest_file_sha256", "pilot_manifest_ids_sha256",
     )
     mismatches = [key for key in checks if lock.get(key) != current.get(key)]
     if (
@@ -1109,12 +1426,25 @@ def run(
     *,
     use_manifest: bool | None = None,
     timing_mode: bool = False,
+    pilot_mode: bool = False,
 ):
+    if timing_mode and pilot_mode:
+        raise ValueError("timing_mode and pilot_mode are mutually exclusive")
+    _validate_architecture_contract(cfg)
     treatments = resolve_treatments(cfg, run_id)
     stage_precision = {s: t["precision"] for s, t in treatments.items()}
     model_id = cfg["model_id"]
-    n = n if n is not None else cfg["dataset"]["n"]
-    seed = seed if seed is not None else cfg["dataset"]["eval_seed"]
+    ds_cfg = cfg.get("dataset", {})
+    pilot_cfg = cfg.get("pilot") or {}
+    requested_n, requested_seed = n, seed
+    if pilot_mode:
+        if run_id not in set(pilot_cfg.get("run_ids") or ()):
+            raise ValueError(f"run {run_id!r} is not authorized for the frozen pilot")
+    # Pilot scoring has its own artifact seed, while the final manifest retained
+    # as the reachability reference must still be validated with its own seed.
+    n, seed, dataset_load_seed = _resolve_cohort_seeds(
+        ds_cfg, pilot_cfg, requested_n, requested_seed, pilot_mode=pilot_mode
+    )
     batch_size = batch_size if batch_size is not None else cfg["generation"]["batch_size"]
     min_batch_size = cfg["generation"].get("min_batch_size", batch_size)
     # SPEC §5b prediction 4. Off by default: costs an extra prefill per batch, and
@@ -1122,14 +1452,13 @@ def run(
     log_confidence = bool(cfg["generation"].get("log_confidence", False))
     results_dir = _resolve_repo_path(cfg, cfg.get("results_dir", "results"))
 
-    ds_cfg = cfg.get("dataset", {})
     configured_manifest = ds_cfg.get("manifest_path")
     if use_manifest is None:
         use_manifest = bool(configured_manifest)
     if use_manifest:
         if not configured_manifest:
             raise ValueError("final execution requires dataset.manifest_path")
-        if n != ds_cfg["n"] or seed != ds_cfg["eval_seed"]:
+        if not pilot_mode and (n != ds_cfg["n"] or seed != ds_cfg["eval_seed"]):
             raise ValueError(
                 "--n/--seed cannot override a frozen final manifest; use the "
                 "explicit development-sample mode for prompt smoke tests"
@@ -1144,6 +1473,19 @@ def run(
             cfg, cfg.get("environment_lock_path", "config/environment.lock.json")
         )
         environment_lock = validate_environment_lock(cfg, config_path, lock_path)
+        if (
+            not pilot_mode
+            and (cfg.get("pilot") or {}).get("required_before_final_campaign")
+        ):
+            # Import here to avoid a module cycle: the gate checker itself uses
+            # resolve_treatments from this module.
+            from scripts.check_pilot import verify_gate
+
+            verify_gate(
+                config_path,
+                _resolve_repo_path(cfg, cfg["pilot"]["gate_artifact"]),
+                require_tracked=True,
+            )
     else:
         # Development runs are outside the final experiment and may be smaller,
         # but they still never autotune within a run.
@@ -1164,6 +1506,8 @@ def run(
     warmup_ids = []
     timing_ids = []
     timing_meta = None
+    pilot_ids = []
+    pilot_meta = None
     timing_repetitions = 1
     if manifest_path is not None:
         manifest_ids, manifest_meta = load_id_manifest(manifest_path)
@@ -1201,10 +1545,26 @@ def run(
                 f"{ds_cfg.get('manifest_file_sha256')} != "
                 f"{manifest_meta.get('manifest_file_sha256')}"
             )
+        preflight_source = preflight_meta.get("source") or {}
+        if (
+            preflight_source.get("final_manifest_file_sha256")
+            != ds_cfg.get("manifest_file_sha256")
+            or preflight_source.get("final_question_ids_sha256")
+            != ds_cfg.get("manifest_sha256")
+            or preflight_source.get("exclusion_ids_sha256")
+            != ds_cfg.get("exclusion_sha256")
+        ):
+            raise ValueError(
+                "preflight manifest source linkage does not match the frozen final cohort"
+            )
         if timing_mode:
             timing_cfg = cfg.get("timing") or {}
             allowed_timing_runs = set(timing_cfg.get("run_ids") or [])
             allowed_timing_runs.add(timing_cfg.get("post_selection_run_id"))
+            allowed_timing_runs.add(timing_cfg.get("selected_execution_run_id"))
+            allowed_timing_runs.add(
+                (cfg.get("frozen_allocation") or {}).get("execution_run_id")
+            )
             allowed_timing_runs.discard(None)
             if run_id not in allowed_timing_runs:
                 raise ValueError(
@@ -1226,7 +1586,9 @@ def run(
                 raise ValueError("timing and preflight cohorts must be disjoint")
             timing_source = timing_meta.get("source") or {}
             if (
-                timing_source.get("final_question_ids_sha256")
+                timing_source.get("final_manifest_file_sha256")
+                != ds_cfg.get("manifest_file_sha256")
+                or timing_source.get("final_question_ids_sha256")
                 != ds_cfg.get("manifest_sha256")
                 or timing_source.get("exclusion_ids_sha256")
                 != ds_cfg.get("exclusion_sha256")
@@ -1237,11 +1599,43 @@ def run(
             timing_repetitions = int(timing_cfg.get("repetitions", 1))
             if timing_repetitions < 2:
                 raise ValueError("timing benchmark requires at least two repetitions")
+        if pilot_mode:
+            pilot_path = _resolve_repo_path(cfg, pilot_cfg["manifest_path"])
+            pilot_ids, pilot_meta = load_id_manifest(pilot_path)
+            if len(pilot_ids) != int(pilot_cfg.get("n", -1)):
+                raise ValueError("pilot manifest n does not match pilot.n")
+            if pilot_meta["question_ids_sha256"] != pilot_cfg.get("manifest_sha256"):
+                raise ValueError("pilot manifest ordered-ID hash mismatch")
+            if pilot_meta["manifest_file_sha256"] != pilot_cfg.get(
+                "manifest_file_sha256"
+            ):
+                raise ValueError("pilot manifest file-byte hash mismatch")
+            if not set(pilot_ids) <= exclusions:
+                raise ValueError("pilot cohort must be entirely within final exclusions")
+            timing_path_for_disjointness = _resolve_repo_path(
+                cfg, (cfg.get("timing") or {})["manifest_path"]
+            )
+            frozen_timing_ids, _ = load_id_manifest(timing_path_for_disjointness)
+            if set(pilot_ids) & (set(warmup_ids) | set(frozen_timing_ids)):
+                raise ValueError("pilot, timing, and preflight cohorts must be disjoint")
+            source = pilot_meta.get("source") or {}
+            if (
+                source.get("final_manifest_file_sha256")
+                != ds_cfg.get("manifest_file_sha256")
+                or source.get("final_question_ids_sha256")
+                != ds_cfg.get("manifest_sha256")
+                or source.get("exclusion_ids_sha256") != ds_cfg.get("exclusion_sha256")
+                or source.get("preflight_question_ids_sha256")
+                != ds_cfg.get("preflight_manifest_sha256")
+                or source.get("timing_question_ids_sha256")
+                != (cfg.get("timing") or {}).get("manifest_sha256")
+            ):
+                raise ValueError("pilot manifest source linkage does not match frozen cohorts")
     dataset_meta = {}
     auxiliary_questions = []
     questions = load_questions(
         n,
-        seed=seed,
+        seed=dataset_load_seed,
         split=ds_cfg.get("split", "validation"),
         config=ds_cfg.get("config", "distractor"),
         name=ds_cfg.get("name"),
@@ -1250,11 +1644,119 @@ def run(
         manifest_sha256=ds_cfg.get("manifest_sha256") if use_manifest else None,
         revision=ds_cfg.get("revision"),
         metadata=dataset_meta,
-        warmup_question_ids=(warmup_ids + timing_ids) if use_manifest else None,
+        warmup_question_ids=(warmup_ids + timing_ids + pilot_ids) if use_manifest else None,
         warmup_out=auxiliary_questions if use_manifest else None,
     )
     warmup_questions = auxiliary_questions[:len(warmup_ids)]
-    timing_questions = auxiliary_questions[len(warmup_ids):]
+    timing_start = len(warmup_ids)
+    timing_questions = auxiliary_questions[timing_start:timing_start + len(timing_ids)]
+    pilot_start = timing_start + len(timing_ids)
+    pilot_questions = auxiliary_questions[pilot_start:pilot_start + len(pilot_ids)]
+
+    if use_manifest:
+        stratum_counts = {
+            label: sum(q.get("retrieval_stratum") == label for q in questions)
+            for label in ("hidden_bridge", "fully_named")
+        }
+        if stratum_counts != ds_cfg.get("retrieval_strata_counts"):
+            raise ValueError(
+                "frozen final retrieval-stratum counts changed: "
+                f"{stratum_counts} != {ds_cfg.get('retrieval_strata_counts')}"
+            )
+    if pilot_mode:
+        pilot_strata = {
+            label: sum(q.get("retrieval_stratum") == label for q in pilot_questions)
+            for label in ("hidden_bridge", "fully_named")
+        }
+        if pilot_strata != pilot_cfg.get("retrieval_strata_counts"):
+            raise ValueError(
+                "frozen pilot retrieval-stratum counts changed: "
+                f"{pilot_strata} != {pilot_cfg.get('retrieval_strata_counts')}"
+            )
+
+    # SPEC §3 (revised): build the open-domain corpus before any model loads.
+    # Failing here costs seconds; failing after a 3B model is resident costs the
+    # GPU allocation. ~3.5 s to index 72k passages, CPU only.
+    retr_cfg = cfg.get("retrieval") or {}
+    architecture = cfg["architecture"]
+    corpus_configs = tuple(retr_cfg.get("corpus_configs") or ())
+    if corpus_configs != ("distractor", "fullwiki"):
+        raise ValueError(
+            "retrieval.corpus_configs must be exactly [distractor, fullwiki]; "
+            "order preserves supporting-fact sentence IDs"
+        )
+    print("building retrieval corpus...", flush=True)
+    corpus = retrieval.build_corpus(
+        name=ds_cfg.get("name") or "hotpotqa/hotpot_qa",
+        split=ds_cfg.get("split", "validation"),
+        revision=ds_cfg.get("revision"),
+        configs=corpus_configs,
+    )
+    retriever = retrieval.RetrievalContext(
+        corpus,
+        k=int(retr_cfg.get("k", retrieval.K)),
+    )
+    expected_corpus_passages = int(retr_cfg.get("expected_corpus_passages", -1))
+    if len(corpus) != expected_corpus_passages:
+        raise AssertionError(
+            f"retrieval corpus has {len(corpus):,} passages; expected "
+            f"{expected_corpus_passages:,}"
+        )
+    fingerprint = retriever.fingerprint()
+    if fingerprint["algorithm"] != retr_cfg.get("algorithm"):
+        raise AssertionError("configured retrieval algorithm does not match implementation")
+    if fingerprint["corpus_sha256"] != retr_cfg.get("expected_corpus_sha256"):
+        raise AssertionError(
+            "retrieval corpus content hash changed: expected "
+            f"{retr_cfg.get('expected_corpus_sha256')}, got "
+            f"{fingerprint['corpus_sha256']}"
+        )
+    if fingerprint["query_policy"] != retr_cfg.get("query_policy"):
+        raise AssertionError("configured retrieval query policy does not match implementation")
+    print(
+        f"  {len(corpus):,} passages, k={retriever.k} per question-answering step, "
+        f"policy={fingerprint['query_policy']}"
+    )
+    coverage_questions = [*questions, *auxiliary_questions]
+    missing_gold = [
+        t for q in coverage_questions
+        for t in (q["supporting_facts"] or {}).get("title", ())
+        if t not in retriever.index.title_to_index
+    ]
+    if missing_gold:
+        # Gold outside the corpus is unreachable by ANY arm, capping every result
+        # for a reason unrelated to the experiment.
+        raise AssertionError(
+            f"{len(missing_gold)} gold passages absent from the corpus; "
+            f"examples: {sorted(set(missing_gold))[:3]}"
+        )
+    gold_sentence_validation = _validate_gold_sentence_coverage(
+        coverage_questions, retriever
+    )
+    # The number of labels checked depends on the active excluded cohort, so it
+    # is validation telemetry, not part of the accuracy/timing experiment ID.
+    fingerprint.update({
+        "gold_sentence_coverage": gold_sentence_validation["gold_sentence_coverage"],
+        "gold_sentence_text_nfkc_whitespace_equivalent": gold_sentence_validation[
+            "gold_sentence_text_nfkc_whitespace_equivalent"
+        ],
+    })
+    required_coverage = float(retr_cfg.get("required_gold_title_coverage", -1))
+    if required_coverage != 1.0:
+        raise ValueError("this experiment requires retrieval gold-title coverage == 1.0")
+    if float(retr_cfg.get("required_gold_sentence_coverage", -1)) != 1.0:
+        raise ValueError("this experiment requires gold-sentence coverage == 1.0")
+    experiment_fingerprint_payload = {
+        "schema": "open_corpus_marag_v1",
+        "architecture": architecture,
+        "pipeline_stages": prompts.PIPELINE_STAGES,
+        "stage_role": prompts.STAGE_ROLE,
+        "prompt_bundle_version": prompts.PROMPT_BUNDLE_VERSION,
+        "prompt_template_sha256": prompts.prompt_template_hashes(),
+        "retrieval": fingerprint,
+        "dataset_revision": ds_cfg.get("revision"),
+    }
+    experiment_fingerprint = _content_hash(experiment_fingerprint_payload)
     if manifest_ids is not None and [q["question_id"] for q in questions] != manifest_ids:
         raise AssertionError("loaded questions do not exactly match frozen manifest order")
     final_eval_question_ids_sha256 = dataset_meta["question_ids_sha256"]
@@ -1265,6 +1767,11 @@ def run(
         active_question_manifest_sha256 = timing_meta["question_ids_sha256"]
         artifact_n = len(questions)
         cohort_kind = "excluded_timing_benchmark"
+    elif pilot_mode:
+        questions = pilot_questions
+        active_question_manifest_sha256 = pilot_meta["question_ids_sha256"]
+        artifact_n = len(questions)
+        cohort_kind = "excluded_scored_pilot_gate"
     else:
         active_question_manifest_sha256 = final_eval_question_ids_sha256
         artifact_n = n
@@ -1273,11 +1780,13 @@ def run(
     # n and seed are part of the filename, not just the metadata. Resume keys on
     # (question_id, stage, call_index), which says nothing about which sample the
     # question came from — so a dev run at n=30/seed=1234 sharing a file with the
-    # real n=300/seed=7 run would silently interleave two different datasets into
-    # one results file and no key collision would ever flag it.
+    # real frozen n=1,500 run would silently interleave two different datasets
+    # into one results file and no key collision would ever flag it.
     slug = result_slug(run_id, artifact_n, seed, model_id, treatments)
     if timing_mode:
         slug += "_timing"
+    elif pilot_mode:
+        slug += "_pilot"
     store = JsonlStore(results_dir / f"{slug}.jsonl")
     execution_session_id = uuid.uuid4().hex
     gpu_metadata = _gpu_metadata()
@@ -1332,6 +1841,7 @@ def run(
         "question_ids_sha256": active_question_manifest_sha256,
         "batch_size": batch_size,
         "timing_mode": timing_mode,
+        "pilot_mode": pilot_mode,
         "environment_lock_sha256": (
             _sha256_file(lock_path) if environment_lock is not None else None
         ),
@@ -1344,6 +1854,8 @@ def run(
         ),
         "allocation_claim_status": frozen_allocation.get("claim_status"),
         "prompt_template_sha256": prompts.prompt_template_hashes(),
+        "experiment_fingerprint": experiment_fingerprint,
+        "experiment_fingerprint_payload": experiment_fingerprint_payload,
         "stage_config_fingerprints": {
             s: t["config_fingerprint"] for s, t in treatments.items()
         },
@@ -1372,6 +1884,11 @@ def run(
         **immutable_meta,
         "model_id": model_id,
         "dataset": dataset_meta,
+        # Retrieval is now an experimental variable, so its setup is provenance.
+        "retrieval": fingerprint,
+        "gold_sentence_validation": gold_sentence_validation,
+        "experiment_fingerprint": experiment_fingerprint,
+        "experiment_fingerprint_payload": experiment_fingerprint_payload,
         "cohort_kind": cohort_kind,
         "final_eval_question_ids_sha256": final_eval_question_ids_sha256,
         "timing_manifest_path": (
@@ -1381,6 +1898,12 @@ def run(
             timing_meta.get("manifest_file_sha256") if timing_mode else None
         ),
         "timing_repetitions": timing_repetitions if timing_mode else None,
+        "pilot_manifest_path": (
+            str(pilot_path) if pilot_mode else None
+        ),
+        "pilot_manifest_file_sha256": (
+            pilot_meta.get("manifest_file_sha256") if pilot_mode else None
+        ),
         "manifest_path": str(manifest_path) if manifest_path else None,
         "preflight_manifest_path": (
             str(preflight_path) if use_manifest else None
@@ -1423,8 +1946,9 @@ def run(
     loaded: tuple | None = None
     # Walk only the stages this run defines, in canonical pipeline order. A
     # single-call run (SPEC §4a) defines one stage, not four.
-    stages = [r for r in prompts.ALL_ROLES if r in treatments]
+    stages = [r for r in prompts.PIPELINE_STAGES if r in treatments]
     warmup_idx = {}
+    preflight_templates: dict[str, list[dict]] = {}
     preflight_manifest_sha256 = question_ids_sha256(
         [q["question_id"] for q in warmup_questions]
     ) if warmup_questions else "development-sample"
@@ -1435,12 +1959,39 @@ def run(
             precision, stage_model_id = treatment["precision"], treatment["model_id"]
             revision = treatment["model_revision"]
             tokenizer_revision = treatment["tokenizer_revision"]
-            calls = build_stage_calls(stage, questions, idx)
+            calls = build_stage_calls(stage, questions, idx, retriever=retriever)
+            if timing_mode:
+                # Warm sparse-index pages and Python routing once, then time the
+                # same deterministic rebuild as steady-state repeat zero.
+                warm_call_hash = _content_hash(calls)
+                orchestration_started = time.perf_counter()
+                calls = build_stage_calls(stage, questions, idx, retriever=retriever)
+                orchestration_wall_s = time.perf_counter() - orchestration_started
+                if _content_hash(calls) != warm_call_hash:
+                    raise RuntimeError(
+                        f"{run_id}/{stage}: warm timing rebuild changed call graph"
+                    )
+            else:
+                orchestration_wall_s = 0.0
             _validate_existing_stage_calls(
                 existing, stage, calls, batch_size,
                 run_id=run_id, treatment=treatment,
                 question_manifest_sha256=active_question_manifest_sha256,
+                experiment_fingerprint=experiment_fingerprint,
             )
+            if timing_mode:
+                store.write([_stage_timing_record(
+                    run_id=run_id,
+                    stage=stage,
+                    repeat=0,
+                    calls=calls,
+                    orchestration_wall_s=orchestration_wall_s,
+                    execution_session_id=execution_session_id,
+                    question_manifest_sha256=active_question_manifest_sha256,
+                    config_fingerprint=treatment["config_fingerprint"],
+                    experiment_fingerprint=experiment_fingerprint,
+                    gpu_metadata=gpu_metadata,
+                )])
             pending = [
                 c for c in calls
                 if (c["question_id"], stage, c["call_index"]) not in idx
@@ -1449,10 +2000,55 @@ def run(
                 existing, stage, calls, batch_size,
                 config_fingerprint=treatment["config_fingerprint"],
                 question_manifest_sha256=active_question_manifest_sha256,
+                experiment_fingerprint=experiment_fingerprint,
             )
             expected_batch_count = (len(calls) + batch_size - 1) // batch_size
             print(f"\n--- stage {stage} @ {stage_model_id} {precision}: "
                   f"{len(calls)} calls, {len(pending)} pending ---")
+
+            if not calls:
+                if timing_mode:
+                    for repeat in range(1, timing_repetitions):
+                        repeat_started = time.perf_counter()
+                        repeat_calls = build_stage_calls(
+                            stage, questions, idx, retriever=retriever
+                        )
+                        repeat_wall = time.perf_counter() - repeat_started
+                        if _content_hash(repeat_calls) != _content_hash(calls):
+                            raise RuntimeError(
+                                f"{run_id}/{stage}: timing orchestration changed call graph"
+                            )
+                        store.write([_stage_timing_record(
+                            run_id=run_id, stage=stage, repeat=repeat,
+                            calls=repeat_calls,
+                            orchestration_wall_s=repeat_wall,
+                            execution_session_id=execution_session_id,
+                            question_manifest_sha256=active_question_manifest_sha256,
+                            config_fingerprint=treatment["config_fingerprint"],
+                            experiment_fingerprint=experiment_fingerprint,
+                            gpu_metadata=gpu_metadata,
+                        )])
+                    store.durable_flush()
+                stage_meta[stage] = {
+                    **models.quant_config_metadata(precision),
+                    "model_id": stage_model_id,
+                    "model_revision": revision,
+                    "tokenizer_revision": tokenizer_revision,
+                    "config_fingerprint": treatment["config_fingerprint"],
+                    "conceptual_role": prompts.role_for(stage),
+                    "active": False,
+                    "calls": 0,
+                    "stage_wall_s": 0.0,
+                    "model_load_wall_s": 0.0,
+                    "model_load_reused": False,
+                    "oom_autotuned": False,
+                }
+                meta["stages"] = stage_meta
+                meta["last_completed_stage"] = stage
+                meta["updated_at"] = datetime.now(timezone.utc).isoformat()
+                _write_json_atomic(meta_path, meta)
+                print("    (inactive for this cohort; no model load)")
+                continue
 
             if (
                 not pending
@@ -1517,6 +2113,19 @@ def run(
             post_load_allocated = (
                 torch.cuda.memory_allocated() if torch.cuda.is_available() else None
             )
+            load_peak_allocated = (
+                torch.cuda.max_memory_allocated() / 1024**2
+                if torch.cuda.is_available() and not load_reused else None
+            )
+            load_peak_reserved = (
+                torch.cuda.max_memory_reserved() / 1024**2
+                if torch.cuda.is_available() and not load_reused else None
+            )
+            # Loading has its own diagnostic. Reset here so every inference peak
+            # starts from resident weights, regardless of fresh load vs reuse.
+            if torch.cuda.is_available() and not load_reused:
+                torch.cuda.synchronize()
+                torch.cuda.reset_peak_memory_stats()
             resolved_revisions = models.resolved_revision_metadata(
                 model, tok, revision, tokenizer_revision
             )
@@ -1535,10 +2144,15 @@ def run(
                 "tokenizer_revision": tokenizer_revision,
                 **resolved_revisions,
                 "config_fingerprint": treatment["config_fingerprint"],
+                "conceptual_role": prompts.role_for(stage),
+                "prompt_role": prompts.prompt_for(stage),
+                "active": True,
                 "execution_session_id": execution_session_id,
                 "load_reused": load_reused,
                 "load_wall_s": load_elapsed,
                 "cuda_allocated_delta_mib": load_delta,
+                "load_peak_vram_allocated_mib": load_peak_allocated,
+                "load_peak_vram_reserved_mib": load_peak_reserved,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 **gpu_metadata,
             }])
@@ -1547,9 +2161,19 @@ def run(
             memory = models.memory_footprint_mib(model)
             census = models.param_census(model)
             if use_manifest:
-                warmup_calls = build_stage_calls(
-                    stage, warmup_questions, warmup_idx
+                natural_warmup_calls = build_stage_calls(
+                    stage, warmup_questions, warmup_idx, retriever=retriever
                 )
+                prompt_role = prompts.prompt_for(stage)
+                if natural_warmup_calls:
+                    preflight_templates[prompt_role] = natural_warmup_calls
+                warmup_calls = natural_warmup_calls or preflight_templates.get(
+                    prompt_role, []
+                )
+                if not warmup_calls:
+                    warmup_calls = [_shape_only_preflight_call(
+                        calls[0], warmup_questions[0]["question_id"]
+                    )]
                 _preflight_stage(
                     model, tok, stage, warmup_calls, precision, run_id,
                     batch_size, store, warmup_idx, model_id=stage_model_id,
@@ -1560,6 +2184,9 @@ def run(
                     tokenizer_revision=tokenizer_revision,
                     question_manifest_sha256=preflight_manifest_sha256,
                     preflight_manifest_sha256=preflight_manifest_sha256,
+                    state_calls=natural_warmup_calls,
+                    shape_calls=calls,
+                    experiment_fingerprint=experiment_fingerprint,
                 )
             t_stage = time.perf_counter()
             bs = _run_stage(
@@ -1576,11 +2203,31 @@ def run(
                 certified_batch_ids=certified_batch_ids,
                 phase="timing_benchmark" if timing_mode else "scored",
                 timing_repeat=0 if timing_mode else None,
+                experiment_fingerprint=experiment_fingerprint,
             )
             if timing_mode:
                 for repeat in range(1, timing_repetitions):
+                    repeat_started = time.perf_counter()
+                    repeat_calls = build_stage_calls(
+                        stage, questions, idx, retriever=retriever
+                    )
+                    repeat_wall = time.perf_counter() - repeat_started
+                    if _content_hash(repeat_calls) != _content_hash(calls):
+                        raise RuntimeError(
+                            f"{run_id}/{stage}: timing orchestration changed call graph"
+                        )
+                    store.write([_stage_timing_record(
+                        run_id=run_id, stage=stage, repeat=repeat,
+                        calls=repeat_calls,
+                        orchestration_wall_s=repeat_wall,
+                        execution_session_id=execution_session_id,
+                        question_manifest_sha256=active_question_manifest_sha256,
+                        config_fingerprint=treatment["config_fingerprint"],
+                        experiment_fingerprint=experiment_fingerprint,
+                        gpu_metadata=gpu_metadata,
+                    )])
                     _run_timing_repeat(
-                        model, tok, stage, calls, precision, run_id,
+                        model, tok, stage, repeat_calls, precision, run_id,
                         batch_size, store, idx, repeat=repeat,
                         model_id=stage_model_id,
                         execution_session_id=execution_session_id,
@@ -1589,6 +2236,7 @@ def run(
                         model_revision=revision,
                         tokenizer_revision=tokenizer_revision,
                         question_manifest_sha256=active_question_manifest_sha256,
+                        experiment_fingerprint=experiment_fingerprint,
                     )
             store.durable_flush()
             elapsed = time.perf_counter() - t_stage
@@ -1604,6 +2252,9 @@ def run(
                 "tokenizer_revision": tokenizer_revision,
                 **resolved_revisions,
                 "config_fingerprint": treatment["config_fingerprint"],
+                "conceptual_role": prompts.role_for(stage),
+                "prompt_role": prompts.prompt_for(stage),
+                "active": True,
                 "peak_vram_allocated_mib": round(peak, 1) if peak is not None else None,
                 "peak_vram_reserved_mib": (
                     round(peak_reserved, 1) if peak_reserved is not None else None
@@ -1614,6 +2265,14 @@ def run(
                 "model_load_reused": load_reused,
                 "model_load_allocated_delta_mib": (
                     round(load_delta, 1) if load_delta is not None else None
+                ),
+                "model_load_peak_vram_allocated_mib": (
+                    round(load_peak_allocated, 1)
+                    if load_peak_allocated is not None else None
+                ),
+                "model_load_peak_vram_reserved_mib": (
+                    round(load_peak_reserved, 1)
+                    if load_peak_reserved is not None else None
                 ),
                 "calls": len(calls),
                 "stage_wall_s": round(elapsed, 1),
@@ -1639,17 +2298,16 @@ def run(
             answers = build_answer_records(
                 questions, idx, run_id,
                 question_manifest_sha256=active_question_manifest_sha256,
+                retriever=retriever,
             )
             for answer in answers:
                 answer.update({
                     "question_manifest_sha256": active_question_manifest_sha256,
                     "execution_session_id": execution_session_id,
                     "prompt_bundle_version": prompts.PROMPT_BUNDLE_VERSION,
+                    "experiment_fingerprint": experiment_fingerprint,
                 })
-            have = {
-                r["question_id"] for r in existing
-                if r.get("record_type") == "answer"
-            }
+            have = _validate_existing_answers(existing, answers)
             new_answers = [a for a in answers if a["question_id"] not in have]
             store.write(new_answers)
             store.durable_flush()
@@ -1663,10 +2321,7 @@ def run(
 
     # Distinct-weight concurrent residency is primary; isolated role services
     # and the actually executed sequential peak answer different topologies.
-    isolated_role_service_weight_mib = sum(
-        s["model_footprint_mib"] for s in stage_meta.values()
-        if s.get("model_footprint_mib") is not None
-    )
+    isolated_role_service_weight_mib = isolated_role_service_footprint_mib(stage_meta)
     # A stage that resumed as already-complete contributes no stage_meta, so a
     # run finished across two invocations can end up with footprints summed over
     # a SUBSET of its stages — silently, and smaller than the truth. That is the
@@ -1780,6 +2435,10 @@ def main():
         help="fresh reserved-A100 timing replay; writes a separate *_timing artifact",
     )
     ap.add_argument(
+        "--pilot-mode", action="store_true",
+        help="score only the frozen excluded n=200 stop/go pilot cohort",
+    )
+    ap.add_argument(
         "--write-environment-lock", nargs="?", const="config/environment.lock.json",
         help="capture the selected A100 software/container/GPU lock and exit",
     )
@@ -1831,12 +2490,15 @@ def main():
         dev_n = args.n if args.n is not None else 10
         if dev_seed not in (0, 1234) or dev_n > 30:
             ap.error("--dev-sample is restricted to seed 0/1234 and n <= 30")
-    if args.timing_mode and args.dev_sample:
-        ap.error("--timing-mode is a final-manifest production replay, not a dev smoke test")
+    if (args.timing_mode or args.pilot_mode) and args.dev_sample:
+        ap.error("timing/pilot modes are frozen production cohorts, not dev smoke tests")
+    if args.timing_mode and args.pilot_mode:
+        ap.error("--timing-mode and --pilot-mode are mutually exclusive")
     run(
         cfg, args.run, args.n, args.seed, args.batch_size,
         use_manifest=not args.dev_sample,
         timing_mode=args.timing_mode,
+        pilot_mode=args.pilot_mode,
     )
 
 

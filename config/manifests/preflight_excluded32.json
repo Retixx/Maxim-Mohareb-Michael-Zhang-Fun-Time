@@ -3,7 +3,7 @@
   "purpose": "fixed excluded batch-32 A100 warm-up and smoke check; never scored",
   "source": {
     "final_manifest_path": "config/manifests/final_n1500_seed20260805.json",
-    "final_manifest_file_sha256": "841dbca9ac7e76c0277a5696fba9f7e254b973afb0b670efbc5edfc006b4af46",
+    "final_manifest_file_sha256": "ba2836fdcd180a16daae625c09ae6bc4f68aee26a072e9bbef14e44ec6868f90",
     "final_question_ids_sha256": "5d4cc24872aeb603cbd005f790958199ef4cc993a1e7f048403608603da602af",
     "exclusion_ids_sha256": "a5cfacb84fa9a48217f3206a095706a6d48802bd244151c72f2eef08372c00a8"
   },

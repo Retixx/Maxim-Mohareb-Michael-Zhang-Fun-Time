@@ -1,215 +1,338 @@
-# Final A100 campaign runbook
+# Final MA-RAG SLM campaign runbook
 
-This is the operator handoff for `final-3b-reference`. Follow it in order. Do
-not reconstruct the experiment from old notebooks, logs, or branches.
+This is the normative operator handoff. Follow it in order. SPEC.md defines the
+scientific contract; config/experiment.yaml defines the executable contract.
+Stop if either disagrees with the current code or generated metadata.
 
-## 1. Recognize the correct experiment
+## 1. Recognize the experiment
 
-Every production accuracy log must begin with all of the following:
+Every final accuracy invocation must resolve to:
 
-```text
-n=1500
-seed=20260805
-batch=32
-```
+    n=1500
+    seed=20260805
+    batch=32
+    corpus passages=72094
+    retrieval k=10 per question-answering plan step
+    max plan steps=5
+    conceptual roles=planner, step_definer, extractor, qa
+    finalizer=step_definer_plan_summary
 
-The static campaign has exactly 22 accuracy run IDs. Standardized timing has 17
-non-tiny run IDs on 128 excluded questions with two repetitions. A selector may
-add one distinct `ma_optimized_exploratory` accuracy/timing pair after the static
-campaign. Output showing n=3000, seed=7, batch=64, `uni_3b_*`, or another old run
-name is historical and must not be used in the final analysis.
+The static matrix has exactly 22 accuracy run IDs. Logical plan depth is
+question-dependent. The value five is an edge-resource ceiling, not an expected
+depth and not a MA-RAG framework limit.
 
-Never pass production overrides such as `--n`, `--seed`, `--batch-size`,
-`--model-id`, `--small-model-id`, or `--dev-sample`.
+Reject output from old seeds, old sample sizes, old batch sizes, old run names,
+or any artifact whose architecture/retrieval fingerprint predates the repeated
+Step Definer routing loop. Do not pass production overrides for n, seed, batch
+size, models, revisions, corpus, k, or plan ceiling.
 
-## 2. Synchronize and test the branch
+## 2. Prepare a clean worker
 
-On every machine:
+On every worker:
 
-```bash
-git fetch origin
-git checkout final-3b-reference
-git pull --ff-only origin final-3b-reference
-test "$(git rev-parse HEAD)" = "$(git rev-parse origin/final-3b-reference)"
-test -z "$(git status --porcelain)"
-python -X utf8 -m unittest discover -s tests -q
-```
+    git fetch origin
+    git checkout final-3b-reference
+    git pull --ff-only origin final-3b-reference
+    test "$(git rev-parse HEAD)" = "$(git rev-parse origin/final-3b-reference)"
+    test -z "$(git status --porcelain)"
 
-The test suite must pass. Do not run production from a dirty checkout. Keep old
-results outside `results/`; do not delete them, and do not mix them with final
-artifacts. Generated final results are intentionally not committed to Git, so
-back them up separately.
+Install the pinned project requirements inside the selected immutable container,
+then run:
 
-## 3. Lock the real A100 environment
+    python -m pip install -r requirements-core.txt
+    python -X utf8 -m pytest -q
 
-Choose the immutable container that every worker will use. On one A100, from a
-clean checkout, set its real identity:
+The suite must pass. Production must start from a clean committed tree. Preserve
+older result artifacts outside results/; never mix them with this campaign.
 
-```bash
-export EXPERIMENT_CONTAINER_REF='REGISTRY/IMAGE:TAG'
-export EXPERIMENT_CONTAINER_DIGEST='sha256:IMMUTABLE_DIGEST'
-python -m src.runner --write-environment-lock config/environment.lock.json \
-  --container-ref "$EXPERIMENT_CONTAINER_REF" \
-  --container-digest "$EXPERIMENT_CONTAINER_DIGEST"
-git add config/environment.lock.json
-git commit -m 'Lock final A100 environment'
-git push origin final-3b-reference
-```
+Before GPU work, make both pinned HotpotQA configurations and all pinned model
+revisions available in the worker cache. On a network-enabled preparation node,
+then in the immutable offline A100 container, run:
 
-Every worker must then pull that lock commit, export the same two variables, and
-validate:
+    python scripts/prefetch_assets.py
+    python scripts/prefetch_assets.py --offline-verify-only
 
-```bash
-git pull --ff-only origin final-3b-reference
-export EXPERIMENT_CONTAINER_REF='REGISTRY/IMAGE:TAG'
-export EXPERIMENT_CONTAINER_DIGEST='sha256:IMMUTABLE_DIGEST'
-python -m src.runner --validate-environment-lock
-```
+The equivalent all-in-one A100 preparation command is:
 
-Do not invent a digest or copy a lock from another image. A stale or mismatched
-lock must stop the run.
+    python scripts/a100_entrypoint.py prepare \
+      --container-ref 'REGISTRY/IMAGE:TAG' \
+      --container-digest 'sha256:IMMUTABLE_DIGEST'
 
-## 4. Run standardized timing first
+The runner rebuilds and validates the corpus fingerprint before its first model
+load. A cache hit is not proof of correctness; the runner's passage count,
+content hash, unique-title, query-policy, and gold-title reachability checks are
+authoritative.
 
-Reserve one otherwise idle physical A100. Use that same GPU for every timing arm,
-including a distinct optimized arm later. Do not run another workload on it.
+## 3. Create and validate the environment lock
 
-```bash
-mkdir -p logs
-CUDA_VISIBLE_DEVICES=0 python scripts/run_campaign.py \
-  --kind timing --workers 1 --worker-index 0 --execute \
-  2>&1 | tee logs/final_timing.log
-```
+Choose one immutable container image for all workers. On the selected A100, from
+a clean checkout:
 
-This first performs excluded batch-32 warm-up/preflight and then two timing
-repetitions. It never scores final questions. The five 0.5B appendix arms are
-intentionally not timed; each one performs its own excluded batch-32 preflight
-immediately before its scored calls.
+    export EXPERIMENT_CONTAINER_REF='REGISTRY/IMAGE:TAG'
+    export EXPERIMENT_CONTAINER_DIGEST='sha256:IMMUTABLE_DIGEST'
 
-Campaign restarts skip finalized artifacts whose JSONL hash matches metadata.
-Timing itself never resumes a partial artifact. If one timing arm was interrupted,
-move only that arm's partial `.jsonl` and `.meta.json` together to a backup
-directory, then rerun the campaign. Never merge timing sessions.
+    python -m src.runner \
+      --write-environment-lock config/environment.lock.json \
+      --container-ref "$EXPERIMENT_CONTAINER_REF" \
+      --container-digest "$EXPERIMENT_CONTAINER_DIGEST"
 
-## 5. Plan and run the 22 static accuracy arms
+    git add config/environment.lock.json
+    git commit -m 'Lock final MA-RAG environment'
+    git push origin final-3b-reference
 
-Choose worker count `W` once. Every worker must use the same `W`, a unique index
-from `0` through `W-1`, the same lock, and one assigned A100. First inspect the
-deterministic plan:
+Every worker then pulls that exact commit, exports the same container identity,
+and validates:
 
-```bash
-python scripts/run_campaign.py --kind accuracy --workers W
-```
+    git pull --ff-only origin final-3b-reference
+    export EXPERIMENT_CONTAINER_REF='REGISTRY/IMAGE:TAG'
+    export EXPERIMENT_CONTAINER_DIGEST='sha256:IMMUTABLE_DIGEST'
+    python -m src.runner --validate-environment-lock
 
-Then launch one process per worker, changing both the physical device and worker
-index as appropriate:
+Never invent a digest or copy a lock from another image. A mismatch is a hard
+stop.
 
-```bash
-CUDA_VISIBLE_DEVICES=PHYSICAL_GPU python scripts/run_campaign.py \
-  --kind accuracy --workers W --worker-index INDEX --execute \
-  2>&1 | tee logs/final_accuracy_worker_INDEX.log
-```
+## 4. Inspect plans without executing
 
-One complete run must stay on one physical GPU. If interrupted, rerun the same
-worker assignment on the same GPU; canonical-batch resume is allowed. Never
-combine one run across GPUs. An OOM is a hard failure: do not lower batch size.
+The implemented pilot gate and campaign planner can be inspected safely before
+pilot GO with these plan-only commands:
 
-Do not proceed until all workers finish. A `complete:` log line is useful but is
-not the validity check; finalized JSONL/meta hashes and strict analysis are.
+    python scripts/run_campaign.py --kind pilot --workers 1
+    python scripts/run_campaign.py --kind timing --workers 1
+    python scripts/run_campaign.py --kind accuracy --workers 4
 
-## 6. Freeze the exploratory allocation
+Verify:
 
-After all 22 accuracy arms and all 17 timing arms exist:
+- pilot assignment is baseline followed by single_fp16 on one worker;
+- timing uses one worker and the configured non-tiny timing matrix;
+- accuracy assigns every static run exactly once;
+- no plan references final IDs for pilot or timing; and
+- all plan files bind config and experiment fingerprints.
 
-```bash
-python analyze.py --config config/experiment.yaml --allow-incomplete
-```
+Do not use --execute yet.
 
-This creates:
+If either command is unavailable, STOP. The pilot implementation is a launch
+prerequisite, not an operator step to reconstruct manually.
 
-```text
-analysis/ma_optimized_exploratory.selection.json
-analysis/ma_optimized_exploratory.experiment.yaml
-```
+## 5. Run the excluded pilot
 
-Do not edit either file. Commit and push them before executing the selection:
+The pilot is a quality gate, not final evidence. It uses
+config/manifests/pilot_excluded200_seed20260806.json: a frozen 200-question,
+seed-20260806 cohort drawn from exclusions and disjoint from final, timing, and
+warm-up cohorts.
 
-```bash
-git add analysis/ma_optimized_exploratory.selection.json \
-        analysis/ma_optimized_exploratory.experiment.yaml
-git commit -m 'Freeze exploratory allocation'
-git push origin final-3b-reference
-```
+On one locked worker:
 
-Inspect `materialized_new_run` and `execution_run_id` in the selection JSON.
+    mkdir -p logs
+    CUDA_VISIBLE_DEVICES=0 python scripts/run_campaign.py \
+      --kind pilot --workers 1 --worker-index 0 --execute \
+      2>&1 | tee logs/final_pilot.log
 
-- If `materialized_new_run` is `false`, the selector chose an existing static
-  run. Do not execute another accuracy or timing arm.
-- If it is `true`, pull the selector commit on the chosen workers and run exactly:
+Then generate and validate the certificate:
 
-```bash
-python -m src.runner \
-  --config analysis/ma_optimized_exploratory.experiment.yaml \
-  --run ma_optimized_exploratory
+    python scripts/check_pilot.py
 
-CUDA_VISIBLE_DEVICES=0 python -m src.runner \
-  --config analysis/ma_optimized_exploratory.experiment.yaml \
-  --run ma_optimized_exploratory --timing-mode
-```
+The checker must validate both finalized pilot JSONLs, their metadata and hashes,
+the cohort, environment, prompt bundle, architecture, retrieval fingerprint,
+and run order. It must report paired F1 and EM, overall and stratum-specific
+counts, parse/protocol success, retrieval recall, query/passages exposure, plan
+depth, and stop reasons.
 
-The second command must use the same reserved physical A100 as section 4. The
-optimized run is in-sample and exploratory because the same 1,500 questions
-informed its selection.
+GO requires:
 
-## 7. Run strict final analysis
+    baseline F1 >= single_fp16 F1 overall
+    baseline F1 >= single_fp16 F1 on hidden_bridge
 
-Always use the frozen derived config for the final report, even when the selector
-reused an existing run:
+If the checker exits non-zero or reports STOP, stop the campaign. Preserve all
+pilot artifacts and diagnose the architecture on excluded data. Do not relax
+the rule and do not consume final question IDs.
 
-```bash
-python analyze.py \
-  --config analysis/ma_optimized_exploratory.experiment.yaml
-```
+GO is written to analysis/pilot_gate.json. Timing and accuracy execute modes
+must independently reject a missing, stale, or mismatched certificate.
 
-Do not use `--allow-incomplete` for this final command. The analyzer must fail if
-an accuracy/timing arm, manifest hash, environment lock, git revision, selector
-link, GPU identity, or finalized JSONL hash is wrong. It reuses the committed
-selector artifact and must not replace the decision that produced the optimized
-run.
+The GO certificate is a committed campaign input, not a local handoff. On the
+pilot worker, freeze and distribute the exact bytes produced by the checker:
 
-Preserve and back up at minimum:
+    git add analysis/pilot_gate.json
+    git commit -m 'Freeze excluded-pilot GO certificate'
+    git push origin final-3b-reference
 
-```text
-config/environment.lock.json
-results/*.jsonl
-results/*.meta.json
-analysis/ma_optimized_exploratory.selection.json
-analysis/ma_optimized_exploratory.experiment.yaml
-analysis/report.json
-analysis/report.md
-logs/*.plan.json
-logs/*.log
-```
+Staging the certificate is insufficient: production verification compares it
+to HEAD, so an uncommitted or subsequently edited gate fails closed. Do not
+commit a STOP certificate as authority to continue.
 
-`analysis/report.json` is the complete machine-readable result. `report.md` is a
-convenience summary; use JSON/run metadata for detailed memory, Pareto, and cold
-load tables.
+Before timing or accuracy starts, every worker must pull the certificate commit
+and verify both the clean checkout and the certificate locally:
 
-## 8. Hard stop conditions
+    git pull --ff-only origin final-3b-reference
+    test "$(git rev-parse HEAD)" = "$(git rev-parse origin/final-3b-reference)"
+    test -z "$(git status --porcelain)"
+    python scripts/check_pilot.py --verify
+    python -m src.runner --validate-environment-lock
 
-Stop rather than improvising if any of these occurs:
+The gate commit is the only intended post-environment-lock source-control step
+before the static campaign. Its content-addressed certificate is excluded from
+the environment source bundle, while the verifier binds it to the locked
+environment, active config, pilot cohort, experiment fingerprint, and pilot
+artifact hashes.
 
-- the header is not n=1500, seed=20260805, batch=32;
-- the working tree is dirty before a production invocation;
-- environment-lock validation fails;
-- any model/dataset revision cannot be resolved exactly;
-- any arm OOMs at batch 32;
-- a resume requests a different GPU UUID or canonical batch;
-- a timing artifact is partial or spans sessions/GPUs;
-- the selector artifacts are edited or uncommitted before the optimized run;
-- strict final analysis raises an error; or
-- someone proposes replacing a failed question, tuning a treatment-specific
-  prompt, retrying parse failures, or using constrained decoding.
+## 6. Run the A100 timing proxy
 
-Do not solve a stop condition by changing the scientific contract. Preserve all
-artifacts and diagnose the failure first.
+Only after pilot GO, reserve one otherwise idle physical A100. Use that same GPU
+for every timing arm and for a distinct selected allocation later. Do not share
+the device with another workload.
+
+    CUDA_VISIBLE_DEVICES=0 python scripts/run_campaign.py \
+      --kind timing --workers 1 --worker-index 0 --execute \
+      2>&1 | tee logs/final_timing.log
+
+Timing uses two complete repetitions of the frozen 128-question excluded cohort
+after excluded warm-up/preflight. It does not create accuracy records. Every
+artifact from an earlier architecture fingerprint is invalid and the complete
+matrix must be rerun.
+
+The timing benchmark is a relative A100 systems proxy. Report steady-state
+inverse throughput against baseline=1.00x, raw batch wall time,
+questions/second, token-normalized throughput, and cold model loading
+separately. Never relabel these measurements as phone, embedded-GPU, CPU, NPU,
+energy, thermal, or literal edge-device timing.
+
+Timing must be a fresh uncontended session. If an arm is interrupted, move that
+arm's partial JSONL and metadata together to a backup location, then replay the
+whole arm. Do not merge timing sessions.
+
+## 7. Run the 22 static accuracy arms
+
+Choose worker count W once. Every worker uses the same W, a unique index in
+[0, W), the same environment lock, and one assigned A100.
+
+Inspect the deterministic plan:
+
+    python scripts/run_campaign.py --kind accuracy --workers W
+
+Launch one process per worker, changing both device and index:
+
+    CUDA_VISIBLE_DEVICES=PHYSICAL_GPU python scripts/run_campaign.py \
+      --kind accuracy --workers W --worker-index INDEX --execute \
+      2>&1 | tee logs/final_accuracy_worker_INDEX.log
+
+One complete run stays on one physical GPU. Accuracy resume is allowed only for
+matching canonical batches on the same GPU and environment. The runner may skip
+certified completed batches but may not repack remaining calls.
+
+The physical runner is stage-major. At each canonical repeated stage it batches
+only active calls; question-answering steps can fan out to one Extractor call per
+retrieved document, while aggregate steps have no Extractor calls. An inactive
+stage should report zero calls and avoid loading a model. Do not mistake varying
+stage call counts for missing work.
+
+An OOM at batch 32 is a hard failure. Do not lower the batch size or retry only
+the failed generation.
+
+## 8. Freeze the exploratory allocation
+
+After all static accuracy and timing artifacts validate:
+
+    python analyze.py --config config/experiment.yaml
+
+The selector evaluates a declared 625-allocation universe. Tiny eligibility is
+decided per conceptual role from the corresponding one-role ablation's
+question-clustered strict-protocol lower bound. The F1 noninferiority constraint
+and deduplicated resident-memory objective are then applied.
+
+The command creates:
+
+    analysis/ma_optimized_exploratory.selection.json
+    analysis/ma_optimized_exploratory.experiment.yaml
+
+Do not edit either file. Commit and push both before executing any new selection:
+
+    git add analysis/ma_optimized_exploratory.selection.json \
+            analysis/ma_optimized_exploratory.experiment.yaml
+    git commit -m 'Freeze exploratory MA-RAG allocation'
+    git push origin final-3b-reference
+
+Inspect materialized_new_run and execution_run_id in the selection trace.
+
+- If materialized_new_run is false and the selected static arm is non-tiny,
+  reuse its validated accuracy and timing artifacts.
+- If materialized_new_run is false and the selected static arm is tiny, reuse
+  its accuracy artifact only. The shared timing matrix excludes tiny arms. The
+  committed derived config explicitly authorizes exactly one separately labelled
+  post-selection timing run on the reserved A100. Run the derived timing plan;
+  its already-complete matrix arms will be skipped and only the selected tiny
+  system will execute:
+
+    CUDA_VISIBLE_DEVICES=0 python scripts/run_campaign.py \
+      --config analysis/ma_optimized_exploratory.experiment.yaml \
+      --kind timing --workers 1 --worker-index 0 --execute
+
+- If materialized_new_run is true, run exactly the derived configuration once:
+
+    python -m src.runner \
+      --config analysis/ma_optimized_exploratory.experiment.yaml \
+      --run ma_optimized_exploratory
+
+    CUDA_VISIBLE_DEVICES=0 python -m src.runner \
+      --config analysis/ma_optimized_exploratory.experiment.yaml \
+      --run ma_optimized_exploratory --timing-mode
+
+Use the reserved timing A100 for the second command. The selected result is
+in-sample and exploratory.
+
+Derived execution occurs after selector artifacts are committed, so its source
+commit necessarily differs from the base environment-lock commit. The runner
+must validate a narrow provenance link from the immutable base experiment and
+environment lock to the committed selector trace and derived config. Do not
+disable clean-tree, source-hash, or environment validation to make this work.
+
+## 9. Run strict final analysis
+
+Always analyze through the frozen derived config, even when selection reused a
+static run:
+
+    python analyze.py \
+      --config analysis/ma_optimized_exploratory.experiment.yaml
+
+Do not use --allow-incomplete. Strict analysis must reject a wrong or missing
+run, pilot link, manifest, environment lock, corpus fingerprint, architecture
+topology, prompt bundle, selector trace, GPU identity, or finalized JSONL hash.
+
+Preserve and back up:
+
+    config/environment.lock.json
+    config/manifests/*.json
+    results/*.jsonl
+    results/*.meta.json
+    analysis/ma_optimized_exploratory.selection.json
+    analysis/ma_optimized_exploratory.experiment.yaml
+    analysis/report.json
+    analysis/report.md
+    logs/*.plan.json
+    logs/*.log
+
+## 10. Hard stops
+
+Stop rather than improvising if:
+
+- pilot GO is missing, failed, or mismatched;
+- the final header or architecture fingerprint differs from section 1;
+- the worktree is dirty at production start;
+- environment, corpus, model, tokenizer, dataset, prompt, or manifest validation
+  fails;
+- a question-answering step does not retrieve top-k or does not create
+  per-document Extractor records;
+- an aggregate step retrieves passages;
+- a multi-agent answer bypasses plan summary;
+- a later step runs after QA success=no;
+- a repeated stage uses a treatment different from its conceptual role;
+- an arm OOMs at batch 32;
+- a resume changes GPU, environment, canonical batch membership, or experiment
+  fingerprint;
+- a timing artifact spans sessions or devices;
+- selector artifacts are edited or uncommitted before a distinct run; or
+- strict final analysis raises an error.
+
+Never fix a stop by changing the scientific contract, retrying a generation,
+replacing a question, tuning a treatment-specific prompt, or claiming device
+performance that was not measured. Preserve artifacts, diagnose on excluded
+data, and repeat the relevant gate.

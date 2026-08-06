@@ -1,439 +1,503 @@
-# Experiment contract: role-aware capacity allocation in SLM multi-agent QA
+# Experiment contract: role-aware SLM allocation in multi-agent RAG
 
-This file is the authoritative scientific contract for the final A100 campaign.
-`config/experiment.yaml` is its machine-readable counterpart. If code, analysis,
-or prose conflicts with either file, stop before running and resolve the conflict.
+This is the authoritative scientific contract for the final campaign.
+config/experiment.yaml is its machine-readable counterpart. If code, analysis,
+or another active document conflicts with either source, stop and resolve the
+conflict before running an experiment.
 
-## 1. Research question and scope
+## 1. MA-RAG reference and local scope
 
-At small-language-model scale, can a four-role, provided-context multi-agent QA
-pipeline allocate model capacity across roles more efficiently than a uniform
-pipeline while retaining answer quality?
+The architecture follows the plan-driven workflow in Nguyen, Chin, and Tai,
+“MA-RAG: Multi-Agent Retrieval-Augmented Generation” (arXiv:2505.20096) and its
+public implementation. Reference MA-RAG is not a double-hop-only design. Its
+Planner emits a question-dependent plan, the Step Definer routes each plan step,
+and execution continues for as many steps as that plan requires. The paper and
+public examples show different plan depths; they do not define two as the
+architecture ceiling.
 
-The four roles are Planner, Step Definer, Extractor, and QA. HotpotQA supplies ten
-paragraphs per question (two gold and eight distractors). There is no learned or
-external retriever in this experiment. The paper must describe the system as
-**provided-context, retrieval-free multi-agent QA** or **MA-RAG-style QA**, not as
-a test of retrieval quality.
+This experiment preserves that control flow:
 
-The final campaign answers four prespecified questions:
+1. Planner emits an ordered plan.
+2. For every active plan step, Step Definer chooses question-answering or
+   aggregate and emits a self-contained task.
+3. A question-answering step retrieves top-k passages, invokes Extractor once
+   for every retrieved document, and asks QA for step feedback.
+4. An aggregate step skips retrieval and Extractor, then asks QA to combine
+   prior step answers.
+5. The QA result is appended to state. Execution stops when the plan completes
+   or QA returns success=no.
+6. The Step Definer treatment is reused for a plan-summary call. That summary,
+   not the last intermediate QA answer, supplies the scored answer.
 
-1. Which roles are most sensitive to 3B 8-bit quantization?
-2. Which roles are most sensitive to swapping 3B FP16 for its 1.5B FP16 sibling?
-3. At a near memory match, do the quantized and smaller-model interventions have
-   different role costs?
-4. How do uniform multi-agent 3B FP16 and a competitive single-call 3B FP16
-   system compare?
+The four conceptual agents are Planner, Step Definer, Extractor, and QA.
+Repeated reasoning steps are repeated invocations of those agents, not new
+independently configured agents.
 
-An allocation derived from the same results is run once as an explicitly
-**exploratory** deployment demonstration. It cannot support a confirmatory claim
-that role-aware allocation is superior.
+The local implementation intentionally differs from reference MA-RAG in three
+ways:
 
-## 2. Frozen data and seed hygiene
+- Reference MA-RAG leaves plan depth contextual. Within this campaign, Planner
+  still emits a question-dependent plan of one through five steps; five is an
+  explicit edge-resource ceiling. The emitted depth and any clamp are logged.
+  Five is an experiment limit, not a claim about MA-RAG.
+- Reference MA-RAG evaluates dense inner-product retrieval with a FAISS index.
+  This campaign uses deterministic sparse BM25 so retrieval can be reproduced
+  cheaply on a controlled corpus. Results compare SLM agent allocations under
+  this retriever and do not establish parity with dense retrieval.
+- Reference MA-RAG searches a much larger knowledge base. This campaign searches
+  72,094 HotpotQA validation passages. It is a controlled retrieval experiment,
+  not a Wikipedia-scale benchmark.
 
-There is one final evaluation sample, used once:
+These adaptations are the edge-systems variables being studied. They do not
+change the multi-agent, stateful, variable-depth reasoning topology.
 
-- dataset: `hotpotqa/hotpot_qa`, `distractor`, `validation`
-- dataset revision: `1908d6afbbead072334abe2965f91bd2709910ab`
+## 2. Research questions
+
+At small-language-model scale, can role-specific model size and quantization
+reduce resident memory and accelerator work while retaining answer quality in a
+fully executed multi-agent RAG workflow?
+
+The prespecified questions are:
+
+1. Which conceptual roles are most sensitive to moving the 3B model to 8-bit?
+2. Which roles are most sensitive to swapping 3B FP16 for the 1.5B FP16 sibling?
+3. At a near memory match, do quantization and a smaller sibling impose different
+   role-level costs?
+4. How do uniform multi-agent 3B FP16 and a competitive one-call 3B FP16
+   retrieval baseline compare overall and on hidden-bridge questions?
+5. Which guarded role allocation minimizes deduplicated resident model memory
+   while satisfying the frozen F1 constraint?
+
+The selected mixed allocation is in-sample and exploratory. It is a deployment
+demonstration and interaction check, not confirmatory evidence of superiority.
+
+## 3. Frozen questions and corpus
+
+### 3.1 Accuracy cohort
+
+All accuracy arms use the same ordered sample once:
+
+- dataset: hotpotqa/hotpot_qa
+- source configuration: distractor
+- split: validation
+- dataset revision: 1908d6afbbead072334abe2965f91bd2709910ab
 - n: 1,500
-- sampling seed: 20,260,805
-- manifest: `config/manifests/final_n1500_seed20260805.json`
-- manifest-file SHA-256: `841dbca9ac7e76c0277a5696fba9f7e254b973afb0b670efbc5edfc006b4af46`
-- ordered final-ID SHA-256: `5d4cc24872aeb603cbd005f790958199ef4cc993a1e7f048403608603da602af`
-- sorted exclusion-ID SHA-256: `a5cfacb84fa9a48217f3206a095706a6d48802bd244151c72f2eef08372c00a8`
+- seed: 20,260,805
+- manifest: config/manifests/final_n1500_seed20260805.json
+- ordered-ID SHA-256:
+  5d4cc24872aeb603cbd005f790958199ef4cc993a1e7f048403608603da602af
+- exclusion-ID SHA-256:
+  a5cfacb84fa9a48217f3206a095706a6d48802bd244151c72f2eef08372c00a8
+- frozen retrieval strata: 1,097 hidden_bridge and 403 fully_named
 
-Every arm receives exactly the same 1,500 question IDs in exactly the same order
-and canonical batch membership. This shared set is desirable: all arm contrasts
-are paired at the question level. There is no second selection or confirmation
-set in the final campaign.
+The exclusion set contains the earlier 3,000 design-pilot IDs and all
+prompt-development IDs. Every run preserves question order and canonical batch
+membership. Failed questions remain in the denominator; no replacement or
+resampling is allowed.
 
-A new seed alone would not make the sample independent of earlier work. The
-manifest therefore excludes:
+Before model loading, the runner verifies dataset identity and revision,
+manifest count and hashes, uniqueness, exclusion disjointness, ID existence,
+and exact loaded order.
 
-- the exact 3,000 unique IDs in the old seed-7 design-pilot result blob;
-- the exact 30 seed-1234 prompt-development IDs in the committed result blob;
-- the ten seed-0 prompt-development IDs reconstructed from the pinned dataset
-  row order and the original sampling implementation because no unambiguously
-  labelled seed-0 result blob survives.
+### 3.2 Retrieval corpus
 
-The manifest commits all 3,031 unique excluded IDs, not only their hash, so a
-shallow or offline checkout can prove disjointness. It records the source commit,
-path, and blob hash for result-derived exclusions. `scripts/freeze_final_sample.py`
-is the provenance generator; it is not called during a run.
+The retriever indexes the deterministic first-occurrence union of validation
+passages from the HotpotQA distractor and fullwiki configurations, in that order:
 
-Before loading a model, the runner must fail unless it verifies:
+- passages: 72,094
+- corpus SHA-256:
+  931425de7b123e3081ed63387c8d591a8aba4cf872d2cf47144e924260d92b73
+- required selected/auxiliary gold-title coverage: 1.0
+- required selected/auxiliary supporting-sentence coverage: 1.0
 
-1. manifest dataset identity and revision match the config;
-2. exactly 1,500 final IDs are present and unique;
-3. final and exclusion hashes match, using UTF-8 `id + "\n"` records including
-   the final trailing newline;
-4. no final ID occurs in the exclusion set;
-5. all IDs exist in the pinned dataset revision; and
-6. loaded question order exactly matches manifest order.
+The configuration name fullwiki does not mean that this repository indexes the
+full Wikipedia dump. It contributes passages exposed by the HotpotQA
+configuration. The corpus is global across the validation split and contains
+the target pages, but the question-to-context assignment, supporting-fact
+labels, and gold answers never enter a model prompt.
 
-Do not resample missing or failed questions. A failed question remains in the
-denominator.
+Corpus order is load-bearing. Some shared titles have different sentence
+splits, and distractor must win so supporting-fact sentence indices stay valid.
+The runner checks passage count, content fingerprint, algorithm fingerprint,
+query-policy fingerprint, unique titles, and gold-title and supporting-sentence
+reachability before loading a model.
 
-## 3. Models and treatments
+### 3.3 Exposure caveat
 
-All model and tokenizer artifacts resolve at immutable Hugging Face revisions:
+Questions, corpus passages, and gold labels all originate from the same pinned
+validation split. The model is forced to discover passages through retrieval,
+but this is still a controlled, target-reachable corpus with evaluation-set
+content in the index. Report it as controlled open-corpus retrieval. Do not
+generalize its recall, accuracy, or cost to an unseen corpus or full Wikipedia.
+
+## 4. Executed architecture
+
+### 4.1 Planner
+
+Planner receives only the original question and emits:
+
+    {"analysis": "...", "sub_questions": ["...", "..."]}
+
+The plan must contain the shortest sufficient sequence from one through five
+steps. Later steps may depend on earlier answers. If Planner output cannot be
+parsed or salvaged, execution degrades deterministically to a one-step plan
+containing the original question. Outputs longer than five are clamped and
+logged.
+
+### 4.2 Repeated Step Definer routing
+
+For plan step i, Step Definer receives:
+
+- the original question;
+- the full ordered plan;
+- the current sub-question and step position; and
+- the append-only history of earlier tasks, answers, success flags, and ratings.
+
+It emits exactly one route:
+
+    {"type": "question-answering", "task": "..."}
+
+or:
+
+    {"type": "aggregate", "task": "..."}
+
+The task is self-contained. A malformed route degrades to
+question-answering on the current plan sub-question; there is no new generation.
+
+### 4.3 Question-answering route
+
+The exact Step Definer task is the retrieval query. The BM25 index returns the
+top 10 passages for that step. Extractor is invoked separately for every
+returned document, preserving document rank and title in the call record.
+Extractor emits verbatim evidence spans or an empty list. QA then receives the
+current task and all spans collected for that step and emits:
+
+    {"analysis": "...", "answer": "...", "success": "yes", "rating": 8}
+
+Each active question-answering step therefore has one retrieval event, up to ten
+Extractor generations, and one QA generation. Retrieval depth is determined by
+plan depth and routing, not by a global hop count.
+
+### 4.4 Aggregate route
+
+Aggregate is used when the current answer can be computed from prior step state.
+It performs no retrieval and invokes no Extractor. QA receives the earlier
+answers and emits the same feedback schema. Aggregate steps therefore remain
+agentic reasoning steps while avoiding unnecessary corpus and generation work.
+
+### 4.5 Semantic stop and finalization
+
+Every QA payload is appended to question state. A later step is active only when
+all earlier steps exist and the latest success field is not no. The loop stops
+for either:
+
+- plan_complete: every planned step produced QA feedback; or
+- semantic_inability: the latest QA feedback has success=no.
+
+After either stop, the Step Definer model/prompt treatment performs a distinct
+plan-summary call over the original question, full plan, completed history, and
+stop reason. It emits:
+
+    {"output": "Successful", "answer": "...", "score": 8}
+
+The answer field from this plan summary is scored. If finalization cannot be
+parsed or salvaged, the prediction is empty and remains in the denominator.
+
+## 5. Retrieval and baseline contracts
+
+The active retriever is a sparse, vectorized BM25 index with fixed tokenization,
+Lucene-style IDF, stable corpus-order tie-breaking, and unique passage titles.
+The configured policy is one top-10 query for every question-answering plan
+step. There is no learned bridge-query helper and no reserved retrieval budget
+between steps.
+
+The one-call control, single_fp16:
+
+- uses one 3B FP16 generation;
+- queries the same BM25 corpus once with the original question;
+- reads the top 10 returned passages;
+- receives no decomposition, state loop, Extractor, or extra query; and
+- uses the same answer normalization and immutable model revision.
+
+The control has the same per-query k, not the same total passage exposure.
+Multi-agent exposure varies with plan depth and route. Report retrieval-query
+count, passage exposures, unique titles, model calls, prompt/output tokens, F1,
+EM, memory, and timing for a fair architecture comparison.
+
+Answer records include retrieval events, retrieved and gold titles, gold-title
+recall, all-gold retrieval, plan depth, executed steps, stop reason, and summary
+status. Gold fields are attached only after generation.
+
+Questions are prespecified as hidden_bridge or fully_named from question text
+and gold titles. The frozen final cohort contains exactly 1,097 hidden_bridge
+and 403 fully_named questions. The runner and analyzer reject any other counts;
+report accuracy and retrieval diagnostics overall and by both strata.
+
+## 6. Models, treatments, and run matrix
+
+Immutable model revisions are:
 
 | Alias | Model | Revision |
 |---|---|---|
-| base | Qwen2.5-3B-Instruct | `aa8e72537993ba99e69dfaafa59ed015b17504d1` |
-| small | Qwen2.5-1.5B-Instruct | `989aa7980e4cf806f80c7fef2b1adb7bc71aa306` |
-| tiny | Qwen2.5-0.5B-Instruct | `7ae557604adf67be50417f59c2c2f167def9a775` |
+| base | Qwen2.5-3B-Instruct | aa8e72537993ba99e69dfaafa59ed015b17504d1 |
+| small | Qwen2.5-1.5B-Instruct | 989aa7980e4cf806f80c7fef2b1adb7bc71aa306 |
+| tiny | Qwen2.5-0.5B-Instruct | 7ae557604adf67be50417f59c2c2f167def9a775 |
 
-The reference system uses the 3B model at FP16 for all four roles.
+The static matrix contains 22 run IDs:
 
-The primary head-to-head compares these treated-role configurations:
-
-- **Q:** 3B at bitsandbytes 8-bit;
-- **S:** 1.5B at FP16.
-
-The 3B 4-bit tier is mandatory but secondary. Bitsandbytes 8-bit uses LLM.int8
-outlier routing, while 4-bit uses NF4 with double quantization. These are named
-treatment configurations, not a clean numerical bit-width dose response.
-
-Swapping 3B for 1.5B or 0.5B changes depth, width, and training mix as well as
-parameter count. Call this a **smaller-sibling model swap**, not pure parameter
-removal.
-
-The five 0.5B FP16 runs measure the lower compliance/capacity floor. They are
-appendix-only and excluded from the allocation selector, the primary hypothesis
-family, and main-paper allocation claims. They do not measure probability
-calibration.
-
-## 4. Run matrix
-
-The static config contains 22 runs:
-
-| Family | Run IDs | Count | Inferential role |
-|---|---|---:|---|
-| Reference | `baseline` | 1 | Uniform four-role 3B FP16 baseline |
-| 3B 8-bit role ablations | `planner_8bit`, `stepdef_8bit`, `extractor_8bit`, `qa_8bit` | 4 | Primary Q side |
-| 3B 4-bit role ablations | `planner_4bit`, `stepdef_4bit`, `extractor_4bit`, `qa_4bit` | 4 | Secondary aggressive quantization |
-| 1.5B FP16 role ablations | `planner_small`, `stepdef_small`, `extractor_small`, `qa_small` | 4 | Primary S side |
-| Uniform frontier | `ma_uniform_8bit`, `ma_uniform_4bit`, `ma_uniform_small` | 3 | Prespecified deployment controls |
-| 0.5B FP16 floor | four `*_tiny` role runs plus `ma_uniform_tiny` | 5 | Appendix/lower-limit evidence only |
-| Architecture control | `single_fp16` | 1 | Single-call versus multi-agent 3B FP16 |
-
-The post-ablation selector can materialize at most one additional run,
-`ma_optimized_exploratory`. Therefore:
-
-- 22 static run IDs are always configured;
-- at most 23 distinct executions occur;
-- if the selector returns `baseline` or an existing uniform configuration, that
-  result is reused and the campaign remains at 22 executions.
-
-No run may silently substitute a different model, precision, seed, sample,
-prompt version, batch size, or model revision.
-
-## 5. Single-call control
-
-`single_fp16` is a competitive, frozen baseline rather than a strawman:
-
-- one 3B FP16 model call per question;
-- the same question and same ten provided paragraphs as the multi-agent system;
-- a dedicated direct-answer prompt developed only on excluded development IDs;
-- greedy decoding and the same 48-token answer budget as the QA role;
-- the same model/tokenizer revision and answer parser/normalization;
-- no hidden decomposition, retrieval, or extra context.
-
-Report total prompt tokens, output tokens, model calls, F1, EM, memory, and timing
-for both systems. Multi-agent context is read multiple times, so call and token
-counts are required to interpret efficiency.
-
-The `single_fp16` versus `baseline` comparison is prespecified and may use the
-same final 1,500 questions without post-selection bias.
-
-## 6. Primary and secondary statistics
-
-**Primary outcome:** HotpotQA answer token F1 under the official normalization.
-
-**Co-reported secondary outcome:** Exact Match. EM appears beside F1 in every
-accuracy table but does not replace the primary endpoint.
-
-For each role `r`, define question-level losses against the shared reference:
-
-```text
-Q_loss_r = F1_baseline - F1_role_8bit
-S_loss_r = F1_baseline - F1_role_small
-axis_contrast_r = S_loss_r - Q_loss_r
-                = F1_role_8bit - F1_role_small
-```
-
-The four role-specific 8-bit-versus-1.5B axis contrasts form the primary
-hypothesis family. Use 10,000 paired question-level bootstrap replicates and
-Holm-adjust the four primary tests. Report unadjusted point estimates, 95%
-paired CIs, adjusted p-values, and the direction of the contrast.
-
-Do not decide significance by whether two separate confidence intervals overlap.
-Compute the paired interval on the difference itself.
-
-The 3B 4-bit family, extraction evidence, parse/mechanism diagnostics, and 0.5B
-floor are declared secondary or exploratory. Keep those families visibly
-separate; do not move a favorable secondary result into the primary family.
-
-Role ranking with only four roles is unstable. Report bootstrap rank
-probabilities and pairwise role-cost contrasts. Do not publish a definitive total
-ordering when uncertainty overlaps.
-
-Planner changes may alter the number of downstream calls. Any per-call metric for
-Step Definer or Extractor must be aggregated or cluster-bootstrapped by question,
-never treated as independent calls. Timing intervals resample complete batches.
-
-All calculations start from per-question records. Sort by question ID before
-seeded resampling so results cannot depend on file-write order.
-
-## 7. Memory accounting
-
-Memory is central, but it is not a hard equality constraint. A configuration that
-maintains accuracy while reducing memory is a successful optimization. Increased
-memory must be charged and justified.
-
-### 7.1 Near-memory-matched Q versus S
-
-Measured treated-model footprints are:
-
-| Configuration | Resident weight footprint |
+| Family | Count |
 |---|---:|
-| 3B FP16 | 5,886.0 MiB |
-| 3B 8-bit | 3,240.0 MiB |
-| 1.5B FP16 | 2,944.4 MiB |
-| 3B 4-bit | 1,917.0 MiB |
-| 0.5B FP16 | 942.3 MiB |
+| Uniform four-agent 3B FP16 reference | 1 |
+| One-role 3B 8-bit ablations | 4 |
+| One-role 3B 4-bit ablations | 4 |
+| One-role 1.5B FP16 ablations | 4 |
+| Uniform 8-bit, 4-bit, and 1.5B controls | 3 |
+| Four one-role 0.5B ablations and one uniform 0.5B run | 5 |
+| One-call 3B FP16 architecture control | 1 |
 
-The primary treated-role match, 3B 8-bit versus 1.5B FP16, differs by 295.6 MiB:
-the 8-bit treatment holds 10.04% more than the 1.5B treatment. In a one-role
-ablation system with the shared 3B FP16 base also resident, totals are 9,126.0
-versus 8,830.4 MiB, a 3.35% difference. Describe this as **near-memory-matched**.
+All repeated Step Definer, Extractor, and QA stage labels mirror their
+conceptual role treatment. The plan-summary stage mirrors Step Definer.
+Repeated stages cannot be configured independently.
 
-The 4-bit and 0.5B arms remain informative efficiency/floor points even though
-they are not memory-matched to the primary comparison. Never imply equality.
+The primary treatment family compares one-role 3B 8-bit ablations with the
+corresponding 1.5B FP16 ablations. The 4-bit family is mandatory secondary
+evidence. The 0.5B runs measure the lower capacity/compliance boundary and also
+feed a guarded exploratory selector.
 
-### 7.2 Primary topology
+## 7. Exploratory role allocation
 
-The primary memory quantity is **deduplicated concurrent model-footprint MiB**:
-sum the measured parameters-plus-buffers footprint of each distinct model
-configuration once, even if several roles share it. A configuration fingerprint includes model
-ID, immutable revision, precision, quantization method/settings, and compute dtype.
+The selector declares five candidates for each of four conceptual roles:
 
-This is a fixed-charge allocation problem. Introducing the first role that uses a
-new configuration charges its entire resident footprint; additional roles sharing
-that exact configuration do not charge it again. Never sum independent per-role
-savings to estimate a mixed system.
+    {3B FP16, 3B 8-bit, 3B 4-bit, 1.5B FP16, 0.5B FP16}
 
-Co-report, under explicit labels:
+The full universe is 5^4 = 625 allocations. A role may use 0.5B only when its
+corresponding one-role tiny ablation has a question-clustered 95% lower bound of
+at least 0.90 for strict protocol success. Failure removes tiny only for that
+role.
 
-1. isolated role-service footprint, summing one copy per role;
-2. sequential execution peak VRAM, matching the stage-major runner;
-3. parameters, buffers/quantization state, and full model footprint separately;
-4. CUDA allocated/reserved peak including activations; and
-5. cold loading/swapping time.
+Eligible candidates must also satisfy the paired-bootstrap lower-bound
+noninferiority constraint: predicted F1 may be no more than 1.0 point below the
+uniform 3B FP16 reference. The selector minimizes deduplicated concurrent model
+footprint, then prefers higher predicted F1, fewer distinct configurations, and
+lexical allocation ID.
 
-Use MiB (`bytes / 1024^2`) consistently. Do not label these figures MB.
+The selector writes a trace and derived executable config. If the selected
+allocation matches a static run, reuse it. Otherwise execute
+ma_optimized_exploratory once. Because selection and evaluation use the same
+1,500 questions, report the result only as in-sample exploratory evidence.
 
-## 8. Exploratory allocation selector
+Accuracy reuse and timing reuse are separate decisions. If selection matches a
+non-tiny static arm, its validated static accuracy and timing artifacts may be
+reused. If it matches a tiny static arm, reuse the accuracy artifact but do not
+pretend a timing artifact exists: tiny arms are absent from the shared timing
+matrix. Selection materialization writes timing.selected_execution_run_id and
+timing.selected_system_timing_required=true into the derived config. Campaign
+planning and the runner admit only that frozen selected execution beyond the
+static timing IDs, and strict analysis verifies the selection-artifact and run-
+config hashes recorded in frozen_allocation. This narrowly authorizes one
+post-selection timing run on the reserved A100 without broadening the
+prespecified static timing matrix.
 
-The selector is separate from the near-memory-match test. After all non-tiny role
-ablations finish, it enumerates every four-role allocation over:
+## 8. Outcomes and statistics
 
-```text
-{3B FP16, 3B 8-bit, 3B 4-bit, 1.5B FP16}
-```
+The primary outcome is HotpotQA token F1 under the repository normalization.
+Exact Match is co-reported.
 
-There are `4^4 = 256` candidates. The 0.5B configuration is prohibited.
+For each role r:
 
-For each candidate, the selector estimates system F1 from the observed per-role
-costs and charges every distinct configuration once using the primary memory
-topology. A candidate is feasible only when the paired-bootstrap 95% lower bound
-for its predicted F1 difference from uniform 3B FP16 is at least -1.0 point. It
-selects the lowest-memory feasible allocation. Ties resolve by:
+    Q_loss_r = F1_baseline - F1_role_8bit
+    S_loss_r = F1_baseline - F1_role_small
+    axis_contrast_r = F1_role_8bit - F1_role_small
 
-1. higher predicted F1;
-2. fewer distinct configurations;
-3. fixed lexical allocation ID.
+Use 10,000 paired question-level bootstrap replicates. Holm-adjust the four
+primary role contrasts. Report point estimates, paired 95% intervals, adjusted
+p-values, and direction. Keep 4-bit, evidence, parsing, retrieval, plan-depth,
+semantic-stop, and tiny-floor analyses secondary or exploratory.
 
-The selector may return an existing uniform/reference run. Otherwise `analyze.py`
-writes `analysis/ma_optimized_exploratory.selection.json` and
-`analysis/ma_optimized_exploratory.experiment.yaml`, including input-result
-hashes, the chosen role mapping, predicted F1 and its bootstrap interval, memory
-accounting, selection rule/version, and tie-break trace. Commit both artifacts
-before executing the selected system. Do not hand-edit them after observing
-final answers.
+Repeated calls are not independent observations. Cluster role diagnostics by
+question. Resample complete batches for timing intervals. Sort question IDs
+before seeded resampling so write order cannot affect results.
 
-Because selection and evaluation use the same 1,500 questions, the selected
-system's measured result is explicitly in-sample and exploratory. Report it as a
-deployment demonstration and interaction check, not confirmatory superiority or
-a fresh validation. The actual mixed run is required because per-role effects may
-interact non-additively.
+## 9. Memory and edge-efficiency contract
 
-## 9. Generation, parsing, and batching controls
+Measured resident model footprints are:
+
+| Configuration | MiB |
+|---|---:|
+| 3B FP16 | 5,886.0 |
+| 3B 8-bit | 3,240.0 |
+| 1.5B FP16 | 2,944.4 |
+| 3B 4-bit | 1,917.0 |
+| 0.5B FP16 | 942.3 |
+
+The 3B 8-bit and 1.5B FP16 treatments are near-memory-matched, not equal.
+
+The primary memory quantity is deduplicated concurrent model-footprint MiB:
+charge parameters plus buffers once for each distinct model/revision/precision
+configuration used by any conceptual role. Also report isolated role-service
+footprint, sequential stage-major peak VRAM, allocated/reserved peaks,
+activation-inclusive peaks, and cold load/swap time.
+
+The edge claim is limited to resource behavior measured by this experiment:
+role allocation, lower resident model footprint, fewer calls for shorter or
+aggregate plans, and relative accelerator throughput. The five-step ceiling is
+part of this resource envelope. Actual phone, embedded GPU, CPU, NPU, power,
+thermal, and wall-time performance require measurements on those devices.
+
+## 10. Generation and orchestration controls
 
 - Greedy generation only; no sampling.
-- Prompt templates and parser conventions are frozen before the final manifest is
-  scored and shared across treatment configurations.
-- No precision- or size-specific prompt tuning.
-- No parse retries or regeneration.
-- No grammar-constrained decoding or prefix-token constraints.
-- Tolerant parsing/salvage may recover usable content for downstream propagation,
-  but the original call keeps its original parse-failure status.
-- QA must consume validated or salvaged Extractor spans consistently; recovered
-  evidence must not be logged and then discarded.
-- Maximum downstream fan-out remains frozen and identical across arms.
+- Prompt templates, parsers, and token caps are frozen across treatments.
+- No size-, precision-, or role-ablation-specific prompt tuning.
+- No grammar-constrained decoding.
+- No generation retry or regeneration after parse/protocol failure.
+- Salvage may expose usable fields without changing the original failure status.
+- Deterministic degraded state is propagated when no usable payload exists.
+- A production OOM is fatal; batch size is never reduced for one arm.
 
-Batch size is pinned at 32 for every production arm. `batch_size` and
-`min_batch_size` are both 32. The excluded timing campaign preflights every
-non-tiny model configuration and stage shape at batch 32 before final questions
-are touched. The five appendix-only 0.5B arms are not part of timing; each must
-pass its own excluded batch-32 preflight immediately before that arm's first
-scored call. A production OOM must fail loudly; it must never reduce batch size
-for one arm.
+Logical execution is question-stateful, but physical execution is stage-major.
+The runner walks Planner, repeated Step Definer/Extractor/QA rounds, plan summary,
+or the solo control in canonical dependency order. At each stage it batches all
+currently active homogeneous calls across questions and, for Extractor, across
+documents. Inactive plan steps and Extractor work for aggregate routes produce
+no calls and do not load a model.
 
-Canonical batch IDs, ordered membership, and batch size are committed in run
-metadata. Resume may skip completed canonical batches but may not repack remaining
-questions, because greedy outputs can change with batch neighbors. Question IDs,
-stage, call index, model fingerprint, prompt hash, manifest hash, and batch ID are
-part of resume compatibility.
+Only one model configuration is resident at a time; consecutive stages with the
+same fingerprint may reuse it. This scheduling amortizes SLM inference and bounds
+sequential VRAM without changing per-question MA-RAG state dependencies.
 
-## 10. A100 execution and timing
+Production batch_size and min_batch_size are both 32. Canonical batch IDs,
+ordered membership, model/prompt/config/manifest/retrieval fingerprints, and
+execution identity participate in resume validation.
 
-Multiple A100s may execute accuracy arms concurrently, but one complete run stays
-on one GPU. A run may never be assembled from records produced on different GPUs
-or software environments.
+## 11. Pilot and launch gate
 
-Reserve one otherwise idle A100 for standardized timing. Every timing configuration
-runs there under the same container and settings:
+Final-question timing and accuracy execution are prohibited until a frozen
+excluded-data pilot produces a persisted GO certificate.
 
-- batch size 32;
-- fixed canonical batches;
-- warm-up before measurement;
-- CUDA synchronization around timed regions;
-- randomized configuration order;
-- repeated timing subset;
-- no concurrent GPU workload.
+The pilot:
+
+1. uses the 200 unique IDs in
+   config/manifests/pilot_excluded200_seed20260806.json (seed 20,260,806),
+   drawn from the committed exclusion set and disjoint from final, timing, and
+   warm-up cohorts, with exactly 160 hidden_bridge and 40 fully_named questions;
+2. runs baseline followed by single_fp16 on one locked worker;
+3. uses the same corpus, prompts, architecture, models, batch policy, and
+   experiment fingerprint as the final campaign; and
+4. reports paired F1/EM, parse/protocol success, retrieval recall, query/exposure
+   counts, plan depth, stop reasons, and both retrieval strata.
+
+GO requires both:
+
+    F1_baseline - F1_single_fp16 >= 0 overall
+    F1_baseline - F1_single_fp16 >= 0 on hidden_bridge
+
+The committed pilot manifest has file SHA-256
+975210805c382788bb39c800266ae22a88cc526e0626bd8a0106c35d316a8bb1 and
+ordered-ID SHA-256
+f8c3f16458340cb0bc74aa827e3b51528ba351963a46dba456ac4e68ad20f7d7. Its
+deterministic sampler replaced malformed ID 5ae61bfd5542992663a4f261 with the
+next ordered eligible nonsampled exclusion, 5ae622495542995703ce8b20, because
+the source annotation points to supporting sentence 902 on a five-sentence gold
+page. The replacement and reason are recorded in data_quality_replacements; it
+prevents an annotation defect from making gold-sentence reachability impossible
+for every system.
+
+The content-addressed GO certificate is analysis/pilot_gate.json. Missing,
+incomplete, stale, or hash-mismatched pilot artifacts mean STOP.
+Failure of either quality condition means STOP and architecture diagnosis before
+any final IDs are consumed. The threshold must not be relaxed after seeing the
+pilot.
+
+The pilot path is implemented: scripts/run_campaign.py --kind pilot enforces
+one-worker baseline-then-single order and invokes scripts/check_pilot.py after
+execution. The checker recomputes metrics, validates artifact, cohort,
+environment, retrieval, prompt, stratum, and content hashes, and writes the
+content-addressed decision. Timing and accuracy execute modes require the GO
+artifact to be committed and unchanged. No target-A100 pilot or GO result is
+asserted yet; pilot execution and all downstream GPU runs remain pending.
+
+Before any A100 phase, scripts/prefetch_assets.py downloads the pinned dataset
+configurations and model snapshots, validates all manifest bytes plus the corpus
+count and fingerprints, checks free space, and writes logs/prefetch_report.json.
+Its --offline-verify-only mode forbids network access and proves the cache is
+complete. scripts/a100_entrypoint.py is the fail-closed production wrapper for
+prepare, pilot, accuracy, and timing. It requires an actual NVIDIA A100;
+prepare additionally requires clean committed source and immutable container
+identity, performs offline asset verification and the full test suite, and
+writes the environment lock for commit before pilot execution.
+
+After GO:
+
+1. validate the immutable environment lock on every worker;
+2. preflight every active stage shape at batch 32 on excluded data;
+3. rerun the complete timing matrix under this architecture;
+4. execute all 22 static accuracy arms once;
+5. freeze and commit selector artifacts;
+6. execute and time a distinct selected allocation if required; and
+7. run strict final analysis.
+
+## 12. A100 systems proxy
 
 Timing uses two complete repetitions of the frozen 128-question excluded cohort
-in `config/manifests/timing_excluded128_seed20260805.json`. It is disjoint from
-both the final 1,500 and the 32 warm-up questions. Timing outputs never enter F1,
-EM, selection, or any other accuracy estimate. The five 0.5B floor arms are not
-timed; the post-selected allocation is timed only if it is a distinct execution.
+on one reserved, uncontended A100 after a separate excluded warm-up. Timing
+artifacts never enter F1, EM, selector fitting, or accuracy estimates. Tiny arms
+are excluded from the shared timing matrix and must pass their own fail-closed
+preflight before scoring. The sole exception is a selected tiny allocation:
+after the selector and derived config are committed, it requires one separately
+labelled post-selection timing artifact before an exploratory throughput number
+is reported.
 
-The primary timing measure is steady-state end-to-end inverse throughput
-(seconds/question) relative to uniform four-role 3B FP16 `baseline = 1.00x`.
-Report per-stage ratios against the same role at 3B FP16, raw batch wall times,
-questions/second, and token-normalized throughput as secondary diagnostics.
+The primary systems metric is steady-state end-to-end service inverse
+throughput: seconds per excluded A100 timing question, relative to uniform
+multi-agent 3B FP16 at 1.00x. It includes deterministic retrieval, routing, and
+state construction plus prompt construction/rendering, tokenization and H2D,
+generation, decoding, parsing/salvage, and protocol accounting. It excludes
+model loading and durable JSONL logging, which are recorded separately.
 
-Exclude model download/load from the primary steady-state ratio because the
-primary deployment topology assumes resident weights. Record cold model loading,
-cache reuse, and swapping separately. The overall campaign wall clock across
-several GPUs is not system latency.
+Each timing summary also nests a generation-only inverse-throughput estimate
+from raw generation batch_wall_s. Report service_wall_s, orchestration time,
+the non-generation service component, questions/second, token-normalized
+throughput, model load time, GPU identity, driver/runtime, and the
+container/software lock. Generation-only timing is diagnostic and must not be
+substituted for the end-to-end service primary.
 
-Record GPU UUID, exact A100 SKU/memory, driver, CUDA, clock/power state when
-available, container digest, and software lock. If accuracy runs span different
-A100 SKUs or stacks, run the same fixed calibration batch on each device and
-compare raw outputs. Block or randomize by device if they differ.
+These measurements are an A100 execution proxy for comparative scheduling and
+model-allocation cost. They are not literal edge-device timing, energy, or
+thermal results. Do not infer a device-specific speedup without running that
+device.
 
-Call timing results **relative inverse throughput on A100**. They are not estimates
-of edge-device latency. Hardware transfer is a stated hypothesis unless a real
-edge platform is evaluated.
+## 13. Required records and claim boundaries
 
-## 11. Reproducibility and environment
+Every call record must retain run/question/stage/call/batch IDs, conceptual and
+prompt roles, model and revision, precision/quantization, prompt and experiment
+fingerprints, rendered-prompt hash, raw output, parsed and salvaged payloads,
+format/protocol status, tokens, timing, retrieval provenance where applicable,
+and retry_count=0.
 
-The final environment must be immutable across arms. Known, already exercised
-core versions are:
+Every answer record must retain the plan and emitted/clamped depth, executed
+steps, stop reason, summary result, prediction/gold/F1/EM, retrieval stratum and
+events, title recall, passage exposures, and evidence attribution. Run metadata
+must retain corpus/config/environment hashes, canonical batch topology, stage
+activity and calls, memory, load time, timing mode, completion, and artifact
+hashes.
 
-- PyTorch `2.13.0+cu130` / CUDA `13.0` on the prior A100 pilot;
-- Transformers `5.14.1`;
-- bitsandbytes `0.50.0`;
-- datasets `5.0.1`.
+Supported claims are limited to paired role sensitivity, answer quality,
+retrieval behavior on the controlled corpus, deduplicated memory, executed call
+and token cost, and relative A100 throughput.
 
-These historical versions are not a complete container lock. Before production,
-the chosen A100 environment must produce and commit an environment artifact with:
+Do not claim:
 
-- container image name and immutable digest;
-- Python version and platform;
-- complete `pip freeze` with hashes or equivalent environment lock;
-- PyTorch/CUDA/cuDNN/driver versions;
-- Transformers, bitsandbytes, datasets, Accelerate, and PyYAML versions;
-- model/tokenizer and dataset resolved revisions;
-- GPU SKU, UUID, and memory;
-- repository commit and dirty-worktree state.
-
-The preflight artifact becomes the campaign lock. A mismatched worker must refuse
-production work. Do not invent unobserved package or container versions in this
-repository merely to make the lock look complete.
-
-Every validation and production process must expose the same real immutable
-container identity through `EXPERIMENT_CONTAINER_REF` and
-`EXPERIMENT_CONTAINER_DIGEST`. The exact ordered procedure is normative in
-`RUNBOOK.md`.
-
-## 12. Required run records and analysis outputs
-
-Every call record includes at least run/question/stage/call/batch IDs, model
-fingerprint, precision/quantization config, frozen prompt-template version/hash,
-the reconstructible input fields, exact rendered-prompt SHA-256, raw output,
-parsed and salvaged payloads, parse status, input/output token counts, and timing.
-The full rendered prompt need not be duplicated in every JSONL record.
-
-Every answer record includes the final prediction, gold answer, F1, EM, question
-metadata, and manifest hash. Run metadata includes all configuration and environment
-fields described above, per-stage and system memory, batch topology, cold and
-steady-state times, completion state, and input/output artifact hashes.
-
-Required final outputs are:
-
-1. per-run F1 and EM with question-paired uncertainty;
-2. the four-role 8-bit-versus-1.5B near-match table with memory gaps;
-3. the separate 4-bit table;
-4. the appendix 0.5B compliance/capacity-floor table;
-5. single-call versus uniform multi-agent 3B FP16;
-6. accuracy versus deduplicated concurrent resident memory;
-7. A100 relative inverse-throughput and cold-load tables;
-8. parse, evidence, churn, and call-count diagnostics clustered by question;
-9. the selector trace and exploratory actual mixed-system result, if distinct.
-
-## 13. Claim boundaries
-
-The paper may claim paired role sensitivity and system differences supported by
-the prespecified F1 analysis. It may describe the 8-bit/1.5B comparison as a
-near-memory-match and report whether accuracy holds as memory decreases.
-
-The paper must not claim:
-
-- a retrieval-quality result;
-- exact Q-vs-S memory equality;
+- exact equivalence to reference MA-RAG retrieval;
+- that reference MA-RAG has a five-step limit;
+- Wikipedia-scale or unseen-corpus retrieval quality;
 - pure parameter-count or pure bit-width causality;
-- confirmatory superiority of the in-sample optimized allocation;
-- edge-device latency from A100 ratios;
-- probability-calibration findings (`log_confidence` is disabled); or
-- independent evidence from the old pilot.
+- exact memory equality between 8-bit and 1.5B;
+- confirmatory superiority of the selected mixed allocation;
+- literal edge-device timing, energy, or thermals from A100 results;
+- probability calibration; or
+- independent final evidence from the pilot or historical runs.
 
-The old n=3,000 run is a disclosed design pilot that informed the final design.
-Its exact questions are excluded and its outputs do not enter final estimates.
-
-## 14. Launch gate
-
-Do not start the 1,500-question campaign until all of the following pass:
-
-- frozen manifest and exclusion validation;
-- immutable model/tokenizer/dataset revision resolution;
-- environment/container lock on every worker;
-- batch-32 preflight for every non-tiny and solo path before the static campaign,
-  plus fail-closed per-arm preflight before each appendix-only tiny arm scores;
-- salvage-to-QA and answer-scoring tests;
-- canonical-batch resume test;
-- complete metadata/memory/timing smoke test;
-- static matrix count of exactly 22 and selector candidate count of 256;
-- single-call fairness check; and
-- analysis dry-run on synthetic or excluded development data.
-
-Any silent fallback in sample, batch size, model revision, precision, prompt,
-parser, or output path invalidates the affected comparison. Fail closed.
-
-`RUNBOOK.md` is the normative execution order. In particular, freeze and commit
-the selector artifacts before any distinct optimized run, then use the frozen
-derived config for strict final analysis. Final analysis must reuse that selector
-artifact; it may never overwrite the decision that produced the optimized run.
+RUNBOOK.md is the normative execution order. Any silent change in sample,
+corpus, plan ceiling, routing, retrieval k, model/revision, precision, prompt,
+parser, batch membership, or artifact path invalidates the affected comparison.

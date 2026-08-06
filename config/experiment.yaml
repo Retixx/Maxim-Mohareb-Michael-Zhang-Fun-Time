@@ -21,6 +21,9 @@ dataset:
   revision: 1908d6afbbead072334abe2965f91bd2709910ab
   n: 1500
   eval_seed: 20260805
+  retrieval_strata_counts:
+    hidden_bridge: 1097
+    fully_named: 403
 
   # This file, rather than a fresh random draw, is authoritative. It contains
   # exactly 1,500 ordered IDs and the exact 3,031-ID exclusion union. The old
@@ -28,12 +31,49 @@ dataset:
   # are also excluded. The runner must validate n, uniqueness, both hashes, and
   # zero final/exclusion overlap before loading any model.
   manifest_path: config/manifests/final_n1500_seed20260805.json
-  manifest_file_sha256: 841dbca9ac7e76c0277a5696fba9f7e254b973afb0b670efbc5edfc006b4af46
+  manifest_file_sha256: ba2836fdcd180a16daae625c09ae6bc4f68aee26a072e9bbef14e44ec6868f90
   manifest_sha256: 5d4cc24872aeb603cbd005f790958199ef4cc993a1e7f048403608603da602af
   exclusion_sha256: a5cfacb84fa9a48217f3206a095706a6d48802bd244151c72f2eef08372c00a8
   preflight_manifest_path: config/manifests/preflight_excluded32.json
-  preflight_manifest_file_sha256: bc517df47316867c2c8532f568a8d006e976603e517d4edc475b9a84df58a8db
+  preflight_manifest_file_sha256: 76bddb6719560dd052b8b2f38244a6ff3b8b3e21a58e0619ebe9ec1358950c23
   preflight_manifest_sha256: 089a12904a68ff69217bf5bad30456a0643d55913cb6651a941a4abe65909bc9
+
+# SPEC §3 (revised). The distractor setting handed every stage both gold
+# paragraphs, which left decomposition no mechanism through which to help and is
+# why single_fp16 beat the four-agent pipeline by 9.2 EM. Passages are now
+# retrieved from a pooled open-domain corpus.
+#
+# corpus_configs ORDER IS LOAD-BEARING: `distractor` must be first. 402 titles
+# appear in both configs with different sentence splits, and supporting_facts
+# sent_id is defined against the distractor context. Reversing these silently
+# shifts gold sentence indices and corrupts every extraction-accuracy number.
+#
+# fullwiki contributes a real IR system's top-10 (hard lexical distractors, gold
+# missing for 39% of questions); distractor guarantees gold stays reachable.
+# Union: 72,094 passages, 100% gold-in-corpus.
+#
+# MA-RAG issues one targeted retrieval for every question-answering plan step.
+# The old 7/3 regex two-pass sweep is retained only as an archived diagnostic;
+# it is not the active reasoning topology and its recall numbers are not used as
+# evidence for this experiment.
+retrieval:
+  corpus_configs: [distractor, fullwiki]
+  expected_corpus_passages: 72094
+  expected_corpus_sha256: 931425de7b123e3081ed63387c8d591a8aba4cf872d2cf47144e924260d92b73
+  required_gold_title_coverage: 1.0
+  required_gold_sentence_coverage: 1.0
+  algorithm: sparse_bm25_lucene_idf_v1
+  query_policy: step_definer_top_k_per_question_answering_step_v1
+  k: 10
+
+architecture:
+  framework: ma-rag
+  conceptual_agents: [planner, step_definer, extractor, qa]
+  max_plan_steps: 5
+  plan_step_routing: [question-answering, aggregate]
+  extractor_granularity: per_document
+  semantic_stop_on_qa_success_no: true
+  finalizer: step_definer_plan_summary
 
 generation:
   # Scientific control, not an autotuning target. Preflight every configuration
@@ -74,6 +114,22 @@ memory_accounting:
     small_1_5b_fp16: 2944.4
     tiny_0_5b_fp16: 942.3
 
+pilot:
+  required_before_final_campaign: true
+  manifest_path: config/manifests/pilot_excluded200_seed20260806.json
+  manifest_file_sha256: 975210805c382788bb39c800266ae22a88cc526e0626bd8a0106c35d316a8bb1
+  manifest_sha256: f8c3f16458340cb0bc74aa827e3b51528ba351963a46dba456ac4e68ad20f7d7
+  n: 200
+  seed: 20260806
+  retrieval_strata_counts: {hidden_bridge: 160, fully_named: 40}
+  run_ids: [baseline, single_fp16]
+  gate_artifact: analysis/pilot_gate.json
+  decision:
+    primary_metric: f1
+    pass_if_multiagent_minus_single_overall_at_least: 0.0
+    pass_if_multiagent_minus_single_hidden_bridge_at_least: 0.0
+    failure_action: stop_before_final_accuracy_or_timing
+
 timing:
   reference_run: baseline
   reference_ratio: 1.0
@@ -82,7 +138,7 @@ timing:
   # Timing never reuses the final 1,500. It runs twice on a frozen excluded
   # 128-question cohort after a separate excluded batch-32 warm-up.
   manifest_path: config/manifests/timing_excluded128_seed20260805.json
-  manifest_file_sha256: 44f0cdf0b1e729861f38e86537b7f5e77cb3adf8a58c75db60d9d38811ef29ca
+  manifest_file_sha256: 200f131692aa73c5a0b9ed6fb0fe43e0154b40884f3cbb08f3900983232c5f40
   manifest_sha256: 3fce4065511c0959b86144179ff19144b85bea7dfb083495be695cd66c051de6
   n: 128
   seed: 20260805
@@ -120,8 +176,9 @@ timing:
   edge_latency_claim: false
 
 # Post-ablation exploratory selector. It is not the Q-vs-S near-memory-match.
-# It enumerates 4^4=256 complete allocations and charges each distinct resident
-# configuration once. The 0.5B tier is deliberately excluded. The selector may
+# It declares 5^4=625 complete allocations and charges each distinct resident
+# configuration once. A role may use 0.5B only when its one-role ablation clears
+# the frozen strict-protocol lower-bound gate. The selector may
 # return an existing uniform/reference run; otherwise it materializes one frozen
 # `ma_optimized_exploratory` run in the committed artifact below.
 allocation_selector:
@@ -135,9 +192,18 @@ allocation_selector:
     base_8bit: {model: base, precision: 8bit}
     base_4bit: {model: base, precision: 4bit}
     small_fp16: {model: small, precision: fp16}
-  excluded_candidates:
-    tiny_fp16: appendix_floor_only
-  candidate_allocation_count: 256
+    tiny_fp16: {model: tiny, precision: fp16}
+  candidate_allocation_count: 625
+  tiny_eligibility_gate:
+    source: corresponding_one_role_tiny_ablation
+    metric: strict_protocol_success
+    resampling_unit: question
+    question_clustered_95pct_lower_bound_min: 0.90
+    ineligible_action: remove_tiny_for_that_role_only
+    # Passing this only admits the role to enumeration. Every complete
+    # allocation must separately clear the paired-F1 noninferiority bound below,
+    # preventing a well-formatted but functionally useless tiny role from being
+    # selected.
   objective: minimize_deduplicated_concurrent_model_footprint_mib
   constraint:
     metric: f1
@@ -249,9 +315,10 @@ runs:
     extractor: {model: small, precision: fp16}
     qa: {model: small, precision: fp16}
 
-  # Appendix-only 0.5B compliance/capacity floor. These five runs establish
-  # where functional role behavior breaks down. They are excluded from the
-  # selector, primary hypothesis family, and main-paper allocation claims.
+  # Appendix-first 0.5B compliance/capacity floor. These five runs establish
+  # where functional role behavior breaks down. They are outside the primary
+  # hypothesis family, but a role can enter the exploratory selector when its
+  # question-clustered strict-protocol lower confidence bound clears 0.90.
   planner_tiny:
     planner: {model: tiny, precision: fp16}
     step_definer: fp16
@@ -278,7 +345,7 @@ runs:
     extractor: {model: tiny, precision: fp16}
     qa: {model: tiny, precision: fp16}
 
-  # Architecture control: one competitive direct-answer call over the same ten
-  # provided paragraphs, using the same 3B FP16 model and answer budget.
+  # Architecture control: one original-question BM25 top-10 retrieval followed
+  # by one direct-answer call, using the same 3B FP16 model and answer budget.
   single_fp16:
     solo: fp16

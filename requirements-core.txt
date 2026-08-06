@@ -1,11 +1,17 @@
-# Core versions observed in the prior A100 pilot and retained for final preflight.
-# PyTorch 2.13.0+cu130 / CUDA 13.0 came from that A100 image; install it through
-# the selected immutable container rather than resolving a different wheel here.
+# Direct dependencies pinned for the rebuilt final runtime. The model-facing
+# versions were retained from the prior A100 work; the newly explicit support
+# packages are resolved and tested by this repository. PyTorch 2.13.0+cu130 /
+# CUDA 13.0 must come from the selected immutable container rather than a wheel
+# resolved here.
 transformers==5.14.1
 bitsandbytes==0.50.0
 datasets==5.0.1
+accelerate==1.14.0
+PyYAML==6.0.3
+numpy==2.5.1
+scipy==1.18.0
+huggingface-hub==1.26.0
+pytest==9.1.1
 
-# Accelerate, PyYAML, PyTorch transitive dependencies, Python, driver, and CUDA
-# must be frozen from the chosen A100 container in config/environment.lock.json
-# before production. Their prior exact versions were not recorded, so inventing
-# pins here would create a false reproducibility claim.
+# PyTorch, Python, driver, CUDA, and all transitive dependencies are additionally
+# frozen from the chosen A100 container in config/environment.lock.json.

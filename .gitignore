@@ -20,5 +20,6 @@ figures/
 analysis/*
 !analysis/ma_optimized_exploratory.selection.json
 !analysis/ma_optimized_exploratory.experiment.yaml
+!analysis/pilot_gate.json
 
 .ipynb_checkpoints/

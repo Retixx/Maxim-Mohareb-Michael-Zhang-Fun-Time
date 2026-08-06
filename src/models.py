@@ -322,6 +322,7 @@ def generate_batch(
     max_new_tokens: int,
     batch_size: int = 1,
     log_confidence: bool = False,
+    force_full_generation: bool = False,
 ) -> list[dict]:
     """Greedy-decode a list of chat conversations.
 
@@ -353,21 +354,40 @@ def generate_batch(
         enc = tok(texts, return_tensors="pt", padding=True, add_special_tokens=False)
         enc = {k: v.to(model.device) for k, v in enc.items()}
         in_len = enc["input_ids"].shape[1]
+        context_candidates = [
+            getattr(getattr(model, "config", None), name, None)
+            for name in ("max_position_embeddings", "n_positions", "seq_length")
+        ]
+        context_candidates.append(getattr(tok, "model_max_length", None))
+        context_candidates = [
+            int(value) for value in context_candidates
+            if isinstance(value, (int, float)) and 0 < value < 1_000_000_000
+        ]
+        context_window = min(context_candidates) if context_candidates else None
+        if context_window is not None and in_len + max_new_tokens > context_window:
+            raise RuntimeError(
+                "prompt plus frozen output budget exceeds model context window: "
+                f"{in_len}+{max_new_tokens}>{context_window}"
+            )
 
         # CUDA kernels are asynchronous. Synchronizing on both sides isolates
         # this batch from work queued by the preceding batch.
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         t0 = time.perf_counter()
-        out = model.generate(
-            **enc,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            temperature=None,
-            top_p=None,
-            top_k=None,
-            pad_token_id=tok.pad_token_id,
-        )
+        generation_args = {
+            "max_new_tokens": max_new_tokens,
+            "do_sample": False,
+            "temperature": None,
+            "top_p": None,
+            "top_k": None,
+            "pad_token_id": tok.pad_token_id,
+        }
+        if force_full_generation:
+            # Excluded preflight must allocate the worst-case KV cache rather
+            # than passing because the model happened to emit EOS early.
+            generation_args["min_new_tokens"] = max_new_tokens
+        out = model.generate(**enc, **generation_args)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         elapsed = time.perf_counter() - t0
@@ -407,10 +427,13 @@ def generate_batch(
                 "hit_token_cap": hit_cap,
                 "prompt_tokens": int(attn.sum().item()),
                 "output_tokens": n_gen,
+                "generated_sequence_tokens": len(ids),
                 "latency_s": round(per_item, 4),
                 "batch_wall_s": elapsed,
                 "batch_size_actual": len(chunk),
                 "padded_input_tokens": int(in_len),
+                "context_window_tokens": context_window,
+                "forced_full_generation": force_full_generation,
             })
 
         if log_confidence:

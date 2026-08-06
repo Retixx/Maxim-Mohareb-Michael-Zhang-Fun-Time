@@ -18,9 +18,11 @@ generation, no GPU.
     selection_churn    fraction of calls whose chosen content changed between two
                        runs, independent of whether it was well-formed.
 
-At 4-bit on Qwen2.5-1.5B the first two showed no degradation and the third was
-73.8%. See the pre-registered predictions in SPEC §5b before adding a fourth
-instrument — "measure format a different way until it breaks" is not a method.
+The current campaign reports these instruments for every concrete stage and
+also rolls repeated stages up to the four conceptual agents.  The 0.5B
+enumeration failsafe uses the question-clustered lower confidence bound of
+``protocol_ok``; surviving candidates must still pass the selector's paired-F1
+noninferiority constraint, so format compliance alone cannot win an allocation.
 """
 
 import json
@@ -63,11 +65,47 @@ def verbatim_rate(spans: list[str], paragraphs: str) -> float | None:
     return sum(1 for s in spans if _norm(s) in hay) / len(spans)
 
 
+def protocol_ok(
+    role: str,
+    raw_output: str,
+    parsed: dict | None,
+    *,
+    paragraphs: str | None = None,
+    max_plan_steps: int = 5,
+) -> bool:
+    """Strict functional-output compliance, separate from tolerant parsing."""
+    if parsed is None or not strict_format_ok(role, raw_output):
+        return False
+    if role == "planner":
+        steps = parsed.get("sub_questions") or []
+        return 1 <= len(steps) <= max_plan_steps
+    if role == "step_definer":
+        return parsed.get("type") in {"aggregate", "question-answering"} and bool(
+            parsed.get("task")
+        )
+    if role == "extractor":
+        spans = parsed.get("spans") or []
+        fidelity = verbatim_rate(spans, paragraphs or "")
+        return len(spans) <= 3 and (fidelity is None or fidelity == 1.0)
+    if role == "qa":
+        answer = parsed.get("answer") or ""
+        return len(answer.split()) <= 12 and parsed.get("success") in {"yes", "no"}
+    if role == "plan_summary":
+        answer = parsed.get("answer") or ""
+        return (
+            parsed.get("output") in {"Successful", "Unsuccessful"}
+            and len(answer.split()) <= 12
+        )
+    if role == "solo":
+        return len((parsed.get("answer") or "").split()) <= 12
+    return False
+
+
 def selection_changed(rec_a: dict, rec_b: dict, key: str) -> bool:
     """Did the chosen content differ between two records of the same call?
 
     `key` is the parsed field carrying the selection: "spans" for the Extractor,
-    "sub_questions" for the Planner, "search_terms" for the Step Definer,
+    "sub_questions" for the Planner, "task" for the Step Definer,
     "answer" for QA. Compares normalised content, so formatting-only differences
     do not count.
 
@@ -110,7 +148,7 @@ def selection_changed_set(rec_a: dict, rec_b: dict, key: str) -> bool:
 # The selection field each role's output is judged on.
 SELECTION_FIELD = {
     "planner": "sub_questions",
-    "step_definer": "search_terms",
+    "step_definer": "task",
     "extractor": "spans",
     "qa": "answer",
     "solo": "answer",

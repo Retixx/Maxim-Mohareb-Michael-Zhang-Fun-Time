@@ -1,7 +1,9 @@
 import unittest
 import json
 import tempfile
+import hashlib
 from pathlib import Path
+from unittest import mock
 
 from analyze import (
     AnalysisError,
@@ -12,6 +14,8 @@ from analyze import (
     analyze_evidence,
     analyze_latency_batches,
     analyze_selection_churn,
+    _complete_matching_accuracy_run,
+    _validate_analysis_environment_lock,
     content_hash,
     discover_runs,
     load_run,
@@ -24,7 +28,7 @@ from analyze import (
 
 
 ROLES = ("planner", "step_definer", "extractor", "qa")
-CONFIGS = ("base_fp16", "base_8bit", "base_4bit", "small_fp16")
+CONFIGS = ("base_fp16", "base_8bit", "base_4bit", "small_fp16", "tiny_fp16")
 TIMING_HASH = "1" * 64
 
 
@@ -63,6 +67,44 @@ def make_run(
 
 
 class AnalyzeTests(unittest.TestCase):
+    def test_selector_reuses_complete_static_accuracy_without_timing(self):
+        definition = {"planner": {"model": "tiny", "precision": "fp16"}}
+        config = {"runs": {"planner_tiny": definition}}
+        complete = make_run("planner_tiny", timing_meta=None)
+        self.assertEqual(
+            _complete_matching_accuracy_run(config, {"planner_tiny": complete}, definition),
+            "planner_tiny",
+        )
+        incomplete = RunData(
+            **{**complete.__dict__, "answers": {}},
+        )
+        self.assertIsNone(
+            _complete_matching_accuracy_run(
+                config, {"planner_tiny": incomplete}, definition
+            )
+        )
+
+    def test_analysis_binds_results_to_present_lock_and_current_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            lock_path = Path(directory) / "environment.lock.json"
+            lock_path.write_text(
+                json.dumps({"source_bundle_sha256": "source-bundle"}) + "\n",
+                encoding="utf-8",
+            )
+            config = {"environment_lock_path": str(lock_path)}
+            with mock.patch(
+                "src.runner.source_bundle_sha256", return_value="source-bundle"
+            ):
+                self.assertEqual(
+                    _validate_analysis_environment_lock(config),
+                    hashlib.sha256(lock_path.read_bytes()).hexdigest(),
+                )
+            with mock.patch(
+                "src.runner.source_bundle_sha256", return_value="changed-source"
+            ):
+                with self.assertRaisesRegex(AnalysisError, "source bundle differs"):
+                    _validate_analysis_environment_lock(config)
+
     def test_final_completeness_gate_requires_full_accuracy_and_timing_matrix(self):
         config = {
             "runs": {run_id: {} for run_id in STATIC_RUN_IDS},
@@ -83,6 +125,58 @@ class AnalyzeTests(unittest.TestCase):
         runs.pop("qa_tiny")
         with self.assertRaisesRegex(AnalysisError, "accuracy campaign"):
             validate_campaign_completeness(config, runs)
+
+    def test_base_completeness_ignores_future_run_from_existing_selector_trace(self):
+        config = {
+            "runs": {run_id: {} for run_id in STATIC_RUN_IDS},
+            "timing": {"run_ids": ["baseline"]},
+            "allocation_selector": {"output_artifacts": {}},
+        }
+        runs = {run_id: make_run(run_id) for run_id in STATIC_RUN_IDS}
+        baseline = runs["baseline"]
+        runs["baseline"] = RunData(
+            **{**baseline.__dict__, "timing_meta": {"timing_mode": True}},
+        )
+        trace = {
+            "source_config_sha256": content_hash(config),
+            "executable_config_sha256": "future-derived-config",
+            "execution_run_id": "ma_optimized_exploratory",
+            "materialized_new_run": True,
+        }
+        with mock.patch("analyze._existing_selection_artifact", return_value=trace):
+            validate_campaign_completeness(config, runs)
+
+        derived = json.loads(json.dumps(config))
+        derived["runs"]["ma_optimized_exploratory"] = {"qa": "4bit"}
+        derived["frozen_allocation"] = {
+            "execution_run_id": "ma_optimized_exploratory"
+        }
+        trace["executable_config_sha256"] = content_hash(derived)
+        with mock.patch("analyze._existing_selection_artifact", return_value=trace):
+            with self.assertRaisesRegex(AnalysisError, "accuracy campaign"):
+                validate_campaign_completeness(derived, runs)
+
+    def test_derived_static_selection_requires_its_missing_timing(self):
+        config = {
+            "runs": {run_id: {} for run_id in STATIC_RUN_IDS},
+            "timing": {"run_ids": ["baseline"]},
+            "allocation_selector": {"output_artifacts": {}},
+            "frozen_allocation": {"execution_run_id": "planner_tiny"},
+        }
+        runs = {run_id: make_run(run_id) for run_id in STATIC_RUN_IDS}
+        baseline = runs["baseline"]
+        runs["baseline"] = RunData(
+            **{**baseline.__dict__, "timing_meta": {"timing_mode": True}},
+        )
+        trace = {
+            "source_config_sha256": "base-config",
+            "executable_config_sha256": content_hash(config),
+            "execution_run_id": "planner_tiny",
+            "materialized_new_run": False,
+        }
+        with mock.patch("analyze._existing_selection_artifact", return_value=trace):
+            with self.assertRaisesRegex(AnalysisError, "timing campaign"):
+                validate_campaign_completeness(config, runs)
 
     def test_discovery_merges_excluded_timing_without_using_timing_for_accuracy(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -127,13 +221,14 @@ class AnalyzeTests(unittest.TestCase):
         with self.assertRaisesRegex(AnalysisError, "not paired"):
             paired_differences(a, b, "f1")
 
-    def test_selector_enumerates_only_four_configs_and_fixed_charges(self):
+    def test_selector_enumerates_five_configs_and_fixed_charges(self):
         effects = {
             role: {
                 "base_fp16": 0.0,
                 "base_8bit": -0.2,
                 "base_4bit": -0.3,
                 "small_fp16": -0.4,
+                "tiny_fp16": -2.0,
             }
             for role in ROLES
         }
@@ -150,10 +245,11 @@ class AnalyzeTests(unittest.TestCase):
                 "base_8bit": 60.0,
                 "base_4bit": 40.0,
                 "small_fp16": 50.0,
+                "tiny_fp16": 10.0,
             },
             margin_points=1.0,
         )
-        self.assertEqual(result["candidate_count"], 4**4)
+        self.assertEqual(result["candidate_count"], 5**4)
         # all@4bit and all@small violate the margin. all@8bit is feasible and
         # costs one 60-MiB fixed charge, less than feasible mixed configs.
         self.assertEqual(
@@ -175,7 +271,6 @@ class AnalyzeTests(unittest.TestCase):
                     "base_8bit": 60.0,
                     "base_4bit": 40.0,
                     "small_fp16": 50.0,
-                    "tiny_fp16": 10.0,
                 },
             )
 
@@ -200,6 +295,7 @@ class AnalyzeTests(unittest.TestCase):
                 "base_8bit": 60,
                 "base_4bit": 40,
                 "small_fp16": 50,
+                "tiny_fp16": 10,
             },
             margin_points=0.5,
         )
@@ -214,6 +310,7 @@ class AnalyzeTests(unittest.TestCase):
                 "base_8bit": -0.2,
                 "base_4bit": -2.0,
                 "small_fp16": -2.0,
+                "tiny_fp16": -2.0,
             }
             for role in ROLES
         }
@@ -225,6 +322,7 @@ class AnalyzeTests(unittest.TestCase):
                 "base_8bit": [-1.0] * 50 + [0.6] * 50,
                 "base_4bit": [-2.0] * 100,
                 "small_fp16": [-2.0] * 100,
+                "tiny_fp16": [-2.0] * 100,
             }
             for role in ROLES
         }
@@ -237,6 +335,7 @@ class AnalyzeTests(unittest.TestCase):
                 "base_8bit": 60,
                 "base_4bit": 40,
                 "small_fp16": 50,
+                "tiny_fp16": 10,
             },
             margin_points=1.0,
         )
@@ -373,6 +472,42 @@ class AnalyzeTests(unittest.TestCase):
             1.0,
         )
 
+        service_batches = tuple(
+            {**record, "service_wall_s": record["batch_wall_s"] + 1.0}
+            for record in batched.batches
+        )
+        experiment_fingerprint = "experiment-v1"
+        orchestration = tuple({
+            "record_type": "stage_timing",
+            "stage": "qa",
+            "timing_repeat": repeat,
+            "orchestration_wall_s": 1.0,
+            "timing_eligible": True,
+            "phase": "timing_benchmark",
+            "question_manifest_sha256": TIMING_HASH,
+            "experiment_fingerprint": experiment_fingerprint,
+            "config_fingerprint": "fingerprint-1",
+            "call_graph_sha256": "same-graph",
+        } for repeat in range(2))
+        current = RunData(**{
+            **batched.__dict__,
+            "batches": service_batches,
+            "timing_orchestration": orchestration,
+            "timing_meta": {
+                **batched.timing_meta,
+                "experiment_fingerprint": experiment_fingerprint,
+                "experiment_fingerprint_payload": {"schema": "open_corpus_marag_v1"},
+            },
+        })
+        service = analyze_latency_batches(
+            {"baseline": current}, n_resamples=100, seed=0
+        )["runs"]["baseline"]["system"]
+        self.assertAlmostEqual(service["estimate_seconds_per_question"], 4.0)
+        self.assertAlmostEqual(
+            service["generation_only"]["estimate_seconds_per_question"], 2.5
+        )
+        self.assertAlmostEqual(service["orchestration_seconds_per_question"], 0.5)
+
     def test_loader_excludes_warmup_and_model_load_from_agent_calls(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -448,6 +583,38 @@ class AnalyzeTests(unittest.TestCase):
         self.assertAlmostEqual(counts["main"]["baseline"]["calls"]["estimate"], 1.0)
         self.assertAlmostEqual(
             counts["main"]["baseline"]["prompt_tokens"]["estimate"], 15.0
+        )
+
+    def test_repeated_ma_rag_stages_roll_up_without_call_key_collisions(self):
+        calls = (
+            {"question_id": "q1", "stage": "extractor", "conceptual_role": "extractor",
+             "prompt_role": "extractor", "call_index": 0,
+             "parsed": {"spans": ["first"]}},
+            {"question_id": "q1", "stage": "extractor_step2",
+             "conceptual_role": "extractor", "prompt_role": "extractor",
+             "call_index": 0, "parsed": {"spans": ["second"]}},
+        )
+        changed = tuple(
+            {**record, "parsed": {"spans": ["changed"]}}
+            if record["stage"] == "extractor_step2" else record
+            for record in calls
+        )
+        baseline = make_run("baseline", calls=calls)
+        treatment = make_run("extractor_8bit", calls=changed)
+        churn = analyze_selection_churn(
+            {"baseline": baseline, "extractor_8bit": treatment},
+            n_resamples=100,
+            seed=0,
+        )["main"]["extractor_8bit"]
+        self.assertEqual(churn["shared_calls"], 2)
+        self.assertAlmostEqual(
+            churn["downstream_effective_payload_churn"]["estimate"], 0.5
+        )
+        counts = analyze_call_counts(
+            {"baseline": baseline}, n_resamples=100, seed=0
+        )["main"]["baseline"]
+        self.assertAlmostEqual(
+            counts["calls_by_conceptual_role"]["extractor"]["estimate"], 1.0
         )
 
     def test_selection_artifact_hash_has_a_non_circular_verifier(self):

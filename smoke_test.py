@@ -36,11 +36,13 @@ def report(records: list[dict], meta: dict, n_raw: int) -> None:
           f"model={meta.get('model_id')} prompts={meta.get('prompt_bundle_version')}\n{'#' * 78}")
     print(f"stage precision: {meta.get('stage_precision')}")
 
-    print(f"\n--- Verbatim raw outputs ({n_raw} per agent) ---")
-    report_roles = [r for r in prompts.ALL_ROLES if any(c["stage"] == r for c in calls)]
-    for role in report_roles:
-        rs = [r for r in calls if r["stage"] == role]
-        print(f"\n=== {role.upper()} ===")
+    print(f"\n--- Verbatim raw outputs ({n_raw} per concrete stage) ---")
+    present = {str(call["stage"]) for call in calls}
+    report_stages = [stage for stage in prompts.PIPELINE_STAGES if stage in present]
+    report_stages.extend(sorted(present - set(report_stages)))
+    for stage in report_stages:
+        rs = [r for r in calls if r["stage"] == stage]
+        print(f"\n=== {stage.upper()} ({prompts.role_for(stage)}) ===")
         for r in rs[:n_raw]:
             print(f"[qid={r['question_id']} call_index={r['call_index']} "
                   f"status={r['parse_status']}]")
@@ -51,7 +53,7 @@ def report(records: list[dict], meta: dict, n_raw: int) -> None:
     for r in calls:
         by_role[r["stage"]][r["parse_status"]] += 1
     print(f"{'role':<14} {'calls':>6} {'ok':>6} {'ok%':>7}   breakdown")
-    for role in report_roles:
+    for role in report_stages:
         c = by_role[role]
         total = sum(c.values())
         if not total:
@@ -60,6 +62,23 @@ def report(records: list[dict], meta: dict, n_raw: int) -> None:
         rest = {k: v for k, v in sorted(c.items()) if k != "ok"}
         print(f"{role:<14} {total:>6} {c['ok']:>6} {100 * c['ok'] / total:>6.1f}%   "
               f"{rest if rest else '-'}")
+
+    print("\n--- Conceptual-agent rollup ---")
+    print(f"{'agent':<14} {'calls':>6} {'parse ok%':>10} {'protocol ok%':>13}")
+    for role in prompts.ALL_ROLES:
+        selected = [
+            record for record in calls
+            if record.get("conceptual_role", prompts.role_for(record["stage"])) == role
+        ]
+        if not selected:
+            continue
+        parse_ok = sum(record.get("parse_status") == "ok" for record in selected)
+        protocol_ok = sum(record.get("protocol_ok") is True for record in selected)
+        print(
+            f"{role:<14} {len(selected):>6} "
+            f"{100*parse_ok/len(selected):>9.1f}% "
+            f"{100*protocol_ok/len(selected):>12.1f}%"
+        )
 
     print("\n--- Answers vs gold ---")
     print(f"{'#':<3} {'EM':<3} {'F1':<5} {'predicted':<34} gold")
@@ -70,9 +89,23 @@ def report(records: list[dict], meta: dict, n_raw: int) -> None:
         em = sum(a["em"] for a in answers) / len(answers)
         f1 = sum(a["f1"] for a in answers) / len(answers)
         print(f"\nEM = {100 * em:.1f}%   F1 = {100 * f1:.1f}%   (n={len(answers)})")
+        for stratum in ("hidden_bridge", "fully_named"):
+            selected = [a for a in answers if a.get("retrieval_stratum") == stratum]
+            if selected:
+                print(
+                    f"{stratum}: n={len(selected)}  "
+                    f"F1={100*sum(a['f1'] for a in selected)/len(selected):.1f}%  "
+                    f"recall={100*sum(a['retrieval_gold_title_recall'] for a in selected)/len(selected):.1f}%"
+                )
+        print(
+            "retrieval: "
+            f"queries/q={sum(a.get('retrieval_query_count', 0) for a in answers)/len(answers):.2f}  "
+            f"passages/q={sum(a.get('retrieval_passage_exposures', 0) for a in answers)/len(answers):.2f}  "
+            f"zero-result/q={sum(a.get('retrieval_zero_result_query_count', 0) for a in answers)/len(answers):.3f}"
+        )
 
     print("\n--- Throughput & memory ---")
-    for role in report_roles:
+    for role in report_stages:
         lat = [r["latency_s"] for r in calls if r["stage"] == role]
         st = (meta.get("stages") or {}).get(role, {})
         if lat:
