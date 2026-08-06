@@ -7,9 +7,10 @@ The system answers HotpotQA distractor questions from the ten paragraphs supplie
 with each example. It has no retriever, so results concern provided-context,
 retrieval-free multi-agent QA rather than retrieval quality.
 
-Read [SPEC.md](SPEC.md) before running anything. It is the authoritative
-scientific contract; [config/experiment.yaml](config/experiment.yaml) is its
-machine-readable counterpart.
+The co-developer/operator should follow [RUNBOOK.md](RUNBOOK.md) from top to
+bottom. [SPEC.md](SPEC.md) is the authoritative scientific contract;
+[config/experiment.yaml](config/experiment.yaml) is its machine-readable
+counterpart. Old notebooks and n=3,000 commands are not execution instructions.
 
 ## Final design
 
@@ -56,6 +57,10 @@ Do not replace them with floating `main` revisions.
 
 The runner reads the frozen manifest and fails before model loading if its count,
 hashes, exclusions, or dataset revision do not match.
+
+**Use the complete [RUNBOOK.md](RUNBOOK.md) for production.** The commands below
+are only a compact reference; the runbook contains restart, multi-GPU, artifact
+preservation, selector, and hard-stop instructions.
 
 ```bash
 # Smoke/preflight on excluded development data only
@@ -130,6 +135,7 @@ A100 ratios, not edge-latency estimates.
 | Path | Purpose |
 |---|---|
 | `SPEC.md` | Locked experiment and claim contract |
+| `RUNBOOK.md` | Exact operator handoff and ordered A100 commands |
 | `PROGRESS.md` | Current handoff and launch blockers |
 | `config/experiment.yaml` | Models, revisions, matrix, metrics, selector, timing/memory policy |
 | `config/manifests/` | Frozen final question and exclusion IDs |

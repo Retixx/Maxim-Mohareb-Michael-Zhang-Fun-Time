@@ -284,9 +284,12 @@ interact non-additively.
 - Maximum downstream fan-out remains frozen and identical across arms.
 
 Batch size is pinned at 32 for every production arm. `batch_size` and
-`min_batch_size` are both 32. Preflight every distinct model configuration and
-stage shape at batch 32. A production OOM must fail loudly; it must never reduce
-batch size for one arm.
+`min_batch_size` are both 32. The excluded timing campaign preflights every
+non-tiny model configuration and stage shape at batch 32 before final questions
+are touched. The five appendix-only 0.5B arms are not part of timing; each must
+pass its own excluded batch-32 preflight immediately before that arm's first
+scored call. A production OOM must fail loudly; it must never reduce batch size
+for one arm.
 
 Canonical batch IDs, ordered membership, and batch size are committed in run
 metadata. Resume may skip completed canonical batches but may not repack remaining
@@ -362,6 +365,11 @@ The preflight artifact becomes the campaign lock. A mismatched worker must refus
 production work. Do not invent unobserved package or container versions in this
 repository merely to make the lock look complete.
 
+Every validation and production process must expose the same real immutable
+container identity through `EXPERIMENT_CONTAINER_REF` and
+`EXPERIMENT_CONTAINER_DIGEST`. The exact ordered procedure is normative in
+`RUNBOOK.md`.
+
 ## 12. Required run records and analysis outputs
 
 Every call record includes at least run/question/stage/call/batch IDs, model
@@ -413,7 +421,8 @@ Do not start the 1,500-question campaign until all of the following pass:
 - frozen manifest and exclusion validation;
 - immutable model/tokenizer/dataset revision resolution;
 - environment/container lock on every worker;
-- batch-32 preflight for FP16, 8-bit, 4-bit, small, tiny, and solo paths;
+- batch-32 preflight for every non-tiny and solo path before the static campaign,
+  plus fail-closed per-arm preflight before each appendix-only tiny arm scores;
 - salvage-to-QA and answer-scoring tests;
 - canonical-batch resume test;
 - complete metadata/memory/timing smoke test;
@@ -423,3 +432,8 @@ Do not start the 1,500-question campaign until all of the following pass:
 
 Any silent fallback in sample, batch size, model revision, precision, prompt,
 parser, or output path invalidates the affected comparison. Fail closed.
+
+`RUNBOOK.md` is the normative execution order. In particular, freeze and commit
+the selector artifacts before any distinct optimized run, then use the frozen
+derived config for strict final analysis. Final analysis must reuse that selector
+artifact; it may never overwrite the decision that produced the optimized run.

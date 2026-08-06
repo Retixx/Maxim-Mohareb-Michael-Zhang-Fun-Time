@@ -1,5 +1,8 @@
 # A100 environment lock contract
 
+Follow `RUNBOOK.md` for the exact ordered commands. This file defines what the
+environment lock means; it is not a substitute for the operator runbook.
+
 `requirements-core.txt` pins only versions that were recorded in the prior A100
 pilot. It is intentionally not presented as a complete lock: the earlier run did
 not record exact Accelerate, PyYAML, Python, container, driver, or transitive

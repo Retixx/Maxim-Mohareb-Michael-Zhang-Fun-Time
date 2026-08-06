@@ -42,6 +42,51 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def completed_run_ids(config: dict, *, kind: str) -> set[str]:
+    """Find finalized, hash-valid artifacts so campaign restarts skip them."""
+    results_dir = Path(config.get("results_dir", "results"))
+    if not results_dir.is_absolute():
+        results_dir = ROOT / results_dir
+    dataset = config.get("dataset") or {}
+    timing = config.get("timing") or {}
+    expected_n = int(timing["n"] if kind == "timing" else dataset["n"])
+    expected_seed = int(
+        timing.get("seed", dataset["eval_seed"])
+        if kind == "timing" else dataset["eval_seed"]
+    )
+    completed: set[str] = set()
+    for meta_path in results_dir.glob("*.meta.json"):
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if bool(meta.get("timing_mode")) != (kind == "timing"):
+            continue
+        if meta.get("metadata_complete") is not True:
+            continue
+        try:
+            identity_matches = (
+                int(meta.get("n", -1)) == expected_n
+                and int(meta.get("seed", -1)) == expected_seed
+            )
+        except (TypeError, ValueError):
+            identity_matches = False
+        if not identity_matches:
+            continue
+        jsonl_path = meta_path.with_name(
+            meta_path.name.removesuffix(".meta.json") + ".jsonl"
+        )
+        if (
+            not jsonl_path.exists()
+            or not meta.get("jsonl_sha256")
+            or _sha256(jsonl_path) != meta["jsonl_sha256"]
+        ):
+            continue
+        if isinstance(meta.get("run_id"), str):
+            completed.add(meta["run_id"])
+    return completed
+
+
 def validate_matrix(config: dict) -> None:
     runs = set(config.get("runs") or {})
     if runs != STATIC_RUNS:
@@ -123,11 +168,17 @@ def main() -> int:
     _write_json_atomic(plan_path, plan)
 
     assigned = plan["assignments"][str(args.worker_index)]
+    already_complete = completed_run_ids(config, kind=args.kind)
+    plan["completed_before_start"] = sorted(already_complete)
+    _write_json_atomic(plan_path, plan)
     print(f"plan: {plan_path}")
     print(f"worker {args.worker_index}/{args.workers}: {', '.join(assigned)}")
     if not args.execute:
         return 0
     for run_id in assigned:
+        if run_id in already_complete:
+            print(f"skip finalized {args.kind} artifact: {run_id}")
+            continue
         command = [
             sys.executable, "-m", "src.runner", "--config", str(config_path), "--run", run_id
         ]

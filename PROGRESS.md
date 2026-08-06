@@ -4,6 +4,21 @@ This file records only the active final-campaign state. Detailed history of the
 earlier 1.5B/T4/Kaggle tiers remains available in Git history and must not be
 treated as part of the final n=1,500 analysis.
 
+## 2026-08-06 — operator handoff
+
+`RUNBOOK.md` is now the normative, ordered execution procedure for the
+co-developer. It covers branch synchronization, the committed A100 environment
+lock, reserved-GPU timing, deterministic multi-worker accuracy assignments,
+safe restart behavior, selector freezing, the optional optimized execution,
+strict final analysis, backups, and hard-stop conditions. Do not substitute old
+n=3,000/seed-7/batch-64 commands or notebooks.
+
+Campaign restarts skip only finalized artifacts whose JSONL bytes match the hash
+in metadata. Partial accuracy runs resume only on the same GPU; partial timing
+runs are quarantined and replayed fresh. Final analysis reuses the committed
+selector artifact and cannot replace the decision that produced an optimized
+run.
+
 ## 2026-08-05 — final A100 contract frozen; CPU verification passed
 
 ### Human-approved design
