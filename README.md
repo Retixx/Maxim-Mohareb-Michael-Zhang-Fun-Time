@@ -65,6 +65,9 @@ python -X utf8 smoke_test.py --n 10 --run baseline
 python -m src.runner --write-environment-lock \
   --container-ref REGISTRY/IMAGE:TAG --container-digest sha256:IMMUTABLE_DIGEST
 git add config/environment.lock.json && git commit -m "Lock final A100 environment"
+# Validation reads container identity from these variables on every worker.
+export EXPERIMENT_CONTAINER_REF=REGISTRY/IMAGE:TAG
+export EXPERIMENT_CONTAINER_DIGEST=sha256:IMMUTABLE_DIGEST
 python -m src.runner --validate-environment-lock
 
 # First, certify every non-tiny configuration on excluded data and collect the

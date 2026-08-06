@@ -25,7 +25,10 @@ Generate it with `python -m src.runner --write-environment-lock --container-ref
 hash that excludes the lock file itself; this avoids an impossible Git/hash
 self-reference while still detecting any source, SPEC, config, test, or manifest
 edit. Production also refuses a dirty worktree. Validate every worker with
-`python -m src.runner --validate-environment-lock`.
+`python -m src.runner --validate-environment-lock`. Before validation or any
+production run, export the same immutable identity as
+`EXPERIMENT_CONTAINER_REF` and `EXPERIMENT_CONTAINER_DIGEST`; validation fails
+closed when those values do not match the committed lock.
 
 Every accuracy worker must compare itself with this artifact before loading a
 model and fail on a mismatch. Timing uses one reserved uncontended A100 from the

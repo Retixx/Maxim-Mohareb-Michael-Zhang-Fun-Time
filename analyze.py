@@ -2495,13 +2495,34 @@ def build_report(
         and configured_accuracy_complete
         and all(run_id in runs for run_id in selector_ids)
     ):
-        report["allocation_selection"] = materialize_selection(
-            config,
-            runs,
-            output_dir,
-            n_resamples=n_resamples,
-            bootstrap_seed=bootstrap_seed + 600,
-        )
+        # A derived post-selection config is already cryptographically linked to
+        # the selector artifact that produced its optimized run.  Re-freezing
+        # here would overwrite that artifact with a new hash after completeness
+        # validation, severing the optimized result's provenance.
+        if config.get("frozen_allocation"):
+            frozen_artifact = _existing_selection_artifact(config)
+            if frozen_artifact is None:
+                raise AnalysisError(
+                    "frozen allocation config is missing its selector artifact"
+                )
+            outputs = (config.get("allocation_selector") or {}).get(
+                "output_artifacts"
+            ) or {}
+            report["allocation_selection"] = {
+                **frozen_artifact,
+                "artifact_path": str(_repo_path(outputs["selection_trace"])),
+                "executable_config_path": str(
+                    _repo_path(outputs["executable_config"])
+                ),
+            }
+        else:
+            report["allocation_selection"] = materialize_selection(
+                config,
+                runs,
+                output_dir,
+                n_resamples=n_resamples,
+                bootstrap_seed=bootstrap_seed + 600,
+            )
         execution_run_id = report["allocation_selection"]["execution_run_id"]
         report["selected_system_actual_vs_baseline"] = analyze_optimized_system(
             runs,
