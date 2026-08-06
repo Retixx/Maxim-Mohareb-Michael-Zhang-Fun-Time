@@ -1,0 +1,11 @@
+nohup: ignoring input
+=== run extractor_8bit | Qwen/Qwen2.5-1.5B-Instruct | n=3000 seed=7 batch=64 prompts=v5 ===
+    planner        Qwen/Qwen2.5-1.5B-Instruct @ fp16
+    step_definer   Qwen/Qwen2.5-1.5B-Instruct @ fp16
+    extractor      Qwen/Qwen2.5-1.5B-Instruct @ 8bit
+    qa             Qwen/Qwen2.5-1.5B-Instruct @ fp16
+
+--- stage planner @ Qwen/Qwen2.5-1.5B-Instruct fp16: 3000 calls, 3000 pending ---
+Loading weights:   0%|          | 0/338 [00:00<?, ?it/s]Loading weights:   0%|          | 1/338 [00:00<00:47,  7.17it/s]Loading weights:  15%|█▌        | 51/338 [00:00<00:01, 250.04it/s]Loading weights:  29%|██▉       | 99/338 [00:00<00:00, 338.85it/s]Loading weights:  44%|████▍     | 149/338 [00:00<00:00, 391.22it/s]Loading weights:  58%|█████▊    | 197/338 [00:00<00:00, 416.84it/s]Loading weights:  72%|███████▏  | 245/338 [00:00<00:00, 433.05it/s]Loading weights:  90%|████████▉ | 303/338 [00:00<00:00, 471.46it/s]Loading weights: 100%|██████████| 338/338 [00:00<00:00, 413.41it/s]
+    loaded in 2.5s
+    64/3000 (bs=64)    128/3000 (bs=64)    192/3000 (bs=64)    256/3000 (bs=64)
