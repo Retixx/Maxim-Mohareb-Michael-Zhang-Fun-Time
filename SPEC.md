@@ -74,6 +74,73 @@ Before loading a model, the runner must fail unless it verifies:
 Do not resample missing or failed questions. A failed question remains in the
 denominator.
 
+## 3a. Retrieval (amendment — supersedes "no retriever")
+
+The original §3 used the distractor setting and handed every stage ten
+paragraphs already containing both gold. That deleted the retriever, left the
+Step Definer's `search_terms` field consumed by nothing, and gave decomposition
+no mechanism through which to help. Measured consequence: `single_fp16` beat the
+four-agent pipeline by **+9.23 EM [+7.47, +11.03]** at identical memory, n=3000
+paired. That is an artifact of the harness, not a finding about multi-agent RAG.
+MA-RAG retrieves over millions of passages; a system with nothing to search is
+not the system being studied.
+
+**Corpus.** Every unique paragraph from both HotpotQA configs, pooled:
+`fullwiki` supplies a real IR system's top-10 (hard lexical distractors; gold
+absent for 39% of questions), `distractor` guarantees gold stays reachable.
+Union: **72,094 passages, 100% gold-in-corpus.** The runner asserts this before
+loading any model.
+
+`corpus_configs` order is load-bearing — `distractor` must be first. 402 titles
+appear in both configs with different sentence splits, and `supporting_facts`
+`sent_id` is defined against the distractor context. Reversing the order shifts
+gold sentence indices and corrupts every extraction-accuracy number silently.
+
+**Two hops.** Retrieval is `k=10`, split `hop1=7` / `hop2=3`:
+
+1. hop 1 queries the **original question** (not the sub-questions — per-sub-question
+   queries retrieve strictly worse, recall@10 0.743 vs 0.794, because HotpotQA
+   carries its lexical signal in entity names and splitting discards it);
+2. the Extractor reads those 7;
+3. a follow-up query is built from capitalised name phrases in the Extractor's
+   spans, dropping any name that is already in the question or already the title
+   of a hop-1 passage;
+4. the Extractor runs a second pass over the 3 passages that query returns.
+
+If no candidate name survives step 3, no second query is issued and the held-back
+budget is spent on hop-1 depth instead, so a question needing only one hop is not
+penalised for the machinery.
+
+Step 3 is a regex, deliberately **not** a model call: a quantized Extractor must
+be able to damage retrieval only through which sentences it selects, never
+through a second learned component that also degrades. Cost of that choice,
+versus splicing the gold bridge title directly: 0.794 vs 0.812 hidden-title
+recall.
+
+**Prespecified stratifier.** Each question is labelled from its text and gold
+titles alone, before any model runs:
+
+- `hidden_bridge` (1204/1500, 80%) — at least one gold page is never named in the
+  question, so no single query can reach it;
+- `fully_named` (296/1500, 20%) — every gold page is named.
+
+Every metric is reported by stratum. `fully_named` is the control: two hops
+cannot help where nothing is hidden, and it must show no gain. Measured at k=10,
+n=1500, equal read budget:
+
+| stratum | all-gold-retrieved | hidden-title recall |
+|---|---|---|
+| hidden_bridge | 0.520 → 0.678 | 0.653 → 0.794 |
+| fully_named | 0.892 → 0.797 | (nothing hidden) |
+
+`k` and `hop1` were swept on CPU before any GPU time — k ∈ {5,8,10,12,16,20},
+hop1 ∈ {5,6,7,8}. Gain plateaus above k=8; 7/3 keeps the full hidden-bridge gain
+at roughly half the fully-named cost of a 5/5 split (−0.095 vs −0.172).
+
+**Cost.** The Extractor now runs twice, so pipeline arms make 5 generation
+stages instead of 4. `extractor_hop2` is the same agent at the same precision and
+is **not independently configurable**; the runner rejects any run that tries.
+
 ## 3. Models and treatments
 
 All model and tokenizer artifacts resolve at immutable Hugging Face revisions:
@@ -134,7 +201,8 @@ prompt version, batch size, or model revision.
 `single_fp16` is a competitive, frozen baseline rather than a strawman:
 
 - one 3B FP16 model call per question;
-- the same question and same ten provided paragraphs as the multi-agent system;
+- the same question, and the same `k` passages the multi-agent system reads in
+  total, retrieved by a single BM25 query over the same corpus (§3a);
 - a dedicated direct-answer prompt developed only on excluded development IDs;
 - greedy decoding and the same 48-token answer budget as the QA role;
 - the same model/tokenizer revision and answer parser/normalization;

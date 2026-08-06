@@ -90,10 +90,37 @@ PROMPT_BUNDLE_VERSION = "v5+solo-v1"
 # This is uniform across precisions, which SPEC §12 requires. Any future change
 # must bump this version and be re-run at every precision.
 
-# Roles, in pipeline order. Used everywhere as the canonical stage names.
+# Roles, in pipeline order. A ROLE is a prompt template; a STAGE is one pass of
+# execution. They stopped being the same thing when retrieval became two-hop.
 ROLES = ["planner", "step_definer", "extractor", "qa"]
 SOLO_ROLE = "solo"
 ALL_ROLES = [*ROLES, SOLO_ROLE]
+
+# The Extractor runs twice: once over the passages the question itself retrieves,
+# then again over passages retrieved using the names it found in the first pass.
+# Same agent, same frozen template, same precision -- a second pass, NOT a fifth
+# role. Treating it as a role would add a prompt to a frozen bundle and would
+# also imply it could be quantized independently of the Extractor, which is not
+# what is being measured.
+EXTRACTOR_HOP2 = "extractor_hop2"
+PIPELINE_STAGES = [
+    "planner", "step_definer", "extractor", EXTRACTOR_HOP2, "qa", SOLO_ROLE,
+]
+STAGE_ROLE = {s: ("extractor" if s == EXTRACTOR_HOP2 else s) for s in PIPELINE_STAGES}
+
+# Stages whose treatment is not configured directly but mirrored from another
+# stage, because they are the same agent.
+STAGE_MIRRORS = {EXTRACTOR_HOP2: "extractor"}
+
+
+def role_for(stage: str) -> str:
+    """The prompt role a pipeline stage uses."""
+    try:
+        return STAGE_ROLE[stage]
+    except KeyError:
+        raise KeyError(
+            f"unknown stage {stage!r}; expected one of {PIPELINE_STAGES}"
+        ) from None
 
 # Generation budget per role. `truncated` in the failure taxonomy means the
 # generation hit exactly this cap without emitting EOS.

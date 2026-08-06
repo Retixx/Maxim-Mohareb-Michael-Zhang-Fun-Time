@@ -14,10 +14,18 @@ import json
 import random
 from pathlib import Path
 
-from . import agents, evidence, prompts
+from . import agents, evidence, prompts, retrieval
 from .metrics import exact_match, f1_score
 
 _HOTPOT_SOURCES = ("hotpotqa/hotpot_qa", "hotpot_qa")
+
+
+def _require_retriever(retriever, stage: str) -> None:
+    if retriever is None:
+        raise ValueError(
+            f"stage {stage!r} reads passages and needs a retriever; SPEC §3 no "
+            "longer hands the dataset's 10 paragraphs to any stage"
+        )
 
 
 def question_ids_sha256(question_ids: list[str]) -> str:
@@ -198,15 +206,29 @@ def load_questions(
     def convert_row(i: int) -> dict:
         row = ds[i]
         ctx = row["context"]
+        sf = row.get("supporting_facts") or {"title": [], "sent_id": []}
+        # SPEC §3 (revised): the dataset's ten paragraphs are NO LONGER handed to
+        # any stage. They now serve only as corpus material and as the gold
+        # labels for scoring. Every stage that reads passages retrieves them.
+        gold_titles = list(dict.fromkeys(sf["title"]))
+        qn = retrieval.norm(row["question"])
+        hidden = [t for t in gold_titles if retrieval.norm(t) not in qn]
         return {
             "question_id": row["id"],
             "question": row["question"],
             "answer": row["answer"],
             "level": row.get("level"),
             "type": row.get("type"),
-            "paragraphs": prompts.format_paragraphs(ctx["title"], ctx["sentences"]),
             # Gold evidence labels are analysis-only and never enter a prompt.
             "supporting_facts": row.get("supporting_facts"),
+            # Prespecified stratifier. `fully_named` questions name every page
+            # they need, so a second retrieval hop has nothing to resolve and
+            # gains exactly 0.000 — they are the built-in control that the gain
+            # on `hidden_bridge` comes from resolving a withheld name rather than
+            # from reading more text. Computed from the question string and gold
+            # titles only, so it is fixed before any model runs.
+            "retrieval_stratum": "hidden_bridge" if hidden else "fully_named",
+            "hidden_gold_titles": hidden,
             "sentence_index": evidence.build_sentence_index(
                 ctx["title"], ctx["sentences"]
             ),
@@ -268,12 +290,43 @@ def sub_questions_for(q: dict, idx: dict) -> list[str]:
     )
 
 
-def build_stage_calls(stage: str, questions: list[dict], idx: dict) -> list[dict]:
+def spans_of(rec: dict | None) -> tuple[list[str], str]:
+    """The spans a consumer should read from an Extractor record, and their source.
+
+    SPEC §13b.1: prefer the validated payload, else whatever was salvageable from
+    a failed call. The call still counts as a parse failure — this only stops
+    usable spans being discarded along with a malformed container.
+    """
+    if rec:
+        if rec.get("parsed") is not None:
+            return (rec["parsed"] or {}).get("spans", []), "parsed"
+        if rec.get("salvaged") is not None:
+            return (rec["salvaged"] or {}).get("spans", []), "salvaged"
+    return [], "fallback"
+
+
+def hop1_titles_for(q: dict, retriever, sub_question: str) -> list[str]:
+    """Hop-1 passages for one sub-question: the ORIGINAL question's top-k.
+
+    Deliberately the original question, not the sub-question. Sub-question
+    queries were measured retrieving WORSE than the whole question (recall@10
+    0.743 vs 0.794): HotpotQA questions carry their lexical signal in the entity
+    names, and splitting them discards signal without adding any. The second hop
+    is where decomposition earns its keep, not the first.
+    """
+    return retriever.index.search_titles(q["question"], retriever.k)
+
+
+def build_stage_calls(stage: str, questions: list[dict], idx: dict,
+                      retriever=None) -> list[dict]:
     """Every call `stage` needs to make, given the records already on disk.
 
     Upstream stages must be complete before this is called for a downstream one;
     the runner enforces that by walking stages in order. Returns items shaped
     {"question_id", "call_index", "fields"} — the input to agents.run_calls.
+
+    `retriever` is required for every stage that reads passages (extractor,
+    extractor_hop2, solo). It is a RetrievalContext from src/runner.py.
     """
     calls = []
 
@@ -297,7 +350,15 @@ def build_stage_calls(stage: str, questions: list[dict], idx: dict) -> list[dict
         return calls
 
     if stage == "extractor":
+        _require_retriever(retriever, stage)
         for q in questions:
+            titles = hop1_titles_for(q, retriever, q["question"])
+            # Only the first `hop1` reach this pass; the remainder of the budget
+            # is held back for the follow-up query. If no follow-up fires,
+            # build_answer_records still sees the held-back passages because
+            # extractor_hop2 falls back to them (see below).
+            passages = retriever.passages(titles[: retriever.hop1])
+            rendered = retrieval.format_passages(passages)
             for i, sq in enumerate(sub_questions_for(q, idx)):
                 spec_rec = idx.get((q["question_id"], "step_definer", i))
                 # SPEC §13b.1: prefer the validated payload; fall back to whatever
@@ -314,9 +375,60 @@ def build_stage_calls(stage: str, questions: list[dict], idx: dict) -> list[dict
                 calls.append({
                     "question_id": q["question_id"],
                     "call_index": i,
-                    "fields": agents.build_extractor_fields(q["paragraphs"], sq, spec),
+                    "fields": agents.build_extractor_fields(rendered, sq, spec),
                     "consumer_payload_source": source,
-                    "consumer_input": {"step_definition": spec},
+                    "consumer_input": {
+                        "step_definition": spec,
+                        "retrieval": {
+                            "hop": 1,
+                            "query": q["question"],
+                            "titles": [p.title for p in passages],
+                        },
+                    },
+                })
+        return calls
+
+    if stage == prompts.EXTRACTOR_HOP2:
+        _require_retriever(retriever, stage)
+        for q in questions:
+            titles = hop1_titles_for(q, retriever, q["question"])
+            hop1 = titles[: retriever.hop1]
+            for i, sq in enumerate(sub_questions_for(q, idx)):
+                spec_rec = idx.get((q["question_id"], "step_definer", i))
+                # Same step definition as hop 1. The two passes must differ ONLY
+                # in which passages they see, or the comparison between them
+                # confounds retrieval with prompt content.
+                spec = None
+                if spec_rec:
+                    spec = spec_rec.get("parsed") or spec_rec.get("salvaged")
+                spans, source = spans_of(idx.get((q["question_id"], "extractor", i)))
+                hop = retrieval.retrieve(
+                    retriever.index, q["question"], k=retriever.k,
+                    hop1=retriever.hop1, spans=spans, hop1_titles=hop1,
+                )
+                if not hop["fired"]:
+                    # Nothing worth a second query — every name the Extractor
+                    # found is either in the question or already retrieved. Spend
+                    # the held-back budget on more depth from hop 1 instead, so a
+                    # fully-named question is never punished for the machinery.
+                    passages = retriever.passages(titles[retriever.hop1: retriever.k])
+                else:
+                    passages = retriever.passages(hop["titles"])
+                calls.append({
+                    "question_id": q["question_id"],
+                    "call_index": i,
+                    "fields": agents.build_extractor_fields(
+                        retrieval.format_passages(passages), sq, spec
+                    ),
+                    "consumer_payload_source": source,
+                    "consumer_input": {
+                        "retrieval": {
+                            "hop": 2,
+                            "fired": hop["fired"],
+                            "query": hop["query"],
+                            "titles": [p.title for p in passages],
+                        },
+                    },
                 })
         return calls
 
@@ -328,20 +440,26 @@ def build_stage_calls(stage: str, questions: list[dict], idx: dict) -> list[dict
             blocks = []
             consumed = []
             for i, sq in enumerate(sub_questions_for(q, idx)):
-                rec = idx.get((q["question_id"], "extractor", i))
-                payload = None
-                source = "fallback"
-                if rec:
-                    if rec.get("parsed") is not None:
-                        payload, source = rec["parsed"], "parsed"
-                    elif rec.get("salvaged") is not None:
-                        payload, source = rec["salvaged"], "salvaged"
-                spans = (payload or {}).get("spans", [])
-                blocks.append((sq, spans))
+                # Both Extractor passes feed QA. Order is hop-1 then hop-2 and
+                # duplicates are dropped: hop-2 often re-selects a sentence hop-1
+                # already found, and repeating it in the evidence block would
+                # make QA read the same fact twice.
+                per_hop = []
+                for st in ("extractor", prompts.EXTRACTOR_HOP2):
+                    rec = idx.get((q["question_id"], st, i))
+                    # A stage with no record at all did not run — that is not a
+                    # "fallback" payload and must not be reported as one, or a
+                    # single-hop run would look like it degraded.
+                    if rec is not None:
+                        per_hop.append(spans_of(rec))
+                merged = list(dict.fromkeys(s for spans, _ in per_hop for s in spans))
+                sources = list(dict.fromkeys(src for _, src in per_hop)) or ["fallback"]
+                blocks.append((sq, merged))
                 consumed.append({
                     "sub_question": sq,
-                    "spans": spans,
-                    "consumer_payload_source": source,
+                    "spans": merged,
+                    "hop_spans": [len(spans) for spans, _ in per_hop],
+                    "consumer_payload_source": "+".join(sources),
                 })
             consumed_sources = {
                 item["consumer_payload_source"] for item in consumed
@@ -359,22 +477,56 @@ def build_stage_calls(stage: str, questions: list[dict], idx: dict) -> list[dict
         return calls
 
     if stage == "solo":
+        _require_retriever(retriever, stage)
         for q in questions:
+            # The architecture control retrieves ONCE with the whole question and
+            # reads the same k passages the pipeline gets in total. It is not
+            # handed gold. Giving it the dataset's 10 paragraphs, as SPEC §4a
+            # originally did, made it an oracle rather than a baseline — which is
+            # why it beat the four-agent pipeline by 9.2 EM.
+            titles = retriever.index.search_titles(q["question"], retriever.k)
+            passages = retriever.passages(titles)
             calls.append({
                 "question_id": q["question_id"],
                 "call_index": 0,
-                "fields": agents.build_solo_fields(q["question"], q["paragraphs"]),
-                "consumer_payload_source": "dataset",
-                "consumer_input": {"provided_paragraphs": 10},
+                "fields": agents.build_solo_fields(
+                    q["question"], retrieval.format_passages(passages)
+                ),
+                "consumer_payload_source": "retrieved",
+                "consumer_input": {
+                    "retrieval": {
+                        "hop": 1, "query": q["question"], "titles": titles,
+                    },
+                },
             })
         return calls
 
-    raise KeyError(f"unknown stage {stage!r}; expected one of {prompts.ALL_ROLES}")
+    raise KeyError(f"unknown stage {stage!r}; expected one of {prompts.PIPELINE_STAGES}")
+
+
+def retrieved_titles_for(q: dict, idx: dict) -> list[str]:
+    """Every passage title this question's answering stages actually saw.
+
+    Read back out of the records rather than recomputed, so it is exactly what
+    the model was shown and stays correct across a resume even if retrieval
+    constants were to change between sessions.
+    """
+    seen: dict[str, None] = {}
+    for stage in ("extractor", prompts.EXTRACTOR_HOP2, "solo"):
+        for i in range(agents.MAX_SUB_QUESTIONS):
+            rec = idx.get((q["question_id"], stage, i))
+            if not rec:
+                continue
+            got = ((rec.get("consumer_input") or {}).get("retrieval") or {})
+            for t in got.get("titles") or ():
+                seen.setdefault(t, None)
+    return list(seen)
 
 
 def build_answer_records(
     questions: list[dict], idx: dict, run_id: str,
     question_manifest_sha256: str | None = None,
+    retriever=None,
 ) -> list[dict]:
     """One scored record per question, from the QA stage's outputs (SPEC §7)."""
     out = []
@@ -395,14 +547,23 @@ def build_answer_records(
             "evidence_f1": None,
             "evidence_em": None,
             "evidence_attribution": None,
+            "evidence_gold_retrieved": None,
         }
         if answer_stage != "solo":
             spans = []
             for i, _ in enumerate(sub_questions_for(q, idx)):
-                ext = idx.get((q["question_id"], "extractor", i))
-                payload = (ext.get("parsed") or ext.get("salvaged")) if ext else None
-                spans.extend((payload or {}).get("spans", []))
-            predicted_labels = evidence.predicted_evidence(spans, q["sentence_index"])
+                for stage in ("extractor", prompts.EXTRACTOR_HOP2):
+                    got, _src = spans_of(idx.get((q["question_id"], stage, i)))
+                    spans.extend(got)
+            # The index must cover every passage the Extractor SAW, not the
+            # dataset's original ten. A span copied from a retrieved passage
+            # outside that ten would otherwise be unattributable and silently
+            # excluded from the predicted set, flattering precision.
+            sentence_index = (
+                retriever.sentence_index(retrieved_titles_for(q, idx))
+                if retriever is not None else q.get("sentence_index", [])
+            )
+            predicted_labels = evidence.predicted_evidence(spans, sentence_index)
             gold_labels = evidence.gold_evidence(q["supporting_facts"])
             scores = evidence.prf(predicted_labels, gold_labels)
             evidence_fields = {
@@ -417,7 +578,14 @@ def build_answer_records(
                 ),
                 **{f"evidence_{key}": value for key, value in scores.items()},
                 "evidence_attribution": evidence.attribution_stats(
-                    spans, q["sentence_index"]
+                    spans, sentence_index
+                ),
+                # Gold that retrieval never surfaced is unreachable by any
+                # Extractor, so extraction quality and retrieval coverage must be
+                # separable in analysis.
+                "evidence_gold_retrieved": sorted(
+                    t for t in {g[0] for g in gold_labels}
+                    if t in {s["title"] for s in sentence_index}
                 ),
             }
         out.append({
@@ -442,6 +610,8 @@ def build_answer_records(
             ),
             "level": q.get("level"),
             "type": q.get("type"),
+            "retrieval_stratum": q.get("retrieval_stratum"),
+            "hidden_gold_titles": q.get("hidden_gold_titles"),
             **evidence_fields,
         })
     return out

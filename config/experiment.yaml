@@ -35,6 +35,29 @@ dataset:
   preflight_manifest_file_sha256: bc517df47316867c2c8532f568a8d006e976603e517d4edc475b9a84df58a8db
   preflight_manifest_sha256: 089a12904a68ff69217bf5bad30456a0643d55913cb6651a941a4abe65909bc9
 
+# SPEC §3 (revised). The distractor setting handed every stage both gold
+# paragraphs, which left decomposition no mechanism through which to help and is
+# why single_fp16 beat the four-agent pipeline by 9.2 EM. Passages are now
+# retrieved from a pooled open-domain corpus.
+#
+# corpus_configs ORDER IS LOAD-BEARING: `distractor` must be first. 402 titles
+# appear in both configs with different sentence splits, and supporting_facts
+# sent_id is defined against the distractor context. Reversing these silently
+# shifts gold sentence indices and corrupts every extraction-accuracy number.
+#
+# fullwiki contributes a real IR system's top-10 (hard lexical distractors, gold
+# missing for 39% of questions); distractor guarantees gold stays reachable.
+# Union: 72,094 passages, 100% gold-in-corpus.
+#
+# k and hop1 were swept on n=1500 before any GPU time: k in {5,8,10,12,16,20},
+# hop1 in {5,6,7,8}. Gain plateaus above k=8; 7/3 keeps the full hidden-bridge
+# gain (+0.160 all-gold) at roughly half the fully-named cost of a 5/5 split
+# (-0.095 vs -0.172).
+retrieval:
+  corpus_configs: [distractor, fullwiki]
+  k: 10
+  hop1: 7
+
 generation:
   # Scientific control, not an autotuning target. Preflight every configuration
   # at 32; a production OOM must fail the arm and the campaign, never halve it.

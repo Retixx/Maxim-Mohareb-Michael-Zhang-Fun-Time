@@ -30,7 +30,7 @@ from pathlib import Path
 import torch
 import yaml
 
-from . import agents, models, prompts
+from . import agents, models, prompts, retrieval
 from .pipeline import (
     build_answer_records,
     build_stage_calls,
@@ -70,6 +70,7 @@ def resolve_treatments(cfg: dict, run_id: str) -> dict:
                 f"run {run_id!r}: unknown stage {stage!r}; "
                 f"expected one of {prompts.ALL_ROLES}"
             )
+
         if isinstance(spec, str):
             model_id, precision = base, spec
         elif isinstance(spec, dict):
@@ -117,6 +118,19 @@ def resolve_treatments(cfg: dict, run_id: str) -> dict:
             "config_fingerprint": fingerprint,
             "config_fingerprint_payload": fingerprint_payload,
         }
+
+    # The Extractor's second retrieval pass is the SAME agent at the SAME
+    # precision, so its treatment is mirrored rather than configured. Letting a
+    # run set it independently would imply the two passes could be quantized
+    # apart, which is not what the ablation measures.
+    for mirror, source in prompts.STAGE_MIRRORS.items():
+        if mirror in cfg["runs"][run_id]:
+            raise SystemExit(
+                f"run {run_id!r}: stage {mirror!r} is not configurable; it mirrors "
+                f"{source!r} because it is the same agent making a second pass"
+            )
+        if source in out:
+            out[mirror] = dict(out[source])
     return out
 
 
@@ -1255,6 +1269,36 @@ def run(
     )
     warmup_questions = auxiliary_questions[:len(warmup_ids)]
     timing_questions = auxiliary_questions[len(warmup_ids):]
+
+    # SPEC §3 (revised): build the open-domain corpus before any model loads.
+    # Failing here costs seconds; failing after a 3B model is resident costs the
+    # GPU allocation. ~3.5 s to index 72k passages, CPU only.
+    retr_cfg = cfg.get("retrieval") or {}
+    print("building retrieval corpus...", flush=True)
+    corpus = retrieval.build_corpus(
+        name=ds_cfg.get("name") or "hotpotqa/hotpot_qa",
+        split=ds_cfg.get("split", "validation"),
+        revision=ds_cfg.get("revision"),
+        configs=tuple(retr_cfg.get("corpus_configs", ("distractor", "fullwiki"))),
+    )
+    retriever = retrieval.RetrievalContext(
+        corpus,
+        k=int(retr_cfg.get("k", retrieval.K)),
+        hop1=int(retr_cfg.get("hop1", retrieval.HOP1)),
+    )
+    print(f"  {len(corpus):,} passages, k={retriever.k}, "
+          f"hop1={retriever.hop1}, hop2={retriever.k - retriever.hop1}")
+    missing_gold = [
+        t for q in questions for t in (q["supporting_facts"] or {}).get("title", ())
+        if t not in retriever.index.title_to_index
+    ]
+    if missing_gold:
+        # Gold outside the corpus is unreachable by ANY arm, capping every result
+        # for a reason unrelated to the experiment.
+        raise AssertionError(
+            f"{len(missing_gold)} gold passages absent from the corpus; "
+            f"examples: {sorted(set(missing_gold))[:3]}"
+        )
     if manifest_ids is not None and [q["question_id"] for q in questions] != manifest_ids:
         raise AssertionError("loaded questions do not exactly match frozen manifest order")
     final_eval_question_ids_sha256 = dataset_meta["question_ids_sha256"]
@@ -1372,6 +1416,8 @@ def run(
         **immutable_meta,
         "model_id": model_id,
         "dataset": dataset_meta,
+        # Retrieval is now an experimental variable, so its setup is provenance.
+        "retrieval": retriever.fingerprint(),
         "cohort_kind": cohort_kind,
         "final_eval_question_ids_sha256": final_eval_question_ids_sha256,
         "timing_manifest_path": (
@@ -1423,7 +1469,7 @@ def run(
     loaded: tuple | None = None
     # Walk only the stages this run defines, in canonical pipeline order. A
     # single-call run (SPEC §4a) defines one stage, not four.
-    stages = [r for r in prompts.ALL_ROLES if r in treatments]
+    stages = [r for r in prompts.PIPELINE_STAGES if r in treatments]
     warmup_idx = {}
     preflight_manifest_sha256 = question_ids_sha256(
         [q["question_id"] for q in warmup_questions]
@@ -1435,7 +1481,7 @@ def run(
             precision, stage_model_id = treatment["precision"], treatment["model_id"]
             revision = treatment["model_revision"]
             tokenizer_revision = treatment["tokenizer_revision"]
-            calls = build_stage_calls(stage, questions, idx)
+            calls = build_stage_calls(stage, questions, idx, retriever=retriever)
             _validate_existing_stage_calls(
                 existing, stage, calls, batch_size,
                 run_id=run_id, treatment=treatment,
@@ -1548,7 +1594,7 @@ def run(
             census = models.param_census(model)
             if use_manifest:
                 warmup_calls = build_stage_calls(
-                    stage, warmup_questions, warmup_idx
+                    stage, warmup_questions, warmup_idx, retriever=retriever
                 )
                 _preflight_stage(
                     model, tok, stage, warmup_calls, precision, run_id,
@@ -1639,6 +1685,7 @@ def run(
             answers = build_answer_records(
                 questions, idx, run_id,
                 question_manifest_sha256=active_question_manifest_sha256,
+                retriever=retriever,
             )
             for answer in answers:
                 answer.update({
