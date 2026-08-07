@@ -1,0 +1,127 @@
+{
+ "model": "Qwen/Qwen2.5-1.5B-Instruct",
+ "precision": "4bit",
+ "n": 100,
+ "strata": {
+  "hidden_bridge": 70,
+  "fully_named": 30
+ },
+ "seed": 20260807,
+ "metrics": {
+  "f1_hidden_bridge": {
+   "multi": 0.08122448979591836,
+   "single": 0.35524324881467734,
+   "delta_pp": -27.4018759018759
+  },
+  "f1_fully_named": {
+   "multi": 0.3777777777777779,
+   "single": 0.6884126984126984,
+   "delta_pp": -31.06349206349205
+  },
+  "f1_ALL": {
+   "multi": 0.1701904761904762,
+   "single": 0.4551940836940836,
+   "delta_pp": -28.50036075036074
+  },
+  "em_hidden_bridge": {
+   "multi": 0.04285714285714286,
+   "single": 0.2,
+   "delta_pp": -15.714285714285714
+  },
+  "em_fully_named": {
+   "multi": 0.26666666666666666,
+   "single": 0.6,
+   "delta_pp": -33.33333333333333
+  },
+  "em_ALL": {
+   "multi": 0.11,
+   "single": 0.32,
+   "delta_pp": -21.000000000000004
+  }
+ },
+ "calls": {
+  "multi": 2300,
+  "single": 100
+ },
+ "wall_s": {
+  "multi": 1658.3778055000002,
+  "single": 471.5248806000018
+ },
+ "samples": {
+  "malformed_json": [
+   {
+    "stage": "planner",
+    "output_tokens": 37,
+    "raw": "{\"analysis\": \"Paradise Creek is a tributary of the Mississippi River.\", \"sub_questions\": [\"What is the name of the river that Paradise Creek flows into?\"}]"
+   },
+   {
+    "stage": "planner",
+    "output_tokens": 51,
+    "raw": "{\"analysis\": \"Compare the number of seasons each coach has led their teams.\", \"sub_questions\": [\"How long has Tim Cluess been the head coach of his team?\", \"How long has Steve Prohm been the head coach of his team?\"}]"
+   },
+   {
+    "stage": "planner",
+    "output_tokens": 56,
+    "raw": "{\"analysis\": \"Find the director of the movie 'Supah Ninjas', then determine who directed it based on the information provided.\", \"sub_questions\": [\"What is the name of the movie featuring the character 'Supah Ninjas'?\",\"Who directed that specific movie?\"}]"
+   }
+  ],
+  "truncated": [
+   {
+    "stage": "extractor",
+    "output_tokens": 128,
+    "raw": "{\"spans\": [\"Tara Strong (born Tara Lyn Charendoff; February 12, 1973) is a Canadian\u2013American actress who has done voice work for numerous animations and video games and performed in various live-action productions.\", \"Many of her major voice roles include animated series such as 'Rugrats', 'The Powerpuff Girls', 'The Fairly OddParents', 'Drawn Together', 'Teen Titans' and the spin-off series 'Teen Titans Go!', and '', as well as video games such as 'Mortal Kombat X', 'Final Fantasy X-2', and the ''"
+   },
+   {
+    "stage": "extractor",
+    "output_tokens": 128,
+    "raw": "{\"spans\": [\"Robert Tinkler: Robert Tinkler is a Canadian actor from Winnipeg, Canada who is best known for his voice-over work in cartoons such as '', 'The Nut Job' and Gingka Hagane, the main protagonist in 'Beyblade Metal Fusion'. Aged 22 at the time, Tinkler's first major role was his voice role as Crimson Rubeus in the anime series 'Sailor Moon' English dub, and he also gained further attention for voicing Delete in the children's animated series 'Cyberchase', as well as Brooklyn Masefield in 'B"
+   },
+   {
+    "stage": "extractor",
+    "output_tokens": 128,
+    "raw": "{\"spans\": [\"Cory Doran: Cory Doran (born February 7, 1982) is a Canadian voice actor and director who is known as the voice of Jimmy, the star of the animated show, \"Jimmy Two-Shoes\". He also voices the character Mike in the series \"Total Drama\". He took over for Lou Attia as the voice of Fungus in the second season of the Cartoon Network/YTV animated television series, Numb Chucks. He also provided the voice of Bummer in Cartoon Network/Teletoon series \"Stoked\" and Dabio in the \"PBS"
+   }
+  ],
+  "schema_mismatch": [
+   {
+    "stage": "extractor",
+    "output_tokens": 1,
+    "raw": "{}"
+   },
+   {
+    "stage": "qa",
+    "output_tokens": 32,
+    "raw": "{\"analysis\": \"The evidence does not contain the full name of the writer.\", \"answer\": \"\", \"success\": \"no\", \"rating\": 2}"
+   },
+   {
+    "stage": "plan_summary",
+    "output_tokens": 17,
+    "raw": "{\"output\": \"Unsuccessful\", \"answer\": \"\", \"score\": 2}"
+   }
+  ]
+ },
+ "parse": {
+  "planner|ok": 96,
+  "planner|malformed_json": 4,
+  "step_definer|ok": 100,
+  "extractor|truncated": 9,
+  "extractor|ok": 954,
+  "extractor|malformed_json": 36,
+  "extractor|schema_mismatch": 1,
+  "qa|ok": 98,
+  "qa|schema_mismatch": 1,
+  "qa|truncated": 1,
+  "step_definer_step2|ok": 64,
+  "extractor_step2|truncated": 8,
+  "extractor_step2|ok": 619,
+  "extractor_step2|malformed_json": 13,
+  "qa_step2|ok": 64,
+  "step_definer_step3|ok": 11,
+  "extractor_step3|truncated": 3,
+  "extractor_step3|ok": 104,
+  "extractor_step3|malformed_json": 3,
+  "qa_step3|ok": 11,
+  "plan_summary|ok": 98,
+  "plan_summary|schema_mismatch": 2
+ }
+}
