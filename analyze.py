@@ -5,13 +5,14 @@ The script deliberately keeps design decisions executable:
 
 * F1 is primary and EM is co-reported.
 * Answer comparisons are paired on exactly the same question IDs.
-* The four 3B-8bit versus 1.5B-FP16 role contrasts share one 10,000-draw
+* The four 8B-8bit versus 4B-FP16 role contrasts share one 10,000-draw
   question bootstrap and use Holm family-wise correction.
-* 3B-4bit is a separate secondary family.
-* 0.5B remains a lower-limit arm and enters the exploratory selector only for
-  roles whose question-clustered strict-protocol lower bound clears its gate.
+* 8B-4bit is a separate secondary family.
+* 1.7B and 0.6B are lower-limit arms; 0.6B enters the exploratory selector
+  only for roles whose question-clustered strict-protocol lower bound clears
+  its gate. 14B is the upward capacity arm.
 * Call-level rates are clustered by question; timing uses batch records only.
-* The exploratory allocation selector declares exactly 5^4 assignments and
+* The exploratory allocation selector declares exactly 7^4 assignments and
   charges every distinct resident configuration once.
 
 Typical use after the static runs finish::
@@ -70,33 +71,42 @@ STATIC_RUN_IDS = {
     BASELINE_RUN,
     SOLO_RUN,
     *(f"{prefix}_{tier}" for prefix in ("planner", "stepdef", "extractor", "qa")
-      for tier in ("8bit", "4bit", "small", "tiny")),
+      for tier in ("8bit", "4bit", "mid", "small", "tiny", "large")),
     "ma_uniform_8bit",
     "ma_uniform_4bit",
+    "ma_uniform_mid",
     "ma_uniform_small",
     "ma_uniform_tiny",
+    "ma_uniform_large",
 }
 
 SELECTOR_CONFIGS = (
-    "base_fp16", "base_8bit", "base_4bit", "small_fp16", "tiny_fp16"
+    "large_fp16", "base_fp16", "base_8bit", "base_4bit",
+    "mid_fp16", "small_fp16", "tiny_fp16",
 )
 SELECTOR_RUN_SUFFIX = {
+    "large_fp16": "large",
     "base_8bit": "8bit",
     "base_4bit": "4bit",
+    "mid_fp16": "mid",
     "small_fp16": "small",
     "tiny_fp16": "tiny",
 }
 UNIFORM_RUN = {
+    "large_fp16": "ma_uniform_large",
     "base_fp16": BASELINE_RUN,
     "base_8bit": "ma_uniform_8bit",
     "base_4bit": "ma_uniform_4bit",
+    "mid_fp16": "ma_uniform_mid",
     "small_fp16": "ma_uniform_small",
     "tiny_fp16": "ma_uniform_tiny",
 }
 SELECTOR_TREATMENT = {
+    "large_fp16": {"model": "large", "precision": "fp16"},
     "base_fp16": "fp16",
     "base_8bit": "8bit",
     "base_4bit": "4bit",
+    "mid_fp16": {"model": "mid", "precision": "fp16"},
     "small_fp16": {"model": "small", "precision": "fp16"},
     "tiny_fp16": {"model": "tiny", "precision": "fp16"},
 }
@@ -1740,7 +1750,7 @@ def analyze_selection_churn(
         return {}
     main: dict[str, Any] = {}
     appendix: dict[str, Any] = {}
-    suffixes = ("8bit", "4bit", "small", "tiny")
+    suffixes = ("8bit", "4bit", "mid", "small", "tiny", "large")
     comparison_index = 0
     for suffix in suffixes:
         target_scope = appendix if suffix == "tiny" else main
@@ -2438,7 +2448,7 @@ def tiny_role_eligibility(
     n_resamples: int,
     seed: int,
 ) -> dict[str, Any]:
-    """Pre-registered 0.5B failsafe, pooled by conceptual role/question."""
+    """Pre-registered 0.6B failsafe, pooled by conceptual role/question."""
     if not 0 <= threshold <= 1:
         raise AnalysisError("tiny eligibility threshold must be in [0, 1]")
     decisions: dict[str, Any] = {}
@@ -2922,7 +2932,7 @@ def _markdown(report: dict[str, Any]) -> str:
     accuracy = report.get("per_run_accuracy", {})
     for scope, title in (
         ("main", "Per-run accuracy"),
-        ("tiny_floor_appendix", "Appendix: 0.5B lower-limit accuracy"),
+        ("tiny_floor_appendix", "Appendix: 0.6B lower-limit accuracy"),
     ):
         summaries = accuracy.get(scope, {})
         if not summaries:
@@ -3057,7 +3067,7 @@ def _markdown(report: dict[str, Any]) -> str:
     if evidence.get("status") == "available":
         for scope, title in (
             ("main", "Evidence extraction"),
-            ("tiny_floor_appendix", "Appendix: 0.5B evidence extraction"),
+            ("tiny_floor_appendix", "Appendix: 0.6B evidence extraction"),
         ):
             summaries = evidence.get(scope, {})
             if not summaries:
@@ -3087,7 +3097,7 @@ def _markdown(report: dict[str, Any]) -> str:
     churn = report.get("selection_churn") or {}
     for scope, title in (
         ("main", "Selection churn"),
-        ("tiny_floor_appendix", "Appendix: 0.5B selection churn"),
+        ("tiny_floor_appendix", "Appendix: 0.6B selection churn"),
     ):
         summaries = churn.get(scope, {})
         if not summaries:
@@ -3109,7 +3119,7 @@ def _markdown(report: dict[str, Any]) -> str:
     counts = report.get("call_and_token_counts") or {}
     for scope, title in (
         ("main", "Call and token volume"),
-        ("tiny_floor_appendix", "Appendix: 0.5B call and token volume"),
+        ("tiny_floor_appendix", "Appendix: 0.6B call and token volume"),
     ):
         summaries = counts.get(scope, {})
         if not summaries:

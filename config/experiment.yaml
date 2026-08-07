@@ -1,18 +1,32 @@
 # Authoritative configuration for the one-shot A100 experiment.
 # See SPEC.md. Every accuracy arm uses the frozen 1,500-question manifest once.
+#
+# Model family: Qwen3 (April 2025). Unified base weights with thinking/
+# non-thinking mode; no separate -Instruct variant. All generation uses
+# non-thinking mode (enable_thinking=False) for deterministic structured output.
 
-model_id: Qwen/Qwen2.5-3B-Instruct
+model_id: Qwen/Qwen3-8B
 
 models:
-  small: Qwen/Qwen2.5-1.5B-Instruct
-  tiny: Qwen/Qwen2.5-0.5B-Instruct
+  large: Qwen/Qwen3-14B
+  mid: Qwen/Qwen3-4B
+  small: Qwen/Qwen3-1.7B
+  tiny: Qwen/Qwen3-0.6B
 
 # Resolve model and tokenizer files at these immutable Hugging Face revisions.
 # The runner must record the resolved revision in every run metadata file.
+# TODO: pin exact commit SHAs before campaign launch.
 model_revisions:
-  Qwen/Qwen2.5-3B-Instruct: aa8e72537993ba99e69dfaafa59ed015b17504d1
-  Qwen/Qwen2.5-1.5B-Instruct: 989aa7980e4cf806f80c7fef2b1adb7bc71aa306
-  Qwen/Qwen2.5-0.5B-Instruct: 7ae557604adf67be50417f59c2c2f167def9a775
+  Qwen/Qwen3-14B: TBD
+  Qwen/Qwen3-8B: TBD
+  Qwen/Qwen3-4B: TBD
+  Qwen/Qwen3-1.7B: TBD
+  Qwen/Qwen3-0.6B: TBD
+
+# Qwen3 non-thinking mode. The runner must pass enable_thinking=False (or the
+# equivalent chat-template flag) to every generation call. Thinking tokens would
+# consume the frozen token ceilings and confound the capacity-allocation signal.
+thinking_mode: false
 
 dataset:
   name: hotpotqa/hotpot_qa
@@ -39,9 +53,8 @@ dataset:
   preflight_manifest_sha256: 089a12904a68ff69217bf5bad30456a0643d55913cb6651a941a4abe65909bc9
 
 # SPEC §3 (revised). The distractor setting handed every stage both gold
-# paragraphs, which left decomposition no mechanism through which to help and is
-# why single_fp16 beat the four-agent pipeline by 9.2 EM. Passages are now
-# retrieved from a pooled open-domain corpus.
+# paragraphs, which left decomposition no mechanism through which to help.
+# Passages are now retrieved from a pooled open-domain corpus.
 #
 # corpus_configs ORDER IS LOAD-BEARING: `distractor` must be first. 402 titles
 # appear in both configs with different sentence splits, and supporting_facts
@@ -92,11 +105,14 @@ analysis:
   co_report_metrics: [em]
   noninferiority_margin_f1_points: 1.0
   paired_bootstrap_replicates: 10000
-  primary_family: role_8bit_vs_small_fp16
+  # Primary family: 8B 8-bit (~8.5 GiB) vs 4B FP16 (~8 GiB), near-memory-matched.
+  primary_family: role_8bit_vs_mid_fp16
   multiplicity_correction: holm
   secondary_families:
     - role_4bit
-    - tiny_floor
+    - role_small
+    - role_tiny_floor
+    - role_large
     - mechanism
 
 memory_accounting:
@@ -110,12 +126,16 @@ memory_accounting:
     - stages.*.model_footprint_mib
     - stages.*.parameter_mib
     - stages.*.buffer_mib
+  # Estimated from parameter counts. Must be re-measured on the A100 before the
+  # campaign and updated here. Qwen3 actual footprints may differ from estimates.
   measured_reference_mib:
-    base_3b_fp16: 5886.0
-    base_3b_8bit: 3240.0
-    base_3b_4bit: 1917.0
-    small_1_5b_fp16: 2944.4
-    tiny_0_5b_fp16: 942.3
+    large_14b_fp16: 28000.0
+    base_8b_fp16: 16000.0
+    base_8b_8bit: 8500.0
+    base_8b_4bit: 5000.0
+    mid_4b_fp16: 8000.0
+    small_1_7b_fp16: 3400.0
+    tiny_0_6b_fp16: 1200.0
 
 pilot:
   required_before_final_campaign: true
@@ -160,13 +180,23 @@ timing:
     - stepdef_4bit
     - extractor_4bit
     - qa_4bit
+    - planner_mid
+    - stepdef_mid
+    - extractor_mid
+    - qa_mid
     - planner_small
     - stepdef_small
     - extractor_small
     - qa_small
+    - planner_large
+    - stepdef_large
+    - extractor_large
+    - qa_large
     - ma_uniform_8bit
     - ma_uniform_4bit
+    - ma_uniform_mid
     - ma_uniform_small
+    - ma_uniform_large
     - single_fp16
   post_selection_run_id: ma_optimized_exploratory
   excluded_runs:
@@ -178,12 +208,11 @@ timing:
   model_load_time: co_report_separately
   edge_latency_claim: false
 
-# Post-ablation exploratory selector. It is not the Q-vs-S near-memory-match.
-# It declares 5^4=625 complete allocations and charges each distinct resident
-# configuration once. A role may use 0.5B only when its one-role ablation clears
-# the frozen strict-protocol lower-bound gate. The selector may
-# return an existing uniform/reference run; otherwise it materializes one frozen
-# `ma_optimized_exploratory` run in the committed artifact below.
+# Post-ablation exploratory selector. It declares 7^4=2401 complete allocations
+# and charges each distinct resident configuration once. A role may use 0.6B
+# only when its one-role ablation clears the frozen strict-protocol lower-bound
+# gate. The selector may return an existing uniform/reference run; otherwise it
+# materializes one frozen `ma_optimized_exploratory` run.
 allocation_selector:
   enabled: true
   status: pending_ablation_results
@@ -191,22 +220,20 @@ allocation_selector:
   noninferiority_margin_f1_points: 1.0
   roles: [planner, step_definer, extractor, qa]
   candidates:
+    large_fp16: {model: large, precision: fp16}
     base_fp16: {model: base, precision: fp16}
     base_8bit: {model: base, precision: 8bit}
     base_4bit: {model: base, precision: 4bit}
+    mid_fp16: {model: mid, precision: fp16}
     small_fp16: {model: small, precision: fp16}
     tiny_fp16: {model: tiny, precision: fp16}
-  candidate_allocation_count: 625
+  candidate_allocation_count: 2401
   tiny_eligibility_gate:
     source: corresponding_one_role_tiny_ablation
     metric: strict_protocol_success
     resampling_unit: question
     question_clustered_95pct_lower_bound_min: 0.90
     ineligible_action: remove_tiny_for_that_role_only
-    # Passing this only admits the role to enumeration. Every complete
-    # allocation must separately clear the paired-F1 noninferiority bound below,
-    # preventing a well-formatted but functionally useless tiny role from being
-    # selected.
   objective: minimize_deduplicated_concurrent_model_footprint_mib
   constraint:
     metric: f1
@@ -222,19 +249,18 @@ allocation_selector:
     executable_config: analysis/ma_optimized_exploratory.experiment.yaml
   reuse_existing_run_when_identical: true
 
-# Static matrix: 22 run IDs. The original 21 arms are retained, including all
-# five 0.5B floor arms, and single_fp16 is added. The selector can add at most
-# one distinct execution, for a campaign maximum of 23. If it selects an
-# existing static allocation, the maximum actually executed remains 22.
+# Static matrix: 32 run IDs. The selector can add at most one distinct
+# execution, for a campaign maximum of 33. If it selects an existing static
+# allocation, the maximum actually executed remains 32.
 runs:
-  # Reference: uniform four-role multi-agent system, 3B FP16.
+  # Reference: uniform four-role 8B FP16.
   baseline:
     planner: fp16
     step_definer: fp16
     extractor: fp16
     qa: fp16
 
-  # Primary near-memory-matched quantization side: one 3B 8-bit role.
+  # Primary near-memory-matched quantization side: one 8B 8-bit role.
   planner_8bit:
     planner: 8bit
     step_definer: fp16
@@ -256,8 +282,8 @@ runs:
     extractor: fp16
     qa: 8bit
 
-  # Separate aggressive-quantization tier; not interpreted as a clean 8-to-4
-  # bit-width dose response because bitsandbytes uses different algorithms.
+  # Aggressive-quantization tier; not interpreted as a clean 8-to-4 bit-width
+  # dose response because bitsandbytes uses different algorithms.
   planner_4bit:
     planner: 4bit
     step_definer: fp16
@@ -279,7 +305,30 @@ runs:
     extractor: fp16
     qa: 4bit
 
-  # Primary near-memory-matched size side: one 1.5B FP16 role.
+  # Primary near-memory-matched size side: one 4B FP16 role.
+  # 4B FP16 (~8 GiB) is near-memory-matched to 8B 8-bit (~8.5 GiB).
+  planner_mid:
+    planner: {model: mid, precision: fp16}
+    step_definer: fp16
+    extractor: fp16
+    qa: fp16
+  stepdef_mid:
+    planner: fp16
+    step_definer: {model: mid, precision: fp16}
+    extractor: fp16
+    qa: fp16
+  extractor_mid:
+    planner: fp16
+    step_definer: fp16
+    extractor: {model: mid, precision: fp16}
+    qa: fp16
+  qa_mid:
+    planner: fp16
+    step_definer: fp16
+    extractor: fp16
+    qa: {model: mid, precision: fp16}
+
+  # Secondary size tier: one 1.7B FP16 role.
   planner_small:
     planner: {model: small, precision: fp16}
     step_definer: fp16
@@ -301,27 +350,10 @@ runs:
     extractor: fp16
     qa: {model: small, precision: fp16}
 
-  # Prespecified uniform frontier controls.
-  ma_uniform_8bit:
-    planner: 8bit
-    step_definer: 8bit
-    extractor: 8bit
-    qa: 8bit
-  ma_uniform_4bit:
-    planner: 4bit
-    step_definer: 4bit
-    extractor: 4bit
-    qa: 4bit
-  ma_uniform_small:
-    planner: {model: small, precision: fp16}
-    step_definer: {model: small, precision: fp16}
-    extractor: {model: small, precision: fp16}
-    qa: {model: small, precision: fp16}
-
-  # Appendix-first 0.5B compliance/capacity floor. These five runs establish
-  # where functional role behavior breaks down. They are outside the primary
-  # hypothesis family, but a role can enter the exploratory selector when its
-  # question-clustered strict-protocol lower confidence bound clears 0.90.
+  # 0.6B compliance/capacity floor. These five runs establish where functional
+  # role behavior breaks down. They are outside the primary hypothesis family,
+  # but a role can enter the exploratory selector when its question-clustered
+  # strict-protocol lower confidence bound clears 0.90.
   planner_tiny:
     planner: {model: tiny, precision: fp16}
     step_definer: fp16
@@ -342,13 +374,63 @@ runs:
     step_definer: fp16
     extractor: fp16
     qa: {model: tiny, precision: fp16}
+
+  # Upward capacity ablation: one 14B FP16 role. Measures the marginal value
+  # of additional capacity per role.
+  planner_large:
+    planner: {model: large, precision: fp16}
+    step_definer: fp16
+    extractor: fp16
+    qa: fp16
+  stepdef_large:
+    planner: fp16
+    step_definer: {model: large, precision: fp16}
+    extractor: fp16
+    qa: fp16
+  extractor_large:
+    planner: fp16
+    step_definer: fp16
+    extractor: {model: large, precision: fp16}
+    qa: fp16
+  qa_large:
+    planner: fp16
+    step_definer: fp16
+    extractor: fp16
+    qa: {model: large, precision: fp16}
+
+  # Uniform controls.
+  ma_uniform_8bit:
+    planner: 8bit
+    step_definer: 8bit
+    extractor: 8bit
+    qa: 8bit
+  ma_uniform_4bit:
+    planner: 4bit
+    step_definer: 4bit
+    extractor: 4bit
+    qa: 4bit
+  ma_uniform_mid:
+    planner: {model: mid, precision: fp16}
+    step_definer: {model: mid, precision: fp16}
+    extractor: {model: mid, precision: fp16}
+    qa: {model: mid, precision: fp16}
+  ma_uniform_small:
+    planner: {model: small, precision: fp16}
+    step_definer: {model: small, precision: fp16}
+    extractor: {model: small, precision: fp16}
+    qa: {model: small, precision: fp16}
   ma_uniform_tiny:
     planner: {model: tiny, precision: fp16}
     step_definer: {model: tiny, precision: fp16}
     extractor: {model: tiny, precision: fp16}
     qa: {model: tiny, precision: fp16}
+  ma_uniform_large:
+    planner: {model: large, precision: fp16}
+    step_definer: {model: large, precision: fp16}
+    extractor: {model: large, precision: fp16}
+    qa: {model: large, precision: fp16}
 
   # Architecture control: one original-question BM25 top-10 retrieval followed
-  # by one direct-answer call, using the same 3B FP16 model and answer budget.
+  # by one direct-answer call, using the same 8B FP16 model and answer budget.
   single_fp16:
     solo: fp16

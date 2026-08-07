@@ -437,12 +437,12 @@ class ExecutionIntegrityTests(unittest.TestCase):
 
     def test_mixed_model_slug_and_frozen_prompt_hashes(self):
         treatments = {
-            "planner": {"model_id": "Qwen/Qwen2.5-3B-Instruct"},
-            "qa": {"model_id": "Qwen/Qwen2.5-1.5B-Instruct"},
+            "planner": {"model_id": "Qwen/Qwen3-8B"},
+            "qa": {"model_id": "Qwen/Qwen3-4B"},
         }
         self.assertIn(
-            "qwen2.5-3b+qwen2.5-1.5b",
-            result_slug("x", 10, 1234, "Qwen/Qwen2.5-3B-Instruct", treatments),
+            "qwen3-8b+qwen3-4b",
+            result_slug("x", 10, 1234, "Qwen/Qwen3-8B", treatments),
         )
         self.assertEqual(prompts.prompt_template_hashes() | {}, {
             "planner": "c91c48626dd0b17c8ba3d29ce30ea216762404b24da3f88ddd689c71056bbc03",

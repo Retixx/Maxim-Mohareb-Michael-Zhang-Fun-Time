@@ -1,4 +1,4 @@
-# Experiment contract: role-aware SLM allocation in multi-agent RAG
+# Experiment contract: role-aware capacity allocation in multi-agent RAG
 
 This is the authoritative scientific contract for the final campaign.
 config/experiment.yaml is its machine-readable counterpart. If code, analysis,
@@ -44,8 +44,8 @@ ways:
   Five is an experiment limit, not a claim about MA-RAG.
 - Reference MA-RAG evaluates dense inner-product retrieval with a FAISS index.
   This campaign uses deterministic sparse BM25 so retrieval can be reproduced
-  cheaply on a controlled corpus. Results compare SLM agent allocations under
-  this retriever and do not establish parity with dense retrieval.
+  cheaply on a controlled corpus. Results compare agent capacity allocations
+  under this retriever and do not establish parity with dense retrieval.
 - Reference MA-RAG searches a much larger knowledge base. This campaign searches
   72,094 HotpotQA validation passages. It is a controlled retrieval experiment,
   not a Wikipedia-scale benchmark.
@@ -55,19 +55,21 @@ change the multi-agent, stateful, variable-depth reasoning topology.
 
 ## 2. Research questions
 
-At small-language-model scale, can role-specific model size and quantization
-reduce resident memory and accelerator work while retaining answer quality in a
-fully executed multi-agent RAG workflow?
+Across a 23× parameter range (0.6B to 14B, Qwen3 family), can role-specific
+model capacity and quantization reduce resident memory and accelerator work
+while retaining answer quality in a fully executed multi-agent RAG workflow?
 
 The prespecified questions are:
 
-1. Which conceptual roles are most sensitive to moving the 3B model to 8-bit?
-2. Which roles are most sensitive to swapping 3B FP16 for the 1.5B FP16 sibling?
+1. Which conceptual roles are most sensitive to moving the 8B model to 8-bit?
+2. Which roles are most sensitive to swapping 8B FP16 for the 4B FP16 sibling
+   (near-memory-matched to 8B 8-bit)?
 3. At a near memory match, do quantization and a smaller sibling impose different
    role-level costs?
-4. How do uniform multi-agent 3B FP16 and a competitive one-call 3B FP16
+4. Which roles benefit most from scaling up to 14B?
+5. How do uniform multi-agent 8B FP16 and a competitive one-call 8B FP16
    retrieval baseline compare overall and on hidden-bridge questions?
-5. Which guarded role allocation minimizes deduplicated resident model memory
+6. Which guarded role allocation minimizes deduplicated resident model memory
    while satisfying the frozen F1 constraint?
 
 The selected mixed allocation is in-sample and exploratory. It is a deployment
@@ -252,7 +254,7 @@ was not chosen from pilot/final answer F1.
 
 The one-call control, single_fp16:
 
-- uses one 3B FP16 generation;
+- uses one 8B FP16 generation;
 - queries the same BM25 corpus once with the original question;
 - reads the top 10 returned passages;
 - receives no decomposition, state loop, Extractor, or extra query; and
@@ -284,49 +286,63 @@ report accuracy and retrieval diagnostics overall and by both strata.
 
 ## 6. Models, treatments, and run matrix
 
-Immutable model revisions are:
+All models are from the Qwen3 family (April 2025). Qwen3 unifies base and
+instruct capabilities in a single set of weights with switchable thinking mode.
+All generation uses non-thinking mode (enable_thinking=False) to produce
+deterministic structured output without chain-of-thought token overhead.
 
-| Alias | Model | Revision |
-|---|---|---|
-| base | Qwen2.5-3B-Instruct | aa8e72537993ba99e69dfaafa59ed015b17504d1 |
-| small | Qwen2.5-1.5B-Instruct | 989aa7980e4cf806f80c7fef2b1adb7bc71aa306 |
-| tiny | Qwen2.5-0.5B-Instruct | 7ae557604adf67be50417f59c2c2f167def9a775 |
+Immutable model revisions (to be pinned before campaign launch):
 
-The static matrix contains 22 run IDs:
+| Alias | Model | Parameters | Revision |
+|---|---|---|---|
+| large | Qwen3-14B | 14B | TBD |
+| base | Qwen3-8B | 8B | TBD |
+| mid | Qwen3-4B | 4B | TBD |
+| small | Qwen3-1.7B | 1.7B | TBD |
+| tiny | Qwen3-0.6B | 0.6B | TBD |
+
+The five sizes span a 23× parameter range within one architecture and training
+recipe, isolating capacity from training-data or architecture confounds.
+
+The static matrix contains 32 run IDs:
 
 | Family | Count |
 |---|---:|
-| Uniform four-agent 3B FP16 reference | 1 |
-| One-role 3B 8-bit ablations | 4 |
-| One-role 3B 4-bit ablations | 4 |
-| One-role 1.5B FP16 ablations | 4 |
-| Uniform 8-bit, 4-bit, and 1.5B controls | 3 |
-| Four one-role 0.5B ablations and one uniform 0.5B run | 5 |
-| One-call 3B FP16 architecture control | 1 |
+| Uniform four-agent 8B FP16 reference | 1 |
+| One-role 8B 8-bit ablations | 4 |
+| One-role 8B 4-bit ablations | 4 |
+| One-role 4B FP16 ablations (near-memory-matched to 8-bit) | 4 |
+| One-role 1.7B FP16 ablations | 4 |
+| One-role 0.6B FP16 floor ablations | 4 |
+| One-role 14B FP16 upward ablations | 4 |
+| Uniform controls (8-bit, 4-bit, 4B, 1.7B, 0.6B, 14B) | 6 |
+| One-call 8B FP16 architecture control | 1 |
 
 All repeated Step Definer, Extractor, and QA stage labels mirror their
 conceptual role treatment. The plan-summary stage mirrors Step Definer.
 Repeated stages cannot be configured independently.
 
-The primary treatment family compares one-role 3B 8-bit ablations with the
-corresponding 1.5B FP16 ablations. The 4-bit family is mandatory secondary
-evidence. The 0.5B runs measure the lower capacity/compliance boundary and also
-feed a guarded exploratory selector.
+The primary treatment family compares one-role 8B 8-bit ablations with the
+corresponding 4B FP16 ablations. These are near-memory-matched: 8B 8-bit
+(~8.5 GiB) vs 4B FP16 (~8 GiB). The 4-bit family is mandatory secondary
+evidence. The 1.7B and 0.6B runs measure the lower capacity/compliance
+boundary and feed a guarded exploratory selector. The 14B runs measure the
+marginal value of additional capacity per role.
 
 ## 7. Exploratory role allocation
 
-The selector declares five candidates for each of four conceptual roles:
+The selector declares seven candidates for each of four conceptual roles:
 
-    {3B FP16, 3B 8-bit, 3B 4-bit, 1.5B FP16, 0.5B FP16}
+    {14B FP16, 8B FP16, 8B 8-bit, 8B 4-bit, 4B FP16, 1.7B FP16, 0.6B FP16}
 
-The full universe is 5^4 = 625 allocations. A role may use 0.5B only when its
+The full universe is 7^4 = 2,401 allocations. A role may use 0.6B only when its
 corresponding one-role tiny ablation has a question-clustered 95% lower bound of
 at least 0.90 for strict protocol success. Failure removes tiny only for that
 role.
 
 Eligible candidates must also satisfy the paired-bootstrap lower-bound
 noninferiority constraint: predicted F1 may be no more than 1.0 point below the
-uniform 3B FP16 reference. The selector minimizes deduplicated concurrent model
+uniform 8B FP16 reference. The selector minimizes deduplicated concurrent model
 footprint, then prefers higher predicted F1, fewer distinct configurations, and
 lexical allocation ID.
 
@@ -355,13 +371,15 @@ Exact Match is co-reported.
 For each role r:
 
     Q_loss_r = F1_baseline - F1_role_8bit
-    S_loss_r = F1_baseline - F1_role_small
-    axis_contrast_r = F1_role_8bit - F1_role_small
+    M_loss_r = F1_baseline - F1_role_mid
+    axis_contrast_r = F1_role_8bit - F1_role_mid
+    L_gain_r = F1_role_large - F1_baseline
 
 Use 10,000 paired question-level bootstrap replicates. Holm-adjust the four
 primary role contrasts. Report point estimates, paired 95% intervals, adjusted
-p-values, and direction. Keep 4-bit, evidence, parsing, retrieval, plan-depth,
-semantic-stop, and tiny-floor analyses secondary or exploratory. Never stratify
+p-values, and direction. Keep 4-bit, 1.7B, 0.6B floor, 14B upward, evidence,
+parsing, retrieval, plan-depth, and semantic-stop analyses secondary or
+exploratory. Never stratify
 a primary treatment comparison by that arm's own emitted or executed plan depth:
 depth is post-treatment. A baseline-defined depth label may be applied unchanged
 to every arm only as a prespecified secondary diagnostic.
@@ -377,15 +395,14 @@ overwrote. The prior experiment's terms are translated to this one: F1 primary
 rather than EM, 8-bit rather than 4-bit. **This is the most likely statistical
 objection to the paper.**
 
-Counting honestly: 4 roles on the quantization axis, 4 on the size axis, 4 axis
-contrasts, across F1 / EM / ev-F1 is up to 36 hypothesis tests. The v2 write-up
-reported "Extractor +3.20 [+0.53, +5.87], SIGNIFICANT" uncorrected; under
-Bonferroni at even 4 tests (α = 0.0125) that interval no longer excludes zero. A
-referee who checks will call the headline a multiple-comparisons artifact, and on
-that framing they would be right.
+Counting honestly: 4 roles on the quantization axis, 4 on the mid-size axis,
+4 on each of 3 additional size axes (small, tiny, large), 4 axis contrasts,
+across F1 / EM / ev-F1 — this is a large family of comparisons. A referee who
+checks will call uncorrected per-role findings a multiple-comparisons artifact,
+and on that framing they would be right.
 
 The fix is to designate one pre-registered primary test and demote the rest,
-rather than correcting 36 tests into oblivion:
+rather than correcting dozens of tests into oblivion:
 
 - **PRIMARY — confirmatory, one test, no correction needed.** The pooled contrast
   between format-heavy roles (Step Definer, Extractor) and knowledge-heavy roles
@@ -393,14 +410,15 @@ rather than correcting 36 tests into oblivion:
   a *single* number, and it is better powered than any per-role test because it
   pools two roles per side. Report on the §8 primary outcome (F1), with EM
   co-reported.
-- **SECONDARY — pre-registered, Holm-corrected.** The four role contrasts of §8.
-  Holm–Bonferroni is uniformly more powerful than Bonferroni and assumes no
-  independence — these tests share a baseline and are positively correlated, which
-  Holm tolerates and Šidák does not.
-- **DESCRIPTIVE — no significance claims at all.** Every per-role number, both
-  rankings, and the Spearman correlation between them. Report point estimates with
-  intervals and describe them as estimates. **Do not write "significant" next to a
-  per-role result.** "The Extractor is the only role whose interval excludes zero
+- **SECONDARY — pre-registered, Holm-corrected.** The four role contrasts of §8
+  (8B 8-bit vs 4B FP16). Holm–Bonferroni is uniformly more powerful than
+  Bonferroni and assumes no independence — these tests share a baseline and are
+  positively correlated, which Holm tolerates and Šidák does not.
+- **DESCRIPTIVE — no significance claims at all.** Every per-role number across
+  all size/quantization tiers, the upward 14B gains, the full ranking, and the
+  Spearman correlation between axes. Report point estimates with intervals and
+  describe them as estimates. **Do not write "significant" next to a per-role
+  result.** "The Extractor is the only role whose interval excludes zero
   uncorrected" is true, informative, and not a significance claim.
 
 **Consequence for how the paper is written.** Lead with the format-heavy vs
@@ -417,17 +435,20 @@ latter overstates the interval and would bury a real effect.
 
 ## 9. Memory and edge-efficiency contract
 
-Measured resident model footprints are:
+Estimated resident model footprints (must be re-measured on A100 before
+campaign launch):
 
-| Configuration | MiB |
+| Configuration | MiB (est.) |
 |---|---:|
-| 3B FP16 | 5,886.0 |
-| 3B 8-bit | 3,240.0 |
-| 1.5B FP16 | 2,944.4 |
-| 3B 4-bit | 1,917.0 |
-| 0.5B FP16 | 942.3 |
+| 14B FP16 | ~28,000 |
+| 8B FP16 | ~16,000 |
+| 8B 8-bit | ~8,500 |
+| 4B FP16 | ~8,000 |
+| 8B 4-bit | ~5,000 |
+| 1.7B FP16 | ~3,400 |
+| 0.6B FP16 | ~1,200 |
 
-The 3B 8-bit and 1.5B FP16 treatments are near-memory-matched, not equal.
+The 8B 8-bit and 4B FP16 treatments are near-memory-matched, not equal.
 
 The primary memory quantity is deduplicated concurrent model-footprint MiB:
 charge parameters plus buffers once for each distinct model/revision/precision
@@ -536,7 +557,7 @@ After GO:
 1. validate the immutable environment lock on every worker;
 2. preflight every active stage shape at batch 32 on excluded data;
 3. rerun the complete timing matrix under this architecture;
-4. execute all 22 static accuracy arms once;
+4. execute all 32 static accuracy arms once;
 5. freeze and commit selector artifacts;
 6. execute and time a distinct selected allocation if required; and
 7. run strict final analysis.
@@ -554,7 +575,7 @@ is reported.
 
 The primary systems metric is steady-state end-to-end service inverse
 throughput: seconds per excluded A100 timing question, relative to uniform
-multi-agent 3B FP16 at 1.00x. It includes deterministic retrieval, routing, and
+multi-agent 8B FP16 at 1.00x. It includes deterministic retrieval, routing, and
 state construction plus prompt construction/rendering, tokenization and H2D,
 generation, decoding, parsing/salvage, and protocol accounting. It excludes
 model loading and durable JSONL logging, which are recorded separately.
@@ -595,8 +616,9 @@ Do not claim:
 - exact equivalence to reference MA-RAG retrieval;
 - that reference MA-RAG has a five-step limit;
 - Wikipedia-scale or unseen-corpus retrieval quality;
-- pure parameter-count or pure bit-width causality;
-- exact memory equality between 8-bit and 1.5B;
+- pure parameter-count or pure bit-width causality (five sizes share one
+  architecture and training recipe, but they are not controlled for compute);
+- exact memory equality between 8-bit and 4B;
 - confirmatory superiority of the selected mixed allocation;
 - literal edge-device timing, energy, or thermals from A100 results;
 - probability calibration; or
