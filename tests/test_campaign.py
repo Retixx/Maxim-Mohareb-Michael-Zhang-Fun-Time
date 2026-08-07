@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import yaml
 
@@ -88,6 +89,7 @@ class CampaignPlanTests(unittest.TestCase):
                 "stage_role": prompts.STAGE_ROLE,
                 "prompt_bundle_version": prompts.PROMPT_BUNDLE_VERSION,
                 "prompt_template_sha256": prompts.prompt_template_hashes(),
+                "max_new_tokens": dict(prompts.MAX_NEW_TOKENS),
                 "retrieval": retrieval_identity,
                 "dataset_revision": config["dataset"]["revision"],
             }
@@ -134,6 +136,10 @@ class CampaignPlanTests(unittest.TestCase):
                 json.dumps(meta), encoding="utf-8"
             )
             self.assertEqual(completed_run_ids(config, kind="accuracy"), {"baseline"})
+            with mock.patch.dict(
+                prompts.MAX_NEW_TOKENS, {"extractor": 999}, clear=False
+            ):
+                self.assertEqual(completed_run_ids(config, kind="accuracy"), set())
             self.assertEqual(
                 completed_run_ids(
                     config,

@@ -44,6 +44,15 @@ class MemoryStore:
 
 
 class ExecutionIntegrityTests(unittest.TestCase):
+    def test_extractor_budget_restores_pre_merge_ceiling(self):
+        self.assertEqual(prompts.MAX_NEW_TOKENS["extractor"], 320)
+
+    def test_generation_budgets_are_json_stable(self):
+        self.assertEqual(
+            json.loads(json.dumps(prompts.MAX_NEW_TOKENS, sort_keys=True)),
+            prompts.MAX_NEW_TOKENS,
+        )
+
     def test_pinned_bitsandbytes_configs_match_the_quantization_contract(self):
         int8 = models._bnb_config("8bit").to_dict()
         self.assertTrue(int8["load_in_8bit"])

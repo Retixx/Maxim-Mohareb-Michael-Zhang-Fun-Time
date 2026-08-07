@@ -164,6 +164,7 @@ def completed_run_ids(
             or tuple(payload.get("pipeline_stages") or ())
             != tuple(prompts.PIPELINE_STAGES)
             or payload.get("stage_role") != prompts.STAGE_ROLE
+            or payload.get("max_new_tokens") != prompts.MAX_NEW_TOKENS
             or retrieval_meta.get("corpus_sha256")
             != retrieval_config.get("expected_corpus_sha256")
             or retrieval_meta.get("query_policy") != retrieval_config.get("query_policy")

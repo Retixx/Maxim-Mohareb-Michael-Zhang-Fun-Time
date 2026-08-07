@@ -91,6 +91,7 @@ def _load_pilot_run(
         or payload.get("stage_role") != prompts.STAGE_ROLE
         or payload.get("prompt_bundle_version") != prompts.PROMPT_BUNDLE_VERSION
         or payload.get("prompt_template_sha256") != prompts.prompt_template_hashes()
+        or payload.get("max_new_tokens") != prompts.MAX_NEW_TOKENS
         or payload.get("retrieval") != retrieval_meta
         or retrieval_meta.get("corpus_sha256")
         != retrieval_config.get("expected_corpus_sha256")

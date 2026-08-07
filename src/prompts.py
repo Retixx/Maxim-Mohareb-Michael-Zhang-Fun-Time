@@ -188,7 +188,7 @@ def prompt_for(stage: str) -> str:
 MAX_NEW_TOKENS = {
     "planner": 160,
     "step_definer": 160,
-    "extractor": 128,
+    "extractor": 320,
     "qa": 96,
     "plan_summary": 128,
     "solo": 48,

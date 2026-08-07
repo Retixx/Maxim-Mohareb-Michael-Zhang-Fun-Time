@@ -1753,6 +1753,7 @@ def run(
         "stage_role": prompts.STAGE_ROLE,
         "prompt_bundle_version": prompts.PROMPT_BUNDLE_VERSION,
         "prompt_template_sha256": prompts.prompt_template_hashes(),
+        "max_new_tokens": dict(prompts.MAX_NEW_TOKENS),
         "retrieval": fingerprint,
         "dataset_revision": ds_cfg.get("revision"),
     }

@@ -108,6 +108,7 @@ class PilotGateFixture:
             "stage_role": prompts.STAGE_ROLE,
             "prompt_bundle_version": prompts.PROMPT_BUNDLE_VERSION,
             "prompt_template_sha256": prompts.prompt_template_hashes(),
+            "max_new_tokens": dict(prompts.MAX_NEW_TOKENS),
             "retrieval": self._retrieval_identity(),
             "dataset_revision": self.config["dataset"]["revision"],
         }
@@ -304,6 +305,14 @@ class PilotGateTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "experiment fingerprint is stale"):
             gate.check_pilot(self.fixture.config_path)
+
+    def test_active_generation_budget_change_rejects_old_pilot(self) -> None:
+        self.fixture.write_runs(baseline_correct=True, single_correct=False)
+        with mock.patch.dict(
+            prompts.MAX_NEW_TOKENS, {"extractor": 999}, clear=False
+        ):
+            with self.assertRaisesRegex(RuntimeError, "experiment fingerprint is stale"):
+                gate.check_pilot(self.fixture.config_path)
 
     def test_scored_call_from_another_cohort_is_rejected(self) -> None:
         self.fixture.write_runs(baseline_correct=True, single_correct=False)
