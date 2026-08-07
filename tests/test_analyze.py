@@ -496,7 +496,7 @@ class AnalyzeTests(unittest.TestCase):
             "timing_meta": {
                 **batched.timing_meta,
                 "experiment_fingerprint": experiment_fingerprint,
-                "experiment_fingerprint_payload": {"schema": "open_corpus_marag_v2"},
+                "experiment_fingerprint_payload": {"schema": "open_corpus_marag_v3"},
             },
         })
         service = analyze_latency_batches(

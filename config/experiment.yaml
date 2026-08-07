@@ -52,9 +52,10 @@ dataset:
 # missing for 39% of questions); distractor guarantees gold stays reachable.
 # Union: 72,094 passages, 100% gold-in-corpus.
 #
-# Every QA step anchors on the original-question ranking. Later steps add a
-# grounded task query only after a prior QA answer is found verbatim in consumed
-# evidence; fusion preserves seven anchor slots and three unique task slots.
+# Step 1 (and any later ungrounded step) uses the original-question top-10.
+# Once a prior QA answer is found verbatim in consumed evidence, the resolved
+# Step Definer task plus grounded answers owns the next step's full top-10.
+# Exactly one retrieval query is issued per question-answering step.
 retrieval:
   corpus_configs: [distractor, fullwiki]
   expected_corpus_passages: 72094
@@ -62,10 +63,11 @@ retrieval:
   required_gold_title_coverage: 1.0
   required_gold_sentence_coverage: 1.0
   algorithm: sparse_bm25_lucene_idf_v1
-  query_policy: anchored_original_question_7_plus_grounded_task_3_v1
+  query_policy: original_question_first_then_full_grounded_task_v1
   k: 10
-  anchor_k: 7
-  task_k: 3
+  initial_query_source: original_question
+  grounded_followup_k: 10
+  grounded_followup_requires_evidence: true
 
 architecture:
   framework: ma-rag

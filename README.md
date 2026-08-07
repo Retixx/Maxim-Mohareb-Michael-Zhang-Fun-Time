@@ -19,7 +19,7 @@ The four conceptual agents are Planner, Step Definer, Extractor, and QA:
        |
        v
     Step Definer (repeated for each active plan step)
-       |-- question-answering -> anchored BM25 fusion -> Extractor/document -> QA
+       |-- question-answering -> one top-10 BM25 query -> Extractor/document -> QA
        |-- aggregate -----------------------------------------------> QA
        |
        +-- append QA answer/success/rating to state
@@ -28,9 +28,10 @@ The four conceptual agents are Planner, Step Definer, Extractor, and QA:
        v
     Step Definer plan summary -> scored short answer
 
-The first question-answering step retrieves the original-question top 10. Later
-steps with grounded state deterministically fuse seven original-question anchor
-results with three unique results from the resolved task plus grounded answers.
+The first question-answering step retrieves the original-question top 10. A later
+step with evidence-grounded state gives the resolved Step Definer task plus
+grounded answers the full top 10; an ungrounded later step falls back to the
+original question. Exactly one retrieval query is issued per QA step.
 Each returned document gets its own Extractor call; only normalized exact source
 sentences enter QA, and empty document blocks are omitted. Unsupported guesses
 remain logged but cannot poison later retrieval or aggregate evidence. Aggregate
@@ -100,11 +101,11 @@ The static matrix contains 22 runs:
 - a one-call 3B FP16 architecture control.
 
 The one-call control issues one original-question BM25 query and reads its top
-10 passages. The multi-agent system exposes at most 10 passages per
-question-answering step and may issue a second grounded task query after step 1;
-its frozen fusion quota is 7 anchor/3 task. The comparison reports passage
-exposure, component-query count, model calls, tokens, F1, EM, memory, and timing
-rather than pretending the two architectures have identical work budgets.
+10 passages. The multi-agent system issues one top-10 query per active QA step:
+the original question first, then full-budget resolved tasks only when grounded
+state exists. The comparison reports passage exposure, query count, model calls,
+tokens, F1, EM, memory, and timing; it is a system-level cost-benefit contrast,
+not a total-context-matched retrieval comparison.
 
 F1 is primary and Exact Match is co-reported. Results are also split into
 hidden_bridge and fully_named strata. The primary role comparison is 3B 8-bit

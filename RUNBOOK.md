@@ -13,9 +13,11 @@ Every final accuracy invocation must resolve to:
     batch=32
     corpus passages=72094
     retrieval k=10 per question-answering plan step
-    multi query policy=anchored_original_question_7_plus_grounded_task_3_v1
-    fusion quotas=7 original-question anchor + 3 grounded-task, total exposure 10
-    experiment schema=open_corpus_marag_v2
+    multi query policy=original_question_first_then_full_grounded_task_v1
+    initial query=original-question top 10
+    grounded follow-up=resolved task plus grounded answers, full top 10
+    exactly one retrieval query per question-answering step
+    experiment schema=open_corpus_marag_v3
     extractor generation ceiling=320
     max plan steps=5
     conceptual roles=planner, step_definer, extractor, qa
@@ -26,9 +28,9 @@ question-dependent. The value five is an edge-resource ceiling, not an expected
 depth and not a MA-RAG framework limit.
 
 Reject output from old seeds, old sample sizes, old batch sizes, old run names,
-or any artifact whose experiment schema is not `open_corpus_marag_v2`, whose
-retrieval policy is not the frozen anchored 7/3 fusion, or whose prompt hashes
-  predate the repaired Extractor/QA contracts. Do not pass production overrides for n, seed,
+or any artifact whose experiment schema is not `open_corpus_marag_v3`, whose
+retrieval policy is not the frozen original-first/full-grounded-follow-up policy,
+or whose prompt hashes predate the repaired Extractor/QA contracts. Do not pass production overrides for n, seed,
 batch size, models, revisions, corpus, k, or plan ceiling.
 
 ## 2. Prepare a clean worker

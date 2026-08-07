@@ -1696,7 +1696,6 @@ def run(
     retriever = retrieval.RetrievalContext(
         corpus,
         k=int(retr_cfg.get("k", retrieval.K)),
-        anchor_k=int(retr_cfg.get("anchor_k", retrieval.ANCHOR_K)),
     )
     expected_corpus_passages = int(retr_cfg.get("expected_corpus_passages", -1))
     if len(corpus) != expected_corpus_passages:
@@ -1715,15 +1714,23 @@ def run(
         )
     if fingerprint["query_policy"] != retr_cfg.get("query_policy"):
         raise AssertionError("configured retrieval query policy does not match implementation")
-    if fingerprint["anchor_k"] != int(retr_cfg.get("anchor_k", -1)):
-        raise AssertionError("configured retrieval anchor quota does not match implementation")
-    if fingerprint["task_k"] != int(retr_cfg.get("task_k", -1)):
-        raise AssertionError("configured retrieval task quota does not match implementation")
-    if fingerprint["anchor_k"] + fingerprint["task_k"] != fingerprint["k_per_step"]:
-        raise AssertionError("retrieval fusion quotas must equal the passage budget")
+    if fingerprint["initial_query_source"] != retr_cfg.get("initial_query_source"):
+        raise AssertionError("configured initial retrieval source does not match implementation")
+    if fingerprint["grounded_followup_k"] != int(
+        retr_cfg.get("grounded_followup_k", -1)
+    ):
+        raise AssertionError("configured grounded follow-up k does not match implementation")
+    if fingerprint["grounded_followup_k"] != fingerprint["k_per_step"]:
+        raise AssertionError("grounded follow-up must own the full per-step passage budget")
+    if (
+        fingerprint["grounded_followup_requires_evidence"] is not True
+        or retr_cfg.get("grounded_followup_requires_evidence") is not True
+    ):
+        raise AssertionError("configured grounded-state guard does not match implementation")
     print(
         f"  {len(corpus):,} passages, k={retriever.k} per question-answering step, "
-        f"anchor/task={retriever.anchor_k}/{retriever.task_k}, "
+        f"initial={fingerprint['initial_query_source']}, "
+        f"grounded-followup-k={fingerprint['grounded_followup_k']}, "
         f"policy={fingerprint['query_policy']}"
     )
     coverage_questions = [*questions, *auxiliary_questions]

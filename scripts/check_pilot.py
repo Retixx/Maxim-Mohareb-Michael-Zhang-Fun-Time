@@ -102,13 +102,14 @@ def _load_pilot_run(
         or retrieval_meta.get("query_policy") != retrieval_config.get("query_policy")
         or int(retrieval_meta.get("k_per_step", -1))
         != int(retrieval_config.get("k", -2))
-        or int(retrieval_meta.get("anchor_k", -1))
-        != int(retrieval_config.get("anchor_k", -2))
-        or int(retrieval_meta.get("task_k", -1))
-        != int(retrieval_config.get("task_k", -2))
-        or int(retrieval_meta.get("anchor_k", -1))
-        + int(retrieval_meta.get("task_k", -1))
+        or retrieval_meta.get("initial_query_source")
+        != retrieval_config.get("initial_query_source")
+        or int(retrieval_meta.get("grounded_followup_k", -1))
+        != int(retrieval_config.get("grounded_followup_k", -2))
+        or int(retrieval_meta.get("grounded_followup_k", -1))
         != int(retrieval_meta.get("k_per_step", -2))
+        or retrieval_meta.get("grounded_followup_requires_evidence") is not True
+        or retrieval_config.get("grounded_followup_requires_evidence") is not True
         or float(retrieval_meta.get("gold_sentence_coverage", -1)) != 1.0
     ):
         raise RuntimeError(f"{run_id}: pilot experiment fingerprint is stale")
@@ -137,6 +138,8 @@ def _load_pilot_run(
         "retrieval_query_count",
         "retrieval_step_count",
         "retrieval_anchor_gold_title_recall",
+        "retrieval_grounded_followup_firing_rate",
+        "retrieval_incremental_task_gold_title_recall",
     }
     if any(not required_retrieval_fields <= answer.keys() for answer in answers):
         raise RuntimeError(f"{run_id}: missing repaired retrieval telemetry")
@@ -271,6 +274,8 @@ def check_pilot(config_path: Path) -> dict:
         "retrieval_step_count",
         "retrieval_query_count",
         "retrieval_task_query_count",
+        "retrieval_grounded_followup_firing_rate",
+        "retrieval_incremental_task_gold_title_recall",
         "retrieval_zero_result_query_count",
         "retrieval_aggregate_step_count",
         "retrieval_passage_exposures",

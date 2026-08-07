@@ -273,7 +273,7 @@ class FollowupQueryTests(unittest.TestCase):
         ))
 
 
-class AnchoredFusionTests(unittest.TestCase):
+class LegacyFusionHelperTests(unittest.TestCase):
     def test_fusion_preserves_seven_anchor_slots_and_adds_three_unique_task_slots(self):
         anchor = [f"A{i}" for i in range(10)]
         task = ["A0", "T0", "T1", "A1", "T2", "T3"]
@@ -326,9 +326,13 @@ class ContextTests(unittest.TestCase):
         ).fingerprint()
         self.assertIn("corpus_sha256", a)
         self.assertNotEqual(a["corpus_sha256"], b["corpus_sha256"])
-        self.assertEqual(a["anchor_k"], 1)
-        self.assertEqual(a["task_k"], 1)
-        self.assertIn("anchored", a["query_policy"])
+        self.assertEqual(a["initial_query_source"], "original_question")
+        self.assertEqual(a["grounded_followup_k"], 2)
+        self.assertTrue(a["grounded_followup_requires_evidence"])
+        self.assertEqual(
+            a["query_policy"],
+            "original_question_first_then_full_grounded_task_v1",
+        )
 
     def test_format_passages_is_byte_identical_to_the_frozen_renderer(self):
         """The prompt shape must not change along with the passages' provenance."""
@@ -397,6 +401,8 @@ class StageWiringTests(unittest.TestCase):
         event = multi["consumer_input"]["retrieval"]
         self.assertEqual(event["titles"], titles)
         self.assertEqual(event["query_count"], 1)
+        self.assertEqual(event["query_source"], "original_question_anchor")
+        self.assertFalse(event["grounded_followup_fired"])
         self.assertFalse(event["task_component_attempted"])
 
     def test_second_round_consumes_prior_qa_and_extractor_state(self):
@@ -441,10 +447,13 @@ class StageWiringTests(unittest.TestCase):
         self.assertEqual(got["anchor_query"], self.q["question"])
         self.assertIn("Xawery Zulawski", got["task_query"])
         self.assertEqual(got["grounded_prior_answers"], ["Xawery Zulawski"])
-        self.assertEqual(got["query_count"], 2)
+        self.assertEqual(got["query_count"], 1)
+        self.assertEqual(got["query_source"], "grounded_step_task")
+        self.assertTrue(got["grounded_followup_fired"])
+        self.assertEqual(got["anchor_titles"], [])
         self.assertEqual(
-            got["titles"][:7],
-            self.ctx.index.search_titles(self.q["question"], 10)[:7],
+            got["titles"],
+            self.ctx.index.search_titles(got["task_query"], 10),
         )
         self.assertIn("Xawery Zulawski", got["titles"])
 
@@ -513,7 +522,15 @@ class StageWiringTests(unittest.TestCase):
         )[0]
         event = call["consumer_input"]["retrieval"]
         self.assertEqual(event["grounded_prior_answers"], [])
+        self.assertEqual(event["query_count"], 1)
+        self.assertEqual(event["query_source"], "original_question_anchor")
+        self.assertFalse(event["grounded_followup_fired"])
         self.assertFalse(event["task_component_attempted"])
+        self.assertEqual(event["query"], self.q["question"])
+        self.assertEqual(
+            event["titles"],
+            self.ctx.index.search_titles(self.q["question"], 10),
+        )
         self.assertNotIn("Bay of Biscay", event["anchor_query"])
 
     def test_qa_keeps_extractor_evidence_grouped_by_document(self):
@@ -616,12 +633,95 @@ class StageWiringTests(unittest.TestCase):
         self.assertEqual(answer["qa_evidence_prompt_block_count"], 2)
         self.assertEqual(answer["qa_evidence_filtered_document_count"], 1)
         self.assertEqual(answer["extractor_call_count"], 3)
+        self.assertEqual(answer["retrieval_task_query_count"], 0)
+        self.assertFalse(answer["retrieval_grounded_followup_fired"])
+        self.assertEqual(answer["retrieval_grounded_followup_firing_rate"], 0.0)
+        self.assertEqual(answer["retrieval_incremental_task_gold_title_recall"], 0.0)
         self.assertEqual(answer["extractor_normalization_input_span_count"], 4)
         self.assertEqual(answer["extractor_normalization_accepted_span_count"], 3)
         self.assertEqual(answer["extractor_normalization_rejected_span_count"], 1)
         self.assertEqual(
             answer["extractor_normalization_rejection_reasons"],
             {"duplicate_sentence": 1},
+        )
+
+    def test_answer_telemetry_separates_followup_firing_from_incremental_recall(self):
+        question = dict(
+            self.q,
+            supporting_facts={
+                "title": ["Film page", "Director page"],
+                "sent_id": [0, 0],
+            },
+        )
+        anchor_event = {
+            "attempted": True,
+            "query": question["question"],
+            "titles": ["Film page"],
+            "anchor_titles": ["Film page"],
+            "task_titles": [],
+            "task_component_attempted": False,
+            "components": [{
+                "name": "original_question_anchor",
+                "attempted": True,
+                "query": question["question"],
+                "titles": ["Film page"],
+            }],
+        }
+        task_event = {
+            "attempted": True,
+            "query": "Find the director | Xawery",
+            "titles": ["Director page"],
+            "anchor_titles": [],
+            "task_titles": ["Director page"],
+            "task_component_attempted": True,
+            "components": [{
+                "name": "grounded_step_task",
+                "attempted": True,
+                "query": "Find the director | Xawery",
+                "titles": ["Director page"],
+            }],
+        }
+        local_idx = {
+            ("q1", "planner", 0): {
+                "parsed": {"sub_questions": ["Find bridge", "Resolve target"]},
+            },
+            ("q1", "step_definer", 0): {
+                "parsed": {"type": "question-answering", "task": "Find bridge"},
+            },
+            ("q1", "qa", 0): {
+                "parsed": {"answer": "Xawery", "success": "yes", "rating": 8},
+                "consumer_input": {
+                    "retrieval": anchor_event,
+                    "evidence_blocks": [{"spans": ["Xawery directed it."]}],
+                },
+            },
+            ("q1", "step_definer_step2", 1): {
+                "parsed": {"type": "question-answering", "task": "Resolve target"},
+            },
+            ("q1", "qa_step2", 1): {
+                "parsed": {"answer": "Target", "success": "yes", "rating": 8},
+                "consumer_input": {
+                    "retrieval": task_event,
+                    "evidence_blocks": [{"spans": ["Target is supported."]}],
+                },
+            },
+            ("q1", "plan_summary", 0): {
+                "stage": "plan_summary",
+                "parsed": {"output": "Successful", "answer": "Target", "score": 8},
+                "consumer_input": {"stop_reason": "plan_complete"},
+            },
+        }
+        answer = build_answer_records([question], local_idx, "baseline")[0]
+        self.assertEqual(answer["retrieval_step_count"], 2)
+        self.assertEqual(answer["retrieval_query_count"], 2)
+        self.assertEqual(answer["retrieval_task_query_count"], 1)
+        self.assertTrue(answer["retrieval_grounded_followup_fired"])
+        self.assertEqual(answer["retrieval_grounded_followup_firing_rate"], 0.5)
+        self.assertEqual(
+            answer["retrieval_incremental_task_gold_titles"], ["Director page"]
+        )
+        self.assertEqual(
+            answer["retrieval_incremental_task_gold_title_recall"], 0.5
         )
 
     def test_zero_result_query_survives_on_qa_and_answer_telemetry(self):

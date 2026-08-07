@@ -491,6 +491,8 @@ def validate_final_cohort(config: dict[str, Any], runs: dict[str, RunData]) -> N
             required_retrieval = {
                 "retrieval_gold_title_recall", "retrieval_query_count",
                 "retrieval_step_count", "retrieval_anchor_gold_title_recall",
+                "retrieval_grounded_followup_firing_rate",
+                "retrieval_incremental_task_gold_title_recall",
             }
             if not required_retrieval <= answer.keys():
                 raise AnalysisError(
@@ -548,13 +550,14 @@ def validate_final_cohort(config: dict[str, Any], runs: dict[str, RunData]) -> N
             or retrieval_meta.get("query_policy") != retrieval_config.get("query_policy")
             or int(retrieval_meta.get("k_per_step", -1))
             != int(retrieval_config.get("k", -2))
-            or int(retrieval_meta.get("anchor_k", -1))
-            != int(retrieval_config.get("anchor_k", -2))
-            or int(retrieval_meta.get("task_k", -1))
-            != int(retrieval_config.get("task_k", -2))
-            or int(retrieval_meta.get("anchor_k", -1))
-            + int(retrieval_meta.get("task_k", -1))
+            or retrieval_meta.get("initial_query_source")
+            != retrieval_config.get("initial_query_source")
+            or int(retrieval_meta.get("grounded_followup_k", -1))
+            != int(retrieval_config.get("grounded_followup_k", -2))
+            or int(retrieval_meta.get("grounded_followup_k", -1))
             != int(retrieval_meta.get("k_per_step", -2))
+            or retrieval_meta.get("grounded_followup_requires_evidence") is not True
+            or retrieval_config.get("grounded_followup_requires_evidence") is not True
             or float(retrieval_meta.get("gold_sentence_coverage", -1))
             != float(retrieval_config.get("required_gold_sentence_coverage", -2))
             or retrieval_meta.get(
@@ -1014,6 +1017,8 @@ def analyze_retrieval(
         "retrieval_step_count",
         "retrieval_query_count",
         "retrieval_task_query_count",
+        "retrieval_grounded_followup_firing_rate",
+        "retrieval_incremental_task_gold_title_recall",
         "retrieval_zero_result_query_count",
         "retrieval_aggregate_step_count",
         "retrieval_passage_exposures",
@@ -1065,15 +1070,15 @@ def analyze_retrieval(
             summaries[group_name] = group
         output[run_id] = summaries
     return {
-        "retrieval_unit": (
-            "original_question_anchor_plus_grounded_task_component_per_qa_step"
-        ),
-        "fusion_quotas": {
-            "anchor_k": retrieval.ANCHOR_K,
-            "task_k": retrieval.K - retrieval.ANCHOR_K,
-            "exposure_k": retrieval.K,
+        "retrieval_unit": "one_top_k_query_per_question_answering_step",
+        "query_policy": {
+            "initial_query_source": retrieval.INITIAL_QUERY_SOURCE,
+            "grounded_followup_k": retrieval.K,
+            "grounded_followup_requires_evidence": (
+                retrieval.GROUNDED_FOLLOWUP_REQUIRES_EVIDENCE
+            ),
         },
-        "comparison_scope": "system_level_not_context_budget_matched",
+        "comparison_scope": "system_level_not_total_context_budget_matched",
         "runs": output,
     }
 

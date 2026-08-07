@@ -7,12 +7,14 @@ splits; changing precedence can silently corrupt evidence scoring.  The runner
 asserts the passage count, corpus content hash, and exact normalized gold-sentence
 coverage before any model is loaded.
 
-Production retrieval follows the MA-RAG control loop.  Each Step Definer
-``question-answering`` task becomes its own BM25 query and receives a fresh
-top-10 result set.  ``aggregate`` tasks retrieve nothing.  The Planner may emit
-one to five steps, later queries can use compact answers from earlier steps, QA
-can stop the plan early, and the Step Definer summarizes the completed state.
-Consequently, this module does not define a fixed one-hop/two-hop pipeline.
+Production retrieval follows the MA-RAG control loop while protecting the first
+step from unresolved model-generated queries.  Step 1 uses the original-question
+top-10.  Once an earlier QA answer is grounded verbatim in consumed evidence, a
+later resolved Step Definer task plus those grounded answers receives the full
+top-10.  Later ungrounded steps fall back to the original question, aggregate
+tasks retrieve nothing, and exactly one query is issued per QA step.  The Planner
+may emit one to five steps, QA can stop early, and the Step Definer summarizes
+the completed state; this is not a fixed one-hop/two-hop pipeline.
 
 The final cohort is labelled after freezing as ``hidden_bridge`` (at least one
 gold page title absent from the question) or ``fully_named`` (all gold titles
@@ -42,14 +44,16 @@ _TOKEN = re.compile(r"[^\W_]+", re.UNICODE)
 K1 = 1.5
 B = 0.75
 
-# Active MA-RAG retrieval budget: every question-answering step exposes top-K.
-# The original question anchors every search; later grounded steps may add a
-# task component under the frozen fusion quota. HOP1 remains only for archived
-# two-query diagnostics and is not part of the production query policy.
+# Active MA-RAG retrieval budget: exactly one top-K query per question-answering
+# step. Step 1 (and any later ungrounded step) uses the original question; once
+# grounded state exists, the resolved Step Definer task owns the full top-K.
+# HOP1/ANCHOR_K remain only for archived retrieval diagnostics.
 K = 10
 HOP1 = 7
 ANCHOR_K = 7
-QUERY_POLICY = "anchored_original_question_7_plus_grounded_task_3_v1"
+QUERY_POLICY = "original_question_first_then_full_grounded_task_v1"
+INITIAL_QUERY_SOURCE = "original_question"
+GROUNDED_FOLLOWUP_REQUIRES_EVIDENCE = True
 
 
 def fuse_rankings(
@@ -382,21 +386,13 @@ class RetrievalContext:
         passages: list[Passage],
         k: int = K,
         hop1: int | None = None,
-        anchor_k: int | None = None,
     ):
         if k <= 0:
             raise ValueError(f"k must be positive; got {k}")
         if hop1 is not None and not 0 < hop1 < k:
             raise ValueError(f"need 0 < hop1 < k; got hop1={hop1}, k={k}")
-        anchor_k = (
-            min(ANCHOR_K, max(1, k - 1)) if anchor_k is None else anchor_k
-        )
-        if not 0 < anchor_k <= k:
-            raise ValueError(f"need 0 < anchor_k <= k; got anchor_k={anchor_k}, k={k}")
         self.index = BM25Index(passages)
         self.k = k
-        self.anchor_k = anchor_k
-        self.task_k = k - anchor_k
         # Kept for archived two-pass probes; production leaves it None.
         self.hop1 = hop1
         self._sentences = {p.title: p.sentences for p in passages}
@@ -433,8 +429,11 @@ class RetrievalContext:
             "tie_break": "score_desc_corpus_index_asc",
             "query_policy": QUERY_POLICY,
             "k_per_step": self.k,
-            "anchor_k": self.anchor_k,
-            "task_k": self.task_k,
+            "initial_query_source": INITIAL_QUERY_SOURCE,
+            "grounded_followup_k": self.k,
+            "grounded_followup_requires_evidence": (
+                GROUNDED_FOLLOWUP_REQUIRES_EVIDENCE
+            ),
             "bm25_k1": self.index.k1,
             "bm25_b": self.index.b,
             "vocab_terms": len(self.index.vocab),

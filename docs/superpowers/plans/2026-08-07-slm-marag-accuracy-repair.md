@@ -4,7 +4,7 @@
 
 **Goal:** Remove the proven retrieval, state-propagation, extraction, evidence-rendering, and finalization defects without changing the frozen experimental sample or treatment matrix.
 
-**Architecture:** Preserve variable-depth per-document MA-RAG, but anchor each retrieval step on the original question, admit only evidence-grounded bridge state into targeted queries, normalize Extractor output against exact source sentences, remove empty evidence padding, and degrade a failed finalizer to a logged intermediate candidate. Version every behavioral contract so old artifacts cannot mix with repaired runs.
+**Architecture:** Preserve variable-depth per-document MA-RAG. Use the original-question top 10 at step 1 and any ungrounded later step; give a grounded resolved Step Definer query the full top 10 at later steps. Admit only evidence-grounded bridge state into those queries, normalize Extractor output against exact source sentences, remove empty evidence padding, and degrade a failed finalizer to a logged intermediate candidate. Version every behavioral contract so old artifacts cannot mix with repaired runs.
 
 **Tech Stack:** Python 3.12, NumPy/SciPy BM25, PyTorch/transformers, YAML, unittest, Git bundles.
 
@@ -26,7 +26,7 @@
 - [x] **Step 5: Run** the focused extraction and execution-integrity tests.
 - [x] **Step 6: Commit** with `fix: normalize extractor evidence to source sentences`.
 
-### Task 2: Implement grounded state and anchored 7/3 retrieval
+### Task 2: Implement grounded state and full grounded follow-up retrieval
 
 **Files:**
 - Modify: `src/retrieval.py`
@@ -36,13 +36,12 @@
 - Modify: `config/experiment.yaml`
 - Test: `tests/test_retrieval.py`
 
-- [x] **Step 1: Write failing tests** proving unresolved later tasks include grounded bridge answers, unsupported guesses never enter targeted queries, step 1 equals original-question top 10, later fusion preserves seven anchor results and adds three unique task results, and fusion always exposes at most ten passages.
-- [x] **Step 2: Run** the focused retrieval tests and confirm failures on the shipped Step-Definer-only policy.
-- [x] **Step 3: Implement** deterministic answer grounding from the evidence actually consumed by QA and grounded-only Step Definer state rendering.
-- [x] **Step 4: Implement** `fuse_rankings` and a retrieval event with anchor/task queries, component rankings, quotas, fused titles, and actual query count.
-- [x] **Step 5: Bind** `anchor_k: 7`, `task_k: 3`, and the new policy string in config, runtime fingerprint, and runner validation.
-- [x] **Step 6: Run** focused retrieval, contract, and campaign tests.
-- [x] **Step 7: Commit** with `fix: anchor multistep retrieval on grounded state`.
+- [x] **Step 1: Prove** unresolved tasks need grounded bridge answers, unsupported guesses must not enter queries, and step 1 must equal the original-question top 10.
+- [x] **Step 2: Implement** deterministic answer grounding and grounded-only Step Definer state rendering.
+- [x] **Step 3: Replace** the interim 7/3 fusion with exactly one query per QA step: original-question top 10 initially/when ungrounded, then resolved task plus grounded answers with the full top 10.
+- [x] **Step 4: Bind** the policy, initial source, grounded follow-up k=10, and evidence guard in config, runtime fingerprint, and all artifact validators.
+- [x] **Step 5: Add** follow-up firing-rate and incremental gold-recall diagnostics to separate firing frequency from query quality.
+- [x] **Step 6: Verify** focused retrieval, contract, campaign, pilot, and analysis tests.
 
 ### Task 3: Repair Extractor and QA prompt/input alignment
 
@@ -86,7 +85,7 @@
 - Modify: `tests/test_pilot_gate.py`
 - Modify: `tests/test_analyze.py`
 
-- [x] **Step 1: Write failing tests** that reject v1/stale fusion metadata and accept only `open_corpus_marag_v2` with exact quotas and prompt hashes.
+- [x] **Step 1: Write failing tests** that reject v1/stale fusion metadata and accept only `open_corpus_marag_v3` with the exact query policy, initial source, grounded follow-up budget, evidence guard, and prompt hashes.
 - [x] **Step 2: Run** the focused campaign, gate, and analysis tests and confirm the stale schema remains accepted before the fix.
 - [x] **Step 3: Bump** the experiment schema and validate the full retrieval identity in resume, gate, and analysis paths.
 - [x] **Step 4: Add** anchor/task recall, step count, actual component-query count, grounding rate, normalization, and final-answer-source diagnostics without altering F1/EM.
@@ -102,10 +101,10 @@
 - Modify: `docs/superpowers/specs/2026-08-07-slm-marag-accuracy-repair-design.md`
 - Modify: `docs/superpowers/plans/2026-08-07-slm-marag-accuracy-repair.md`
 
-- [x] **Step 1: Document** anchored fusion, grounded propagation, normalization, empty-block filtering, fallback semantics, and the explicit no-constrained/no-retry guard.
-- [ ] **Step 2: Run** `.venv/bin/python -m unittest discover -s tests -v` and require zero failures.
-- [ ] **Step 3: Run** `.venv/bin/python -m compileall -q src scripts tests analyze.py` and require exit 0.
-- [ ] **Step 4: Audit** the diff for manifest, run-matrix, model, quantization, metric, bootstrap, gate-threshold, retry, constrained-decoding, and gold-query changes.
-- [ ] **Step 5: Verify** all commits descend from `298137d` and the worktree contains no tracked changes.
-- [ ] **Step 6: Create and verify** a one-ref Git bundle; apply it to a disposable clone at `298137d` using `git merge --ff-only`, then compare tree hashes.
+- [x] **Step 1: Document** original-first/full-grounded-follow-up retrieval, grounded propagation, normalization, empty-block filtering, fallback semantics, and the explicit no-constrained/no-retry guard.
+- [x] **Step 2: Run** `.venv/bin/python -m unittest discover -s tests -v` and require zero failures.
+- [x] **Step 3: Run** `.venv/bin/python -m compileall -q src scripts tests analyze.py` and require exit 0.
+- [x] **Step 4: Audit** the diff for manifest, run-matrix, model, quantization, metric, bootstrap, gate-threshold, retry, constrained-decoding, and gold-query changes.
+- [x] **Step 5: Verify** all commits descend from `a6f39a1` and the worktree contains no tracked changes.
+- [x] **Step 6: Create and verify** a one-ref Git bundle; apply it to a disposable clone at `a6f39a1` using `git merge --ff-only`, then compare tree hashes.
 - [ ] **Step 7: Report** the exact commit, bundle SHA-256, verified base, changed behavior, unchanged experiment contracts, and the remaining capability-floor uncertainty.

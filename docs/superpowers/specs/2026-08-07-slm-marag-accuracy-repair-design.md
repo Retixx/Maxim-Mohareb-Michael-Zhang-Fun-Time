@@ -6,9 +6,10 @@ Repair the proven multi-agent accuracy failures introduced by the variable-depth
 executor while preserving the frozen questions, corpus, 22-arm treatment matrix,
 model revisions, quantization recipes, no-retry rule, metrics, and pilot gate.
 
-The implementation is a linear descendant of GitHub `no-bs` commit
-`298137d23d6c0b0df898c68b5718f985371a97dd`. The deliverable must fast-forward
-that exact commit without merging, cherry-picking, or force-pushing.
+The original accuracy repair descended from `298137d`. This approved retrieval
+policy amendment is a linear descendant of the current GitHub `no-bs` commit
+`a6f39a1e90a72b2447e534eca3ff39e7ca88cb13`. The deliverable must fast-forward
+that exact current tip without merging, cherry-picking, or force-pushing.
 
 ## Proven Failure Boundaries
 
@@ -33,28 +34,33 @@ that exact commit without merging, cherry-picking, or force-pushing.
 
 ## Frozen Repair Policy
 
-### Anchored retrieval
+### First-question anchor and full grounded follow-up
 
-Each question-answering step exposes at most ten fused documents to Extractor and
-QA.
+Each active question-answering step issues exactly one BM25 query and exposes at
+most ten documents to Extractor and QA.
 
-- Step 1, or any later step with no evidence-grounded prior answer, uses the
-  original-question top 10. This prevents a weak generated query from making the
-  first retrieval worse than the solo query.
-- A later step with evidence-grounded prior answers searches two components:
-  the original question and the Step Definer task augmented with those grounded
-  answers.
-- Fusion keeps the first seven original-question results, then the first three
-  unique task-query results. If the task component cannot supply three unique
-  results, remaining original-question results fill the ten slots, followed by
-  remaining task results only if necessary.
-- Gold labels and the hidden/fully-named stratum never enter query construction.
-- The 7/3 rule is frozen before the pilot. It is an architectural prior from the
-  excluded retrieval work, not selected on answer F1.
+- Step 1 uses the original-question top 10. This prevents an unresolved generated
+  task from making initial retrieval worse than the solo query.
+- A later step with one or more evidence-grounded prior answers uses one query:
+  the resolved Step Definer task augmented with those grounded answers. That
+  query owns the full top 10, preserving the Step Definer's retrieval leverage.
+- A later step without grounded state falls back to the original-question top 10.
+- Gold labels, answers, supporting facts, and retrieval strata never enter query
+  construction. Unsupported guesses never trigger or enter a follow-up query.
+- The policy was approved and frozen before the pilot; it was not selected on
+  pilot or final answer F1.
 
-Every retrieval event logs the raw task, grounded answers, component queries,
-component rankings, fused ranking, query count, and quotas. Answer records report
-fused, anchor, and task gold-title recall separately.
+Every event logs its source, raw task, grounded answers, exact query, ranking, and
+query count. Answer records report initial and follow-up recall, follow-up firing
+rate, incremental follow-up gold recall, exposure, and unique titles. These
+mechanism diagnostics distinguish a degraded Step Definer that fires less often
+from one that emits poorer grounded queries.
+
+All multi-agent baseline and one-role treatment arms use this identical policy,
+so the paired per-role size/precision contrasts remain the primary experiment.
+The one-call control performs one original-question query total, while MA-RAG may
+perform one query at each active QA step; their contrast is system-level and is
+not described as total-context matched.
 
 ### Grounded state propagation
 
@@ -110,10 +116,12 @@ fallback. No fallback is claimed correct merely because it is non-empty.
 ## Scientific Integrity
 
 - Bump the prompt bundle, affected role versions and hashes, retrieval policy,
-  and experiment schema to `open_corpus_marag_v2`.
-- Bind fusion quotas into retrieval metadata and validate them in the runner,
-  campaign resume logic, pilot gate, and analysis loader.
-- Artifacts from `298137d` cannot resume into or be analyzed as repaired runs.
+  and experiment schema to `open_corpus_marag_v3`.
+- Bind the initial source, full grounded-follow-up budget, and grounding guard into
+  retrieval metadata and validate them in the runner, campaign resume logic,
+  pilot gate, and analysis loader.
+- Artifacts from `298137d` or interim v2 commit `a6f39a1` cannot resume into or be
+  analyzed as v3 runs.
 - Do not alter final, pilot, preflight, timing, or exclusion manifests.
 - Do not alter treatment assignment, quantization, model loading, batching,
   generation ceilings, scoring formulas, bootstrap procedures, or gate thresholds.
@@ -121,16 +129,16 @@ fallback. No fallback is claimed correct merely because it is non-empty.
 
 ## Verification
 
-1. Each failure boundary receives a regression test that fails on `298137d` and
-   passes after its isolated repair.
+1. Each original failure boundary has a regression test against `298137d`; the
+   superseding retrieval-policy tests distinguish v3 from interim `a6f39a1`.
 2. All repository tests pass in the existing `.venv`.
 3. Python compilation succeeds for source, scripts, tests, and analysis.
 4. Static checks prove no constrained decoding, retry, manifest, matrix, or gold
    query dependency was added.
-5. A disposable clone of `298137d` accepts the final branch with `--ff-only` and
+5. A disposable clone of `a6f39a1` accepts the final branch with `--ff-only` and
    produces the exact same tree.
 6. The Git bundle verifies and advertises one repair ref descended directly from
-   `298137d`.
+   `a6f39a1`.
 
 ## Expected Interpretation
 

@@ -102,6 +102,12 @@ def main() -> int:
             != retrieval_config["expected_corpus_sha256"]
             or fingerprint["algorithm"] != retrieval_config["algorithm"]
             or fingerprint["query_policy"] != retrieval_config["query_policy"]
+            or fingerprint["initial_query_source"]
+            != retrieval_config["initial_query_source"]
+            or int(fingerprint["grounded_followup_k"])
+            != int(retrieval_config["grounded_followup_k"])
+            or fingerprint["grounded_followup_requires_evidence"] is not True
+            or retrieval_config["grounded_followup_requires_evidence"] is not True
         ):
             raise RuntimeError(f"cached corpus fingerprint changed: {fingerprint}")
     finally:

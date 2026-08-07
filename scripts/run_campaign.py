@@ -171,13 +171,14 @@ def completed_run_ids(
             or retrieval_meta.get("query_policy") != retrieval_config.get("query_policy")
             or int(retrieval_meta.get("k_per_step", -1))
             != int(retrieval_config.get("k", -2))
-            or int(retrieval_meta.get("anchor_k", -1))
-            != int(retrieval_config.get("anchor_k", -2))
-            or int(retrieval_meta.get("task_k", -1))
-            != int(retrieval_config.get("task_k", -2))
-            or int(retrieval_meta.get("anchor_k", -1))
-            + int(retrieval_meta.get("task_k", -1))
+            or retrieval_meta.get("initial_query_source")
+            != retrieval_config.get("initial_query_source")
+            or int(retrieval_meta.get("grounded_followup_k", -1))
+            != int(retrieval_config.get("grounded_followup_k", -2))
+            or int(retrieval_meta.get("grounded_followup_k", -1))
             != int(retrieval_meta.get("k_per_step", -2))
+            or retrieval_meta.get("grounded_followup_requires_evidence") is not True
+            or retrieval_config.get("grounded_followup_requires_evidence") is not True
             or float(retrieval_meta.get("gold_sentence_coverage", -1)) != 1.0
         ):
             continue

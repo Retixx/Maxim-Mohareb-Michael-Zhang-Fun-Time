@@ -172,19 +172,15 @@ question-answering on the current plan sub-question; there is no new generation.
 
 ### 4.3 Question-answering route
 
-Every question-answering step exposes at most 10 fused documents. Step 1, and
-any later step without a grounded prior answer, uses the original-question BM25
-top 10. A later grounded step performs two independent searches:
+Every question-answering step issues exactly one BM25 query and exposes at most
+10 documents. Step 1 uses the original-question top 10. A later step with at
+least one evidence-grounded prior answer uses the resolved Step Definer task
+plus grounded prior answers as one self-contained query and gives that query the
+full top 10. A later step without grounded state falls back to the original
+question top 10. Unsupported guesses never enter a query. Gold labels, answers,
+supporting facts, and retrieval strata never enter query construction.
 
-- anchor: the original question;
-- task: the resolved Step Definer task plus grounded prior answers.
-
-The fused ranking contains the first seven unique anchor results, then the first
-three unique task results not already selected; unused task slots are filled by
-later anchor results. Stable component order breaks ties. Gold labels, answers,
-supporting facts, and retrieval strata never enter either query or fusion.
-
-Extractor is invoked separately for every fused document, preserving document
+Extractor is invoked separately for every retrieved document, preserving document
 rank and title in the call record. Its raw parsed output is retained, but only
 spans that map unambiguously to exact source sentences are eligible for QA.
 Unique fragments expand to their exact sentence; whole-passage/multi-sentence
@@ -206,10 +202,9 @@ behavior. Such a candidate is marked evidence-grounded only when its normalized
 answer occurs in evidence actually supplied to QA or in a grounded prior answer.
 Unsupported candidates may be summarized but never become retrieval facts.
 
-Each active question-answering step therefore has one fused retrieval event,
-one or two component queries, up to ten Extractor generations, and one QA
-generation. Retrieval depth is determined by plan depth and routing, not by a
-global hop count.
+Each active question-answering step therefore has one retrieval event, exactly
+one query, up to ten Extractor generations, and one QA generation. Retrieval depth is determined by plan depth and routing, not
+by a global hop count.
 
 ### 4.4 Aggregate route
 
@@ -248,11 +243,12 @@ denominator.
 The active retriever is a sparse, vectorized BM25 index with fixed tokenization,
 Lucene-style IDF, stable corpus-order tie-breaking, and unique passage titles.
 The configured multi-agent policy is
-`anchored_original_question_7_plus_grounded_task_3_v1`: original-question
-top 10 before grounded state exists, then deterministic 7-anchor/3-task fusion
-at later grounded question-answering steps. There is no learned bridge-query
-helper. The quotas were frozen on excluded retrieval recall before the pilot,
-not chosen from pilot/final answer F1.
+`original_question_first_then_full_grounded_task_v1`: the original question owns
+the first top 10; a later evidence-grounded Step Definer task plus grounded
+answers owns that step's full top 10; and an ungrounded later step falls back to
+the original question. There is exactly one query per question-answering step
+and no learned bridge-query helper. This policy was frozen before the pilot and
+was not chosen from pilot/final answer F1.
 
 The one-call control, single_fp16:
 
@@ -263,21 +259,23 @@ The one-call control, single_fp16:
 - uses the same answer normalization and immutable model revision.
 
 The control and multi-agent system each expose at most 10 passages per
-question-answering step, but they do not have the same total passage or query
-budget. Multi-agent exposure and component-query count vary with plan depth,
-route, and grounded state. Report component-query count, passage exposures,
-unique titles, model calls, prompt/output tokens, F1, EM, memory, and timing for
-a fair architecture comparison.
+question-answering step, but they do not have the same total passage, query, or
+model-call budget. Multi-agent exposure and query count vary with plan depth and
+routing. The multi-vs-single result is therefore a system-level cost-benefit
+contrast, not a total-context-matched retrieval comparison. Report query count,
+passage exposures, unique titles, model calls, prompt/output tokens, F1, EM,
+memory, and timing whenever that contrast appears.
 
 Answer records include retrieval events, retrieved and gold titles, gold-title
-recall, component recall, all-gold retrieval, fusion quotas, grounding rate,
-Extractor normalization, QA evidence filtering, plan depth, executed steps,
-stop reason, summary status, and final-answer provenance. Gold fields are
-attached only after generation.
+recall, initial-query and grounded-follow-up recall, grounded-follow-up firing
+rate, incremental task gold recall, grounding rate, Extractor normalization, QA
+evidence filtering, plan depth, executed steps, stop reason, summary status, and
+final-answer provenance. Gold fields are attached only after generation.
 
-Repaired artifacts use experiment schema `open_corpus_marag_v2`. Resume,
-pilot-gate, and analysis paths reject v1 artifacts, stale prompt hashes, a stale
-query-policy fingerprint, or fusion quotas other than 7/3 summing to k=10.
+Repaired artifacts use experiment schema `open_corpus_marag_v3`. Resume,
+pilot-gate, and analysis paths reject v1/v2 artifacts, stale prompt hashes, a
+stale query-policy fingerprint, a non-original initial query, a grounded
+follow-up budget other than k=10, or removal of the evidence-grounding guard.
 
 Questions are prespecified as hidden_bridge or fully_named from question text
 and gold titles. The frozen final cohort contains exactly 1,097 hidden_bridge
@@ -363,7 +361,10 @@ For each role r:
 Use 10,000 paired question-level bootstrap replicates. Holm-adjust the four
 primary role contrasts. Report point estimates, paired 95% intervals, adjusted
 p-values, and direction. Keep 4-bit, evidence, parsing, retrieval, plan-depth,
-semantic-stop, and tiny-floor analyses secondary or exploratory.
+semantic-stop, and tiny-floor analyses secondary or exploratory. Never stratify
+a primary treatment comparison by that arm's own emitted or executed plan depth:
+depth is post-treatment. A baseline-defined depth label may be applied unchanged
+to every arm only as a prespecified secondary diagnostic.
 
 Repeated calls are not independent observations. Cluster role diagnostics by
 question. Resample complete batches for timing intervals. Sort question IDs

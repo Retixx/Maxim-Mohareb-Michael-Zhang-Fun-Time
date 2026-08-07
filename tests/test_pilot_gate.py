@@ -94,13 +94,16 @@ class PilotGateFixture:
             "query_policy": retrieval["query_policy"],
             "k_per_step": retrieval["k"],
             "gold_sentence_coverage": 1.0,
-            "anchor_k": retrieval["anchor_k"],
-            "task_k": retrieval["task_k"],
+            "initial_query_source": retrieval["initial_query_source"],
+            "grounded_followup_k": retrieval["grounded_followup_k"],
+            "grounded_followup_requires_evidence": (
+                retrieval["grounded_followup_requires_evidence"]
+            ),
             "gold_sentence_text_nfkc_whitespace_equivalent": True,
         }
 
     def _fingerprint_payload(
-        self, *, stale: bool, schema: str = "open_corpus_marag_v2"
+        self, *, stale: bool, schema: str = "open_corpus_marag_v3"
     ) -> dict:
         architecture = copy.deepcopy(self.config["architecture"])
         if stale:
@@ -148,6 +151,12 @@ class PilotGateFixture:
             "retrieval_step_count": 2.0 if run_id == "baseline" else 1.0,
             "retrieval_anchor_gold_title_recall": 1.0,
             "retrieval_query_count": 2.0 if run_id == "baseline" else 1.0,
+            "retrieval_grounded_followup_firing_rate": (
+                0.5 if run_id == "baseline" else 0.0
+            ),
+            "retrieval_incremental_task_gold_title_recall": (
+                0.5 if run_id == "baseline" else 0.0
+            ),
             "retrieval_zero_result_query_count": 0.0,
             "retrieval_aggregate_step_count": 0.0,
             "retrieval_passage_exposures": 20.0 if run_id == "baseline" else 10.0,
@@ -180,7 +189,7 @@ class PilotGateFixture:
                 schema=(
                     "open_corpus_marag_v1"
                     if run_id == stale_schema_run_id
-                    else "open_corpus_marag_v2"
+                    else "open_corpus_marag_v3"
                 ),
             )
             fingerprint = gate.content_hash(payload)
@@ -326,6 +335,15 @@ class PilotGateTests(unittest.TestCase):
         self.assertFalse(artifact["passed"])
         with self.assertRaisesRegex(RuntimeError, "STOP"):
             gate.verify_gate(self.fixture.config_path, self.fixture.gate_path)
+
+    def test_grounded_followup_guard_requires_a_literal_boolean(self) -> None:
+        self.fixture.config["retrieval"][
+            "grounded_followup_requires_evidence"
+        ] = "true"
+        self.fixture.write_config()
+        self.fixture.write_runs(baseline_correct=True, single_correct=False)
+        with self.assertRaisesRegex(RuntimeError, "fingerprint is stale"):
+            self.fixture.write_gate()
 
     def test_gate_is_stale_after_decision_rule_changes(self) -> None:
         self.fixture.write_runs(baseline_correct=True, single_correct=False)

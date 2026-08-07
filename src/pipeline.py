@@ -480,17 +480,16 @@ def _retrieval_decision(
     task: dict,
     retriever,
 ) -> dict:
-    """Build one frozen anchored-retrieval event without consulting gold data."""
-    anchor_query = q["question"]
-    anchor_titles = retriever.index.search_titles(anchor_query, retriever.k)
+    """Build one frozen retrieval event without consulting gold data."""
     history = step_history_for(q, idx, before_step=step_index)
     grounded_answers = _grounded_prior_answers(history)
-    task_attempted = bool(
-        step_index > 0 and grounded_answers and retriever.task_k > 0
-    )
+    grounded_followup_fired = bool(step_index > 0 and grounded_answers)
+
+    anchor_query = q["question"]
+    anchor_titles: list[str] = []
     task_query = None
     task_titles: list[str] = []
-    if task_attempted:
+    if grounded_followup_fired:
         query_parts = [task["task"]]
         task_norm = retrieval.norm(task["task"])
         query_parts.extend(
@@ -500,23 +499,23 @@ def _retrieval_decision(
         )
         task_query = " | ".join(query_parts)
         task_titles = retriever.index.search_titles(task_query, retriever.k)
-        titles = retrieval.fuse_rankings(
-            anchor_titles,
-            task_titles,
-            k=retriever.k,
-            anchor_k=retriever.anchor_k,
-        )
+        query = task_query
+        titles = task_titles
+        query_source = "grounded_step_task"
     else:
-        titles = list(anchor_titles[:retriever.k])
+        anchor_titles = retriever.index.search_titles(anchor_query, retriever.k)
+        query = anchor_query
+        titles = anchor_titles
+        query_source = "original_question_anchor"
 
     components = [{
         "name": "original_question_anchor",
-        "attempted": True,
-        "query": anchor_query,
+        "attempted": not grounded_followup_fired,
+        "query": anchor_query if not grounded_followup_fired else None,
         "titles": anchor_titles,
     }, {
         "name": "grounded_step_task",
-        "attempted": task_attempted,
+        "attempted": grounded_followup_fired,
         "query": task_query,
         "titles": task_titles,
     }]
@@ -527,16 +526,16 @@ def _retrieval_decision(
         "policy": retrieval.QUERY_POLICY,
         "raw_step_task": task["task"],
         "grounded_prior_answers": grounded_answers,
+        "query_source": query_source,
+        "grounded_followup_fired": grounded_followup_fired,
         "anchor_query": anchor_query,
         "anchor_titles": anchor_titles,
-        "task_component_attempted": task_attempted,
+        "task_component_attempted": grounded_followup_fired,
         "task_query": task_query,
         "task_titles": task_titles,
-        "anchor_k": retriever.anchor_k,
-        "task_k": retriever.task_k,
-        "query_count": sum(component["attempted"] for component in components),
+        "query_count": 1,
         "components": components,
-        "query": task_query if task_attempted else anchor_query,
+        "query": query,
         "titles": titles,
     }
 
@@ -1117,6 +1116,21 @@ def build_answer_records(
             len(set(gold_titles) & set(task_titles)) / len(gold_titles)
             if task_attempted and gold_titles else 1.0 if task_attempted else None
         )
+        task_query_count = sum(
+            component.get("name") == "grounded_step_task"
+            for component in attempted_components
+        )
+        grounded_followup_firing_rate = (
+            task_query_count / len(attempted_events) if attempted_events else 0.0
+        )
+        incremental_task_gold_titles = [
+            title for title in gold_titles
+            if title in set(task_titles) and title not in set(anchor_titles)
+        ]
+        incremental_task_gold_title_recall = (
+            len(incremental_task_gold_titles) / len(gold_titles)
+            if gold_titles else 1.0
+        )
         evidence_fields = {
             "evidence_status": "not_applicable",
             "evidence_predicted_labels": None,
@@ -1212,9 +1226,16 @@ def build_answer_records(
             "retrieval_anchor_gold_title_recall": anchor_recall,
             "retrieval_task_titles": task_titles,
             "retrieval_task_gold_title_recall": task_recall,
-            "retrieval_task_query_count": sum(
-                component.get("name") == "grounded_step_task"
-                for component in attempted_components
+            "retrieval_task_query_count": task_query_count,
+            "retrieval_grounded_followup_fired": bool(task_query_count),
+            "retrieval_grounded_followup_firing_rate": (
+                grounded_followup_firing_rate
+            ),
+            "retrieval_incremental_task_gold_titles": (
+                incremental_task_gold_titles
+            ),
+            "retrieval_incremental_task_gold_title_recall": (
+                incremental_task_gold_title_recall
             ),
             "retrieval_aggregate_step_count": len(aggregate_events),
             "retrieval_passage_exposures": sum(
