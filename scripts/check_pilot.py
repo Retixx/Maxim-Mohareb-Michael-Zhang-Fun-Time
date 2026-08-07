@@ -132,6 +132,14 @@ def _load_pilot_run(
     ):
         raise RuntimeError(f"{run_id}: pilot scored-record cohort mismatch")
     answers = [record for record in records if record.get("record_type") == "answer"]
+    required_retrieval_fields = {
+        "retrieval_gold_title_recall",
+        "retrieval_query_count",
+        "retrieval_step_count",
+        "retrieval_anchor_gold_title_recall",
+    }
+    if any(not required_retrieval_fields <= answer.keys() for answer in answers):
+        raise RuntimeError(f"{run_id}: missing repaired retrieval telemetry")
     return meta, answers, jsonl_path, records
 
 

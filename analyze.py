@@ -42,7 +42,7 @@ import numpy as np
 import yaml
 from src.contracts import ANALYSIS_SCHEMA_VERSION, EXPERIMENT_SCHEMA
 
-from src import evidence as evidence_metrics, prompts
+from src import evidence as evidence_metrics, prompts, retrieval
 from src.mechanism import SELECTION_FIELD, selection_changed_set
 from src.metrics import (
     DEFAULT_BOOTSTRAP_RESAMPLES,
@@ -1068,7 +1068,11 @@ def analyze_retrieval(
         "retrieval_unit": (
             "original_question_anchor_plus_grounded_task_component_per_qa_step"
         ),
-        "fusion_quotas": {"anchor_k": 7, "task_k": 3, "exposure_k": 10},
+        "fusion_quotas": {
+            "anchor_k": retrieval.ANCHOR_K,
+            "task_k": retrieval.K - retrieval.ANCHOR_K,
+            "exposure_k": retrieval.K,
+        },
         "comparison_scope": "system_level_not_context_budget_matched",
         "runs": output,
     }

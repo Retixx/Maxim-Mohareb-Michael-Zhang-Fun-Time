@@ -42,9 +42,10 @@ _TOKEN = re.compile(r"[^\W_]+", re.UNICODE)
 K1 = 1.5
 B = 0.75
 
-# Active MA-RAG retrieval budget: every question-answering plan step issues its
-# own Step-Definer query and retrieves top-K. HOP1 remains only for archived
-# two-query diagnostic helpers and is not part of the production query policy.
+# Active MA-RAG retrieval budget: every question-answering step exposes top-K.
+# The original question anchors every search; later grounded steps may add a
+# task component under the frozen fusion quota. HOP1 remains only for archived
+# two-query diagnostics and is not part of the production query policy.
 K = 10
 HOP1 = 7
 ANCHOR_K = 7

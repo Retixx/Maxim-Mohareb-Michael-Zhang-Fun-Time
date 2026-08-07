@@ -99,12 +99,14 @@ class PilotGateFixture:
             "gold_sentence_text_nfkc_whitespace_equivalent": True,
         }
 
-    def _fingerprint_payload(self, *, stale: bool) -> dict:
+    def _fingerprint_payload(
+        self, *, stale: bool, schema: str = "open_corpus_marag_v2"
+    ) -> dict:
         architecture = copy.deepcopy(self.config["architecture"])
         if stale:
             architecture["framework"] = "obsolete-fixed-hop-pipeline"
         return {
-            "schema": "open_corpus_marag_v2",
+            "schema": schema,
             "architecture": architecture,
             "pipeline_stages": prompts.PIPELINE_STAGES,
             "stage_role": prompts.STAGE_ROLE,
@@ -143,6 +145,8 @@ class PilotGateFixture:
             ),
             "retrieval_gold_title_recall": 1.0,
             "retrieval_all_gold": 1.0,
+            "retrieval_step_count": 2.0 if run_id == "baseline" else 1.0,
+            "retrieval_anchor_gold_title_recall": 1.0,
             "retrieval_query_count": 2.0 if run_id == "baseline" else 1.0,
             "retrieval_zero_result_query_count": 0.0,
             "retrieval_aggregate_step_count": 0.0,
@@ -164,13 +168,21 @@ class PilotGateFixture:
         baseline_correct: bool,
         single_correct: bool,
         stale_run_id: str | None = None,
+        stale_schema_run_id: str | None = None,
     ) -> None:
         strata = ["hidden_bridge", "fully_named"]
         for run_id, correct in (
             ("baseline", baseline_correct),
             ("single_fp16", single_correct),
         ):
-            payload = self._fingerprint_payload(stale=run_id == stale_run_id)
+            payload = self._fingerprint_payload(
+                stale=run_id == stale_run_id,
+                schema=(
+                    "open_corpus_marag_v1"
+                    if run_id == stale_schema_run_id
+                    else "open_corpus_marag_v2"
+                ),
+            )
             fingerprint = gate.content_hash(payload)
             role = "planner" if run_id == "baseline" else "solo"
             records = [{
@@ -351,6 +363,16 @@ class PilotGateTests(unittest.TestCase):
             baseline_correct=True,
             single_correct=False,
             stale_run_id="baseline",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "experiment fingerprint is stale"):
+            gate.check_pilot(self.fixture.config_path)
+
+    def test_self_consistent_v1_pilot_artifact_is_rejected(self) -> None:
+        self.fixture.write_runs(
+            baseline_correct=True,
+            single_correct=False,
+            stale_schema_run_id="baseline",
         )
 
         with self.assertRaisesRegex(RuntimeError, "experiment fingerprint is stale"):
