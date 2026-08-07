@@ -31,6 +31,7 @@ from pathlib import Path
 
 import torch
 import yaml
+from .contracts import EXPERIMENT_SCHEMA
 
 from . import agents, models, prompts, retrieval
 from .pipeline import (
@@ -1755,7 +1756,7 @@ def run(
     if float(retr_cfg.get("required_gold_sentence_coverage", -1)) != 1.0:
         raise ValueError("this experiment requires gold-sentence coverage == 1.0")
     experiment_fingerprint_payload = {
-        "schema": "open_corpus_marag_v1",
+        "schema": EXPERIMENT_SCHEMA,
         "architecture": architecture,
         "pipeline_stages": prompts.PIPELINE_STAGES,
         "stage_role": prompts.STAGE_ROLE,

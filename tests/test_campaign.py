@@ -81,9 +81,11 @@ class CampaignPlanTests(unittest.TestCase):
                 "query_policy": retrieval["query_policy"],
                 "k_per_step": retrieval["k"],
                 "gold_sentence_coverage": 1.0,
+                "anchor_k": retrieval["anchor_k"],
+                "task_k": retrieval["task_k"],
             }
             payload = {
-                "schema": "open_corpus_marag_v1",
+                "schema": "open_corpus_marag_v2",
                 "architecture": config["architecture"],
                 "pipeline_stages": prompts.PIPELINE_STAGES,
                 "stage_role": prompts.STAGE_ROLE,

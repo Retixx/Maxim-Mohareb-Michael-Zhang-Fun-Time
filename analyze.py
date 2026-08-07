@@ -40,6 +40,7 @@ from typing import Any, Callable
 
 import numpy as np
 import yaml
+from src.contracts import ANALYSIS_SCHEMA_VERSION, EXPERIMENT_SCHEMA
 
 from src import evidence as evidence_metrics, prompts
 from src.mechanism import SELECTION_FIELD, selection_changed_set
@@ -471,6 +472,30 @@ def validate_final_cohort(config: dict[str, Any], runs: dict[str, RunData]) -> N
                 raise AnalysisError(f"{run.run_id}/{question_id}: retrieval stratum changed")
             if "predicted_answer" not in answer or "gold_answer" not in answer:
                 raise AnalysisError(f"{run.run_id}/{question_id}: missing answer text")
+            if run.run_id == SOLO_RUN:
+                if answer.get("answer_stage") != "solo" or answer.get(
+                    "final_answer_source"
+                ) not in {"solo_parsed", "solo_salvaged", "none"}:
+                    raise AnalysisError(
+                        f"{run.run_id}/{question_id}: invalid solo answer provenance"
+                    )
+            else:
+                if answer.get("answer_stage") != "plan_summary" or answer.get(
+                    "final_answer_source"
+                ) not in {
+                    "summary_parsed", "summary_salvaged", "qa_fallback", "none"
+                }:
+                    raise AnalysisError(
+                        f"{run.run_id}/{question_id}: invalid MA-RAG answer provenance"
+                    )
+            required_retrieval = {
+                "retrieval_gold_title_recall", "retrieval_query_count",
+                "retrieval_step_count", "retrieval_anchor_gold_title_recall",
+            }
+            if not required_retrieval <= answer.keys():
+                raise AnalysisError(
+                    f"{run.run_id}/{question_id}: missing repaired retrieval telemetry"
+                )
             if answer.get("question_manifest_sha256") != configured_hash:
                 raise AnalysisError(
                     f"{run.run_id}/{question_id}: answer manifest fingerprint changed"
@@ -483,7 +508,7 @@ def validate_final_cohort(config: dict[str, Any], runs: dict[str, RunData]) -> N
         if (
             not isinstance(fingerprint_payload, dict)
             or content_hash(fingerprint_payload) != experiment_fingerprint
-            or fingerprint_payload.get("schema") != "open_corpus_marag_v1"
+            or fingerprint_payload.get("schema") != EXPERIMENT_SCHEMA
             or fingerprint_payload.get("architecture") != config.get("architecture")
             or tuple(fingerprint_payload.get("pipeline_stages") or ())
             != tuple(prompts.PIPELINE_STAGES)
@@ -523,6 +548,13 @@ def validate_final_cohort(config: dict[str, Any], runs: dict[str, RunData]) -> N
             or retrieval_meta.get("query_policy") != retrieval_config.get("query_policy")
             or int(retrieval_meta.get("k_per_step", -1))
             != int(retrieval_config.get("k", -2))
+            or int(retrieval_meta.get("anchor_k", -1))
+            != int(retrieval_config.get("anchor_k", -2))
+            or int(retrieval_meta.get("task_k", -1))
+            != int(retrieval_config.get("task_k", -2))
+            or int(retrieval_meta.get("anchor_k", -1))
+            + int(retrieval_meta.get("task_k", -1))
+            != int(retrieval_meta.get("k_per_step", -2))
             or float(retrieval_meta.get("gold_sentence_coverage", -1))
             != float(retrieval_config.get("required_gold_sentence_coverage", -2))
             or retrieval_meta.get(
@@ -977,11 +1009,20 @@ def analyze_retrieval(
     metrics = (
         "retrieval_gold_title_recall",
         "retrieval_all_gold",
+        "retrieval_anchor_gold_title_recall",
+        "retrieval_task_gold_title_recall",
+        "retrieval_step_count",
         "retrieval_query_count",
+        "retrieval_task_query_count",
         "retrieval_zero_result_query_count",
         "retrieval_aggregate_step_count",
         "retrieval_passage_exposures",
         "retrieval_unique_titles",
+        "qa_grounded_answer_rate",
+        "extractor_normalization_rejected_span_count",
+        "qa_evidence_document_count",
+        "qa_evidence_prompt_block_count",
+        "qa_evidence_filtered_document_count",
         "plan_depth",
         "planner_emitted_depth",
         "executed_plan_depth",
@@ -1016,10 +1057,18 @@ def analyze_retrieval(
                     n_resamples=n_resamples,
                     seed=seed + 100 * run_index + 10 * group_index + metric_index,
                 )
+            sources: dict[str, int] = {}
+            for answer in answers:
+                source = str(answer.get("final_answer_source") or "missing")
+                sources[source] = sources.get(source, 0) + 1
+            group["final_answer_source_counts"] = dict(sorted(sources.items()))
             summaries[group_name] = group
         output[run_id] = summaries
     return {
-        "retrieval_unit": "configured_top_k_query_per_question_answering_plan_step",
+        "retrieval_unit": (
+            "original_question_anchor_plus_grounded_task_component_per_qa_step"
+        ),
+        "fusion_quotas": {"anchor_k": 7, "task_k": 3, "exposure_k": 10},
         "comparison_scope": "system_level_not_context_budget_matched",
         "runs": output,
     }
@@ -2024,9 +2073,9 @@ def _timing_orchestration(run: RunData) -> list[dict[str, Any]]:
     records = list(run.timing_orchestration)
     if not records:
         # Legacy/synthetic unit fixtures can still exercise generation timing;
-        # finalized open_corpus_marag_v1 artifacts must carry service records.
+        # Finalized repaired artifacts must carry service records.
         payload = (run.timing_meta or {}).get("experiment_fingerprint_payload") or {}
-        if payload.get("schema") == "open_corpus_marag_v1":
+        if payload.get("schema") == EXPERIMENT_SCHEMA:
             raise AnalysisError(f"{run.run_id}: missing orchestration timing records")
         return []
     meta = run.timing_meta or run.meta
@@ -2740,7 +2789,7 @@ def materialize_selection(
         for run_id in input_ids
     }
     artifact: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": ANALYSIS_SCHEMA_VERSION,
         "run_id": OPTIMIZED_RUN,
         "execution_run_id": execution_run_id,
         "materialized_new_run": materialized_new_run,
@@ -3105,7 +3154,7 @@ def build_report(
         validate_campaign_completeness(config, runs)
     validate_final_cohort(config, runs)
     report: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": ANALYSIS_SCHEMA_VERSION,
         "analysis_contract": {
             "primary_metric": "f1",
             "secondary_coreported_metric": "em",

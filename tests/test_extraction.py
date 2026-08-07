@@ -110,6 +110,7 @@ class AgentNormalizationIntegrationTests(unittest.TestCase):
             {"multiple_sentences": 1},
         )
         self.assertFalse(record["protocol_ok"])
+        self.assertEqual(record["verbatim_copy_rate"], 1.0)
 
 
 if __name__ == "__main__":

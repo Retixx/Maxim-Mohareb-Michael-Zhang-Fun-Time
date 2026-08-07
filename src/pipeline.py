@@ -968,6 +968,83 @@ def build_answer_records(
         depth_fields = {} if solo_rec else planner_depth_for(q, idx)
         history = [] if solo_rec else step_history_for(q, idx)
         final_answer = final_answer_for(solo_rec, summary_rec, history)
+        if solo_rec:
+            qa_grounding_fields = {
+                "qa_answer_count": None,
+                "qa_usable_answer_count": None,
+                "qa_grounded_answer_count": None,
+                "qa_grounded_answer_rate": None,
+                "extractor_call_count": None,
+                "extractor_normalization_input_span_count": None,
+                "extractor_normalization_accepted_span_count": None,
+                "extractor_normalization_rejected_span_count": None,
+                "extractor_normalization_rejection_reasons": None,
+                "qa_evidence_document_count": None,
+                "qa_evidence_prompt_block_count": None,
+                "qa_evidence_filtered_document_count": None,
+            }
+        else:
+            extractor_call_records = [
+                rec
+                for step_index in range(len(history))
+                for rec in _extractor_records(q["question_id"], step_index, idx)
+            ]
+            normalizations = [
+                rec.get("extractor_normalization") or {}
+                for rec in extractor_call_records
+            ]
+            rejection_reasons: dict[str, int] = {}
+            for telemetry in normalizations:
+                for reason, count in (
+                    telemetry.get("rejection_reasons") or {}
+                ).items():
+                    rejection_reasons[reason] = (
+                        rejection_reasons.get(reason, 0) + int(count)
+                    )
+            qa_call_records = [
+                idx.get((q["question_id"], stage, step_index))
+                for step_index, stage in enumerate(prompts.stages_for_role("qa"))
+                if idx.get((q["question_id"], stage, step_index)) is not None
+            ]
+            qa_inputs = [
+                rec.get("consumer_input") or {} for rec in qa_call_records
+            ]
+            document_count = sum(
+                int(item.get("evidence_document_count", 0)) for item in qa_inputs
+            )
+            prompt_block_count = sum(
+                int(item.get("evidence_prompt_block_count", 0)) for item in qa_inputs
+            )
+            qa_grounding_fields = {
+                "qa_answer_count": len(history),
+                "qa_usable_answer_count": sum(
+                    usable_short_answer(item.get("answer")) for item in history
+                ),
+                "qa_grounded_answer_count": sum(
+                    item.get("answer_grounded") is True for item in history
+                ),
+                "qa_grounded_answer_rate": (
+                    sum(item.get("answer_grounded") is True for item in history)
+                    / len(history)
+                    if history else None
+                ),
+                "extractor_call_count": len(extractor_call_records),
+                "extractor_normalization_input_span_count": sum(
+                    int(item.get("input_span_count", 0)) for item in normalizations
+                ),
+                "extractor_normalization_accepted_span_count": sum(
+                    int(item.get("accepted_span_count", 0)) for item in normalizations
+                ),
+                "extractor_normalization_rejected_span_count": sum(
+                    int(item.get("rejected_input_count", 0)) for item in normalizations
+                ),
+                "extractor_normalization_rejection_reasons": dict(
+                    sorted(rejection_reasons.items())
+                ),
+                "qa_evidence_document_count": document_count,
+                "qa_evidence_prompt_block_count": prompt_block_count,
+                "qa_evidence_filtered_document_count": document_count - prompt_block_count,
+            }
         pred = final_answer["answer"]
         retrieval_events = []
         if solo_rec:
@@ -1144,6 +1221,7 @@ def build_answer_records(
                 len(event.get("titles", [])) for event in retrieval_events
             ),
             "retrieval_unique_titles": len(retrieved_titles),
+            **qa_grounding_fields,
             "retrieval_events": retrieval_events,
             **evidence_fields,
         })

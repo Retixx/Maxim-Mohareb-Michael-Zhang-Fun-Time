@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
 
 from src import prompts  # noqa: E402
 from src.metrics import exact_match, f1_score  # noqa: E402
+from src.contracts import EXPERIMENT_SCHEMA, PILOT_GATE_SCHEMA_VERSION  # noqa: E402
 from src.runner import resolve_treatments  # noqa: E402
 
 
@@ -85,7 +86,7 @@ def _load_pilot_run(
         not fingerprint
         or not isinstance(payload, dict)
         or content_hash(payload) != fingerprint
-        or payload.get("schema") != "open_corpus_marag_v1"
+        or payload.get("schema") != EXPERIMENT_SCHEMA
         or payload.get("architecture") != config.get("architecture")
         or tuple(payload.get("pipeline_stages") or ()) != tuple(prompts.PIPELINE_STAGES)
         or payload.get("stage_role") != prompts.STAGE_ROLE
@@ -101,6 +102,13 @@ def _load_pilot_run(
         or retrieval_meta.get("query_policy") != retrieval_config.get("query_policy")
         or int(retrieval_meta.get("k_per_step", -1))
         != int(retrieval_config.get("k", -2))
+        or int(retrieval_meta.get("anchor_k", -1))
+        != int(retrieval_config.get("anchor_k", -2))
+        or int(retrieval_meta.get("task_k", -1))
+        != int(retrieval_config.get("task_k", -2))
+        or int(retrieval_meta.get("anchor_k", -1))
+        + int(retrieval_meta.get("task_k", -1))
+        != int(retrieval_meta.get("k_per_step", -2))
         or float(retrieval_meta.get("gold_sentence_coverage", -1)) != 1.0
     ):
         raise RuntimeError(f"{run_id}: pilot experiment fingerprint is stale")
@@ -250,11 +258,20 @@ def check_pilot(config_path: Path) -> dict:
     retrieval_fields = (
         "retrieval_gold_title_recall",
         "retrieval_all_gold",
+        "retrieval_anchor_gold_title_recall",
+        "retrieval_task_gold_title_recall",
+        "retrieval_step_count",
         "retrieval_query_count",
+        "retrieval_task_query_count",
         "retrieval_zero_result_query_count",
         "retrieval_aggregate_step_count",
         "retrieval_passage_exposures",
         "retrieval_unique_titles",
+        "qa_grounded_answer_rate",
+        "extractor_normalization_rejected_span_count",
+        "qa_evidence_document_count",
+        "qa_evidence_prompt_block_count",
+        "qa_evidence_filtered_document_count",
         "executed_steps",
         "planner_emitted_depth",
         "plan_was_clamped",
@@ -302,7 +319,7 @@ def check_pilot(config_path: Path) -> dict:
     }
 
     artifact = {
-        "schema_version": 1,
+        "schema_version": PILOT_GATE_SCHEMA_VERSION,
         "status": "GO" if passed else "STOP",
         "passed": passed,
         "source_config_file_sha256": sha256_file(config_path),
@@ -313,6 +330,19 @@ def check_pilot(config_path: Path) -> dict:
         "git_commit": next(iter(git_commits)),
         "n": pilot["n"],
         "retrieval_strata_counts": observed_strata,
+        "final_answer_sources": {
+            run_id: {
+                source: sum(
+                    row.get("final_answer_source") == source
+                    for row in answers[run_id].values()
+                )
+                for source in sorted({
+                    row["final_answer_source"]
+                    for row in answers[run_id].values()
+                })
+            }
+            for run_id in run_ids
+        },
         "run_jsonl_sha256": {
             run_id: sha256_file(loaded[run_id][2]) for run_id in run_ids
         },

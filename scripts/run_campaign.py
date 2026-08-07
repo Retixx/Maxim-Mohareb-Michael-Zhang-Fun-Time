@@ -32,6 +32,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.check_pilot import verify_gate  # noqa: E402
+from src.contracts import CAMPAIGN_PLAN_SCHEMA_VERSION, EXPERIMENT_SCHEMA  # noqa: E402
 from src import prompts  # noqa: E402
 from src.pipeline import load_id_manifest  # noqa: E402
 from src.runner import resolve_treatments, validate_environment_lock  # noqa: E402
@@ -159,7 +160,7 @@ def completed_run_ids(
             not experiment_fingerprint
             or not isinstance(payload, dict)
             or _content_hash(payload) != experiment_fingerprint
-            or payload.get("schema") != "open_corpus_marag_v1"
+            or payload.get("schema") != EXPERIMENT_SCHEMA
             or payload.get("architecture") != config.get("architecture")
             or tuple(payload.get("pipeline_stages") or ())
             != tuple(prompts.PIPELINE_STAGES)
@@ -170,6 +171,13 @@ def completed_run_ids(
             or retrieval_meta.get("query_policy") != retrieval_config.get("query_policy")
             or int(retrieval_meta.get("k_per_step", -1))
             != int(retrieval_config.get("k", -2))
+            or int(retrieval_meta.get("anchor_k", -1))
+            != int(retrieval_config.get("anchor_k", -2))
+            or int(retrieval_meta.get("task_k", -1))
+            != int(retrieval_config.get("task_k", -2))
+            or int(retrieval_meta.get("anchor_k", -1))
+            + int(retrieval_meta.get("task_k", -1))
+            != int(retrieval_meta.get("k_per_step", -2))
             or float(retrieval_meta.get("gold_sentence_coverage", -1)) != 1.0
         ):
             continue
@@ -291,7 +299,7 @@ def build_plan(config: dict, *, kind: str, workers: int, seed: int) -> dict:
         str(worker): run_ids[worker::workers] for worker in range(workers)
     }
     return {
-        "schema_version": 1,
+        "schema_version": CAMPAIGN_PLAN_SCHEMA_VERSION,
         "kind": kind,
         "seed": seed,
         "workers": workers,

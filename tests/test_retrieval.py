@@ -532,6 +532,12 @@ class StageWiringTests(unittest.TestCase):
         }
         self.idx[("q1", "extractor", 0)] = {
             "parsed": {"spans": ["Directed by Xawery.", "Directed by Xawery."]},
+            "extractor_normalization": {
+                "input_span_count": 2,
+                "accepted_span_count": 1,
+                "rejected_input_count": 1,
+                "rejection_reasons": {"duplicate_sentence": 1},
+            },
             "consumer_input": {
                 "retrieval": event,
                 "document_rank": 0,
@@ -540,6 +546,12 @@ class StageWiringTests(unittest.TestCase):
         }
         self.idx[("q1", "extractor", 1)] = {
             "parsed": {"spans": ["Directed by Xawery.", "Xawery was a Polish director."]},
+            "extractor_normalization": {
+                "input_span_count": 2,
+                "accepted_span_count": 2,
+                "rejected_input_count": 0,
+                "rejection_reasons": {},
+            },
             "consumer_input": {
                 "retrieval": event,
                 "document_rank": 1,
@@ -548,6 +560,12 @@ class StageWiringTests(unittest.TestCase):
         }
         self.idx[("q1", "extractor", 2)] = {
             "parsed": {"spans": []},
+            "extractor_normalization": {
+                "input_span_count": 0,
+                "accepted_span_count": 0,
+                "rejected_input_count": 0,
+                "rejection_reasons": {},
+            },
             "consumer_input": {
                 "retrieval": event,
                 "document_rank": 2,
@@ -593,6 +611,18 @@ class StageWiringTests(unittest.TestCase):
         }
         answer = build_answer_records([self.q], self.idx, "baseline")[0]
         self.assertEqual(answer["retrieved_titles"], ["Film page", "Director page"])
+        self.assertEqual(answer["qa_grounded_answer_rate"], 1.0)
+        self.assertEqual(answer["qa_evidence_document_count"], 3)
+        self.assertEqual(answer["qa_evidence_prompt_block_count"], 2)
+        self.assertEqual(answer["qa_evidence_filtered_document_count"], 1)
+        self.assertEqual(answer["extractor_call_count"], 3)
+        self.assertEqual(answer["extractor_normalization_input_span_count"], 4)
+        self.assertEqual(answer["extractor_normalization_accepted_span_count"], 3)
+        self.assertEqual(answer["extractor_normalization_rejected_span_count"], 1)
+        self.assertEqual(
+            answer["extractor_normalization_rejection_reasons"],
+            {"duplicate_sentence": 1},
+        )
 
     def test_zero_result_query_survives_on_qa_and_answer_telemetry(self):
         task = "zzzznotaword"

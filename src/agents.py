@@ -210,7 +210,10 @@ def run_calls(
         salvaged = None if status == "ok" else salvage(prompt_role, gen["raw_output"])
         conf = {k: gen[k] for k in ("mean_logprob", "min_logprob", "mean_entropy")
                 if k in gen}
-        paragraphs = call.get("fields", {}).get("paragraphs")
+        paragraphs = (
+            call.get("fields", {}).get("paragraphs")
+            or call.get("fields", {}).get("document")
+        )
         consumer_payload = None
         extractor_normalization = None
         source_sentences = (
