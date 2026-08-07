@@ -43,13 +43,24 @@ def build_planner_fields(question: str) -> dict:
     return {"question": question}
 
 
-def _render_prior_steps(prior_steps: list[dict] | None) -> str:
+def _render_prior_steps(
+    prior_steps: list[dict] | None, *, grounded_only: bool = False
+) -> str:
     if not prior_steps:
         return "(none; this is the first plan step)"
     lines = []
     for item in prior_steps:
+        grounded = item.get("answer_grounded")
+        answer = item.get("answer") or "(no answer)"
+        if grounded_only and grounded is not True:
+            answer = "(withheld: not evidence-grounded)"
         lines.append(f"Step {item['step_number']} goal: {item['sub_question']}")
-        lines.append(f"Step {item['step_number']} answer: {item.get('answer') or '(no answer)'}")
+        lines.append(f"Step {item['step_number']} answer: {answer}")
+        if grounded is not None:
+            lines.append(
+                f"Step {item['step_number']} grounding: "
+                f"{'evidence-grounded' if grounded else 'unsupported guess'}"
+            )
         if item.get("success") is not None:
             lines.append(
                 f"Step {item['step_number']} success/rating: "
@@ -76,7 +87,7 @@ def build_step_definer_fields(
         ),
         "step_number": step_number,
         "plan_steps": plan_steps,
-        "prior_state": _render_prior_steps(prior_steps),
+        "prior_state": _render_prior_steps(prior_steps, grounded_only=True),
     }
 
 

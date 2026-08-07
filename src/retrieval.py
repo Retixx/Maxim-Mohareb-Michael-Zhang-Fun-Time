@@ -47,6 +47,41 @@ B = 0.75
 # two-query diagnostic helpers and is not part of the production query policy.
 K = 10
 HOP1 = 7
+ANCHOR_K = 7
+QUERY_POLICY = "anchored_original_question_7_plus_grounded_task_3_v1"
+
+
+def fuse_rankings(
+    anchor_titles: list[str],
+    task_titles: list[str],
+    *,
+    k: int = K,
+    anchor_k: int = ANCHOR_K,
+) -> list[str]:
+    """Fuse rankings with a fixed anchor quota and no duplicate exposure."""
+    if k <= 0:
+        raise ValueError(f"k must be positive; got {k}")
+    if not 0 < anchor_k <= k:
+        raise ValueError(f"need 0 < anchor_k <= k; got anchor_k={anchor_k}, k={k}")
+
+    fused: list[str] = []
+    seen: set[str] = set()
+
+    def extend(values: list[str], limit: int) -> None:
+        for title in values:
+            if len(fused) >= limit:
+                return
+            if title not in seen:
+                seen.add(title)
+                fused.append(title)
+
+    extend(anchor_titles[:anchor_k], anchor_k)
+    task_target = min(k, len(fused) + (k - anchor_k))
+    extend(task_titles, task_target)
+    extend(anchor_titles, k)
+    extend(task_titles, k)
+    return fused
+
 
 
 def tokenize(text: str) -> list[str]:
@@ -341,13 +376,26 @@ class RetrievalContext:
     every stage that reads passages.
     """
 
-    def __init__(self, passages: list[Passage], k: int = K, hop1: int | None = None):
+    def __init__(
+        self,
+        passages: list[Passage],
+        k: int = K,
+        hop1: int | None = None,
+        anchor_k: int | None = None,
+    ):
         if k <= 0:
             raise ValueError(f"k must be positive; got {k}")
         if hop1 is not None and not 0 < hop1 < k:
             raise ValueError(f"need 0 < hop1 < k; got hop1={hop1}, k={k}")
+        anchor_k = (
+            min(ANCHOR_K, max(1, k - 1)) if anchor_k is None else anchor_k
+        )
+        if not 0 < anchor_k <= k:
+            raise ValueError(f"need 0 < anchor_k <= k; got anchor_k={anchor_k}, k={k}")
         self.index = BM25Index(passages)
         self.k = k
+        self.anchor_k = anchor_k
+        self.task_k = k - anchor_k
         # Kept for archived two-pass probes; production leaves it None.
         self.hop1 = hop1
         self._sentences = {p.title: p.sentences for p in passages}
@@ -382,8 +430,10 @@ class RetrievalContext:
             "corpus_sha256": self._corpus_sha256,
             "algorithm": "sparse_bm25_lucene_idf_v1",
             "tie_break": "score_desc_corpus_index_asc",
-            "query_policy": "step_definer_top_k_per_question_answering_step_v1",
+            "query_policy": QUERY_POLICY,
             "k_per_step": self.k,
+            "anchor_k": self.anchor_k,
+            "task_k": self.task_k,
             "bm25_k1": self.index.k1,
             "bm25_b": self.index.b,
             "vocab_terms": len(self.index.vocab),

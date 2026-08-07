@@ -52,10 +52,9 @@ dataset:
 # missing for 39% of questions); distractor guarantees gold stays reachable.
 # Union: 72,094 passages, 100% gold-in-corpus.
 #
-# MA-RAG issues one targeted retrieval for every question-answering plan step.
-# The old 7/3 regex two-pass sweep is retained only as an archived diagnostic;
-# it is not the active reasoning topology and its recall numbers are not used as
-# evidence for this experiment.
+# Every QA step anchors on the original-question ranking. Later steps add a
+# grounded task query only after a prior QA answer is found verbatim in consumed
+# evidence; fusion preserves seven anchor slots and three unique task slots.
 retrieval:
   corpus_configs: [distractor, fullwiki]
   expected_corpus_passages: 72094
@@ -63,8 +62,10 @@ retrieval:
   required_gold_title_coverage: 1.0
   required_gold_sentence_coverage: 1.0
   algorithm: sparse_bm25_lucene_idf_v1
-  query_policy: step_definer_top_k_per_question_answering_step_v1
+  query_policy: anchored_original_question_7_plus_grounded_task_3_v1
   k: 10
+  anchor_k: 7
+  task_k: 3
 
 architecture:
   framework: ma-rag

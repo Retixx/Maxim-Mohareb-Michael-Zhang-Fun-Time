@@ -1695,6 +1695,7 @@ def run(
     retriever = retrieval.RetrievalContext(
         corpus,
         k=int(retr_cfg.get("k", retrieval.K)),
+        anchor_k=int(retr_cfg.get("anchor_k", retrieval.ANCHOR_K)),
     )
     expected_corpus_passages = int(retr_cfg.get("expected_corpus_passages", -1))
     if len(corpus) != expected_corpus_passages:
@@ -1713,8 +1714,15 @@ def run(
         )
     if fingerprint["query_policy"] != retr_cfg.get("query_policy"):
         raise AssertionError("configured retrieval query policy does not match implementation")
+    if fingerprint["anchor_k"] != int(retr_cfg.get("anchor_k", -1)):
+        raise AssertionError("configured retrieval anchor quota does not match implementation")
+    if fingerprint["task_k"] != int(retr_cfg.get("task_k", -1)):
+        raise AssertionError("configured retrieval task quota does not match implementation")
+    if fingerprint["anchor_k"] + fingerprint["task_k"] != fingerprint["k_per_step"]:
+        raise AssertionError("retrieval fusion quotas must equal the passage budget")
     print(
         f"  {len(corpus):,} passages, k={retriever.k} per question-answering step, "
+        f"anchor/task={retriever.anchor_k}/{retriever.task_k}, "
         f"policy={fingerprint['query_policy']}"
     )
     coverage_questions = [*questions, *auxiliary_questions]

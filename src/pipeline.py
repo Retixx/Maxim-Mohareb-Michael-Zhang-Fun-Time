@@ -339,6 +339,28 @@ def _effective_payload(rec: dict | None) -> tuple[dict | None, str]:
     return None, "fallback"
 
 
+def _answer_is_grounded(answer: str, evidence_texts: list[str]) -> bool:
+    """Whether a short answer occurs as a token phrase in consumed evidence."""
+    answer_norm = retrieval.norm(answer)
+    if not answer_norm:
+        return False
+    needle = f" {answer_norm} "
+    return any(
+        needle in f" {retrieval.norm(text)} "
+        for text in evidence_texts
+        if isinstance(text, str) and text.strip()
+    )
+
+
+def _grounded_prior_answers(history: list[dict]) -> list[str]:
+    answers: list[str] = []
+    for prior in history:
+        answer = " ".join(str(prior.get("answer") or "").split())
+        if prior.get("answer_grounded") is True and answer and answer not in answers:
+            answers.append(answer)
+    return answers
+
+
 def _extractor_records(qid: str, step_index: int, idx: dict) -> list[dict]:
     """Return one step's contiguous document records without scanning the run.
 
@@ -379,14 +401,27 @@ def step_history_for(q: dict, idx: dict, before_step: int | None = None) -> list
         task, task_source = _effective_payload(
             idx.get((q["question_id"], sd_stage, step_index))
         )
+        qa_payload = qa_payload or {}
+        answer = qa_payload.get("answer", "")
+        grounding_texts = list(spans)
+        for block in ((qa_rec.get("consumer_input") or {}).get("evidence_blocks") or []):
+            grounding_texts.extend(block.get("spans") or [])
+            prior_answer = block.get("answer")
+            if prior_answer and block.get("answer_grounded") is True:
+                grounding_texts.append(prior_answer)
+        answer_grounded = _answer_is_grounded(answer, grounding_texts)
         history.append({
             "step_number": step_index + 1,
             "sub_question": plan[step_index],
             "task": task or {},
             "task_source": task_source,
-            "answer": (qa_payload or {}).get("answer", ""),
-            "success": (qa_payload or {}).get("success"),
-            "rating": (qa_payload or {}).get("rating"),
+            "answer": answer,
+            "answer_grounded": answer_grounded,
+            "answer_grounding": (
+                "consumed_evidence" if answer_grounded else "unsupported"
+            ),
+            "success": qa_payload.get("success"),
+            "rating": qa_payload.get("rating"),
             "qa_source": qa_source,
             "spans": list(dict.fromkeys(spans)),
             "span_sources": span_sources,
@@ -425,11 +460,9 @@ def _step_task(q: dict, idx: dict, step_index: int) -> tuple[dict, str]:
 
     plan = sub_questions_for(q, idx)
     current_goal = plan[step_index]
-    prior_answers = []
-    for prior in step_history_for(q, idx, before_step=step_index):
-        answer = " ".join(str(prior.get("answer") or "").split())
-        if answer and answer not in prior_answers:
-            prior_answers.append(answer)
+    prior_answers = _grounded_prior_answers(
+        step_history_for(q, idx, before_step=step_index)
+    )
     context = "; ".join(prior_answers) if prior_answers else "(none yet)"
     return {
         "type": "question-answering",
@@ -440,8 +473,76 @@ def _step_task(q: dict, idx: dict, step_index: int) -> tuple[dict, str]:
     }, "fallback"
 
 
+def _retrieval_decision(
+    q: dict,
+    idx: dict,
+    step_index: int,
+    task: dict,
+    retriever,
+) -> dict:
+    """Build one frozen anchored-retrieval event without consulting gold data."""
+    anchor_query = q["question"]
+    anchor_titles = retriever.index.search_titles(anchor_query, retriever.k)
+    history = step_history_for(q, idx, before_step=step_index)
+    grounded_answers = _grounded_prior_answers(history)
+    task_attempted = bool(
+        step_index > 0 and grounded_answers and retriever.task_k > 0
+    )
+    task_query = None
+    task_titles: list[str] = []
+    if task_attempted:
+        query_parts = [task["task"]]
+        task_norm = retrieval.norm(task["task"])
+        query_parts.extend(
+            answer
+            for answer in grounded_answers
+            if retrieval.norm(answer) not in task_norm
+        )
+        task_query = " | ".join(query_parts)
+        task_titles = retriever.index.search_titles(task_query, retriever.k)
+        titles = retrieval.fuse_rankings(
+            anchor_titles,
+            task_titles,
+            k=retriever.k,
+            anchor_k=retriever.anchor_k,
+        )
+    else:
+        titles = list(anchor_titles[:retriever.k])
+
+    components = [{
+        "name": "original_question_anchor",
+        "attempted": True,
+        "query": anchor_query,
+        "titles": anchor_titles,
+    }, {
+        "name": "grounded_step_task",
+        "attempted": task_attempted,
+        "query": task_query,
+        "titles": task_titles,
+    }]
+    return {
+        "step": step_index + 1,
+        "task_type": "question-answering",
+        "attempted": True,
+        "policy": retrieval.QUERY_POLICY,
+        "raw_step_task": task["task"],
+        "grounded_prior_answers": grounded_answers,
+        "anchor_query": anchor_query,
+        "anchor_titles": anchor_titles,
+        "task_component_attempted": task_attempted,
+        "task_query": task_query,
+        "task_titles": task_titles,
+        "anchor_k": retriever.anchor_k,
+        "task_k": retriever.task_k,
+        "query_count": sum(component["attempted"] for component in components),
+        "components": components,
+        "query": task_query if task_attempted else anchor_query,
+        "titles": titles,
+    }
+
+
 def _retrieval_event_for_qa(
-    q: dict, idx: dict, step_index: int, task: dict
+    q: dict, idx: dict, step_index: int, task: dict, retriever=None
 ) -> dict:
     """Persist retrieval intent on QA, including no-hit and no-query steps."""
     if task["type"] == "aggregate":
@@ -450,6 +551,8 @@ def _retrieval_event_for_qa(
             "task_type": "aggregate",
             "attempted": False,
             "query": None,
+            "query_count": 0,
+            "components": [],
             "titles": [],
         }
 
@@ -458,10 +561,13 @@ def _retrieval_event_for_qa(
     if records:
         event = ((records[0].get("consumer_input") or {}).get("retrieval"))
     got = dict(event or {})
+    if event is None and retriever is not None:
+        return _retrieval_decision(q, idx, step_index, task, retriever)
     got.setdefault("step", step_index + 1)
     got.setdefault("task_type", "question-answering")
     got.setdefault("attempted", True)
     got.setdefault("query", task["task"])
+    got.setdefault("query_count", 1)
     if "titles" not in got:
         got["titles"] = list(dict.fromkeys(
             title
@@ -533,15 +639,9 @@ def build_stage_calls(stage: str, questions: list[dict], idx: dict,
             task, source = _step_task(q, idx, step_index)
             if task["type"] == "aggregate":
                 continue
-            titles = retriever.index.search_titles(task["task"], retriever.k)
+            event = _retrieval_decision(q, idx, step_index, task, retriever)
+            titles = event["titles"]
             passages = retriever.passages(titles)
-            event = {
-                "step": step_index + 1,
-                "task_type": task["type"],
-                "attempted": True,
-                "query": task["task"],
-                "titles": titles,
-            }
             # MA-RAG extracts one note per retrieved document. We retain that
             # provenance while accelerator batching amortizes the calls.
             for document_rank, passage in enumerate(passages):
@@ -574,7 +674,7 @@ def build_stage_calls(stage: str, questions: list[dict], idx: dict,
             history = step_history_for(q, idx, before_step=step_index)
             task, task_source = _step_task(q, idx, step_index)
             retrieval_event = _retrieval_event_for_qa(
-                q, idx, step_index, task
+                q, idx, step_index, task, retriever
             )
             blocks = []
             consumed = []
@@ -702,7 +802,20 @@ def build_stage_calls(stage: str, questions: list[dict], idx: dict,
                         "step": 1,
                         "task_type": "question-answering",
                         "attempted": True,
+                        "policy": "original_question_top_k_v1",
                         "query": q["question"],
+                        "query_count": 1,
+                        "anchor_query": q["question"],
+                        "anchor_titles": titles,
+                        "task_component_attempted": False,
+                        "task_query": None,
+                        "task_titles": [],
+                        "components": [{
+                            "name": "original_question_anchor",
+                            "attempted": True,
+                            "query": q["question"],
+                            "titles": titles,
+                        }],
                         "titles": titles,
                     },
                 },
@@ -776,19 +889,62 @@ def build_answer_records(
             event for event in retrieval_events
             if bool(event.get("attempted", event.get("query") is not None))
         ]
-        zero_result_events = [
-            event for event in attempted_events if not event.get("titles")
+        attempted_components = []
+        for event in retrieval_events:
+            components = event.get("components")
+            if components is None:
+                if bool(event.get("attempted", event.get("query") is not None)):
+                    attempted_components.append({
+                        "name": "legacy_query",
+                        "attempted": True,
+                        "query": event.get("query"),
+                        "titles": list(event.get("titles") or []),
+                    })
+                continue
+            attempted_components.extend(
+                component for component in components if component.get("attempted")
+            )
+        zero_result_components = [
+            component for component in attempted_components
+            if not component.get("titles")
         ]
         aggregate_events = [
             event for event in retrieval_events
             if event.get("task_type") == "aggregate"
         ]
+        anchor_attempted = any(
+            any(
+                component.get("name") == "original_question_anchor"
+                and component.get("attempted")
+                for component in (event.get("components") or [])
+            )
+            for event in retrieval_events
+        )
+        task_attempted = any(
+            event.get("task_component_attempted") for event in retrieval_events
+        )
+        anchor_titles = list(dict.fromkeys(
+            title for event in retrieval_events
+            for title in event.get("anchor_titles", [])
+        ))
+        task_titles = list(dict.fromkeys(
+            title for event in retrieval_events
+            for title in event.get("task_titles", [])
+        ))
         gold_titles = list(dict.fromkeys(
             (q.get("supporting_facts") or {}).get("title", [])
         ))
         retrieved_gold = [title for title in gold_titles if title in set(retrieved_titles)]
         title_recall = (
             len(retrieved_gold) / len(gold_titles) if gold_titles else 1.0
+        )
+        anchor_recall = (
+            len(set(gold_titles) & set(anchor_titles)) / len(gold_titles)
+            if anchor_attempted and gold_titles else 1.0 if anchor_attempted else None
+        )
+        task_recall = (
+            len(set(gold_titles) & set(task_titles)) / len(gold_titles)
+            if task_attempted and gold_titles else 1.0 if task_attempted else None
         )
         evidence_fields = {
             "evidence_status": "not_applicable",
@@ -875,8 +1031,17 @@ def build_answer_records(
             "retrieved_gold_titles": retrieved_gold,
             "retrieval_gold_title_recall": title_recall,
             "retrieval_all_gold": len(retrieved_gold) == len(gold_titles),
-            "retrieval_query_count": len(attempted_events),
-            "retrieval_zero_result_query_count": len(zero_result_events),
+            "retrieval_step_count": len(attempted_events),
+            "retrieval_query_count": len(attempted_components),
+            "retrieval_zero_result_query_count": len(zero_result_components),
+            "retrieval_anchor_titles": anchor_titles,
+            "retrieval_anchor_gold_title_recall": anchor_recall,
+            "retrieval_task_titles": task_titles,
+            "retrieval_task_gold_title_recall": task_recall,
+            "retrieval_task_query_count": sum(
+                component.get("name") == "grounded_step_task"
+                for component in attempted_components
+            ),
             "retrieval_aggregate_step_count": len(aggregate_events),
             "retrieval_passage_exposures": sum(
                 len(event.get("titles", [])) for event in retrieval_events
