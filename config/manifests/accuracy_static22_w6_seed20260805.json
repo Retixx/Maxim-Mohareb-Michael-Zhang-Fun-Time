@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "kind": "accuracy",
+  "seed": 20260805,
+  "logical_workers": 6,
+  "ordered_run_ids": [
+    "extractor_small",
+    "qa_4bit",
+    "ma_uniform_tiny",
+    "planner_8bit",
+    "extractor_8bit",
+    "stepdef_small",
+    "stepdef_4bit",
+    "baseline",
+    "ma_uniform_8bit",
+    "planner_tiny",
+    "qa_small",
+    "ma_uniform_small",
+    "stepdef_tiny",
+    "extractor_4bit",
+    "planner_small",
+    "stepdef_8bit",
+    "planner_4bit",
+    "qa_8bit",
+    "single_fp16",
+    "ma_uniform_4bit",
+    "extractor_tiny",
+    "qa_tiny"
+  ],
+  "assignments": {
+    "0": [
+      "extractor_small",
+      "stepdef_4bit",
+      "stepdef_tiny",
+      "single_fp16"
+    ],
+    "1": [
+      "qa_4bit",
+      "baseline",
+      "extractor_4bit",
+      "ma_uniform_4bit"
+    ],
+    "2": [
+      "ma_uniform_tiny",
+      "ma_uniform_8bit",
+      "planner_small",
+      "extractor_tiny"
+    ],
+    "3": [
+      "planner_8bit",
+      "planner_tiny",
+      "stepdef_8bit",
+      "qa_tiny"
+    ],
+    "4": [
+      "extractor_8bit",
+      "qa_small",
+      "planner_4bit"
+    ],
+    "5": [
+      "stepdef_small",
+      "ma_uniform_small",
+      "qa_8bit"
+    ]
+  }
+}
