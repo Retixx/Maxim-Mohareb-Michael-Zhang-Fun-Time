@@ -12,6 +12,8 @@ from src.pipeline import (
     build_answer_records,
     build_stage_calls,
     load_id_manifest,
+    final_answer_for,
+    usable_short_answer,
 )
 from src.runner import (
     JsonlStore,
@@ -292,7 +294,58 @@ class ExecutionIntegrityTests(unittest.TestCase):
         answer = build_answer_records([question], idx, "baseline")[0]
         self.assertEqual(answer["answer_stage"], "plan_summary")
         self.assertEqual(answer["predicted_answer"], "final")
+        self.assertEqual(answer["final_answer_source"], "summary_parsed")
         self.assertEqual(answer["plan_depth"], 2)
+
+    def test_final_answer_resolution_preserves_precedence_and_rejects_sentinels(self):
+        history = [{
+            "step_number": 1,
+            "answer": "grounded bridge",
+            "answer_grounded": True,
+            "qa_source": "parsed",
+        }, {
+            "step_number": 2,
+            "answer": "No relevant information found",
+            "answer_grounded": False,
+            "qa_source": "parsed",
+        }]
+
+        parsed = final_answer_for(
+            None,
+            {"parsed": {"answer": "summary answer"}, "salvaged": {"answer": "old"}},
+            history,
+        )
+        self.assertEqual(parsed["answer"], "summary answer")
+        self.assertEqual(parsed["source"], "summary_parsed")
+
+        salvaged = final_answer_for(
+            None,
+            {"parsed": None, "salvaged": {"answer": "salvaged answer"}},
+            history,
+        )
+        self.assertEqual(salvaged["answer"], "salvaged answer")
+        self.assertEqual(salvaged["source"], "summary_salvaged")
+
+        fallback = final_answer_for(
+            None,
+            {"parsed": {"answer": "No relevant information found"}},
+            history,
+        )
+        self.assertEqual(fallback["answer"], "grounded bridge")
+        self.assertEqual(fallback["source"], "qa_fallback")
+        self.assertEqual(fallback["qa_step"], 1)
+        self.assertTrue(fallback["grounded"])
+
+        self.assertFalse(usable_short_answer(""))
+        self.assertFalse(usable_short_answer("unknown"))
+        self.assertFalse(usable_short_answer("No relevant information found."))
+        self.assertFalse(usable_short_answer("word " * 13))
+        self.assertTrue(usable_short_answer("Bay of Fundy"))
+
+        solo = final_answer_for(
+            {"parsed": {"answer": "solo answer"}}, None, []
+        )
+        self.assertEqual(solo["source"], "solo_parsed")
 
     def test_solo_answer_has_no_fake_subquestions_or_evidence_metric(self):
         question = {

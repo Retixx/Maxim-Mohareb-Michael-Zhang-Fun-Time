@@ -183,6 +183,18 @@ def check_pilot(config_path: Path) -> dict:
         answers[run_id] = indexed
     if any(row.get("answer_stage") != "plan_summary" for row in answers["baseline"].values()):
         raise RuntimeError("baseline pilot did not score the MA-RAG plan summary")
+    baseline_sources = {"summary_parsed", "summary_salvaged", "qa_fallback", "none"}
+    if any(
+        row.get("final_answer_source") not in baseline_sources
+        for row in answers["baseline"].values()
+    ):
+        raise RuntimeError("baseline pilot has invalid final-answer provenance")
+    solo_sources = {"solo_parsed", "solo_salvaged", "none"}
+    if any(
+        row.get("final_answer_source") not in solo_sources
+        for row in answers["single_fp16"].values()
+    ):
+        raise RuntimeError("single pilot has invalid final-answer provenance")
     if any(row.get("answer_stage") != "solo" for row in answers["single_fp16"].values()):
         raise RuntimeError("single pilot did not score the one-call solo control")
     observed_strata = {

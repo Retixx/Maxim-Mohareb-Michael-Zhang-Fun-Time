@@ -136,6 +136,9 @@ class PilotGateFixture:
             "f1": f1_score(prediction, gold),
             "em": exact_match(prediction, gold),
             "answer_stage": "plan_summary" if run_id == "baseline" else "solo",
+            "final_answer_source": (
+                "summary_parsed" if run_id == "baseline" else "solo_parsed"
+            ),
             "retrieval_gold_title_recall": 1.0,
             "retrieval_all_gold": 1.0,
             "retrieval_query_count": 2.0 if run_id == "baseline" else 1.0,
@@ -255,6 +258,51 @@ class PilotGateTests(unittest.TestCase):
             ),
             artifact,
         )
+
+    def test_logged_qa_fallback_is_valid_baseline_output(self) -> None:
+        self.fixture.write_runs(baseline_correct=True, single_correct=False)
+        jsonl_path = self.root / "results" / "baseline.jsonl"
+        records = [
+            json.loads(line) for line in jsonl_path.read_text().splitlines()
+        ]
+        for record in records:
+            if record.get("record_type") == "answer":
+                record["final_answer_source"] = "qa_fallback"
+        jsonl_path.write_text(
+            "".join(json.dumps(record) + "\n" for record in records),
+            encoding="utf-8",
+        )
+        meta_path = self.root / "results" / "baseline.meta.json"
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        meta["jsonl_sha256"] = gate.sha256_file(jsonl_path)
+        meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+        artifact = self.fixture.write_gate()
+        self.assertEqual(artifact["status"], "GO")
+        self.assertTrue(artifact["passed"])
+
+    def test_unknown_final_answer_source_is_rejected(self) -> None:
+        self.fixture.write_runs(baseline_correct=True, single_correct=False)
+        jsonl_path = self.root / "results" / "baseline.jsonl"
+        records = [
+            json.loads(line) for line in jsonl_path.read_text().splitlines()
+        ]
+        for record in records:
+            if record.get("record_type") == "answer":
+                record["final_answer_source"] = "mystery"
+        jsonl_path.write_text(
+            "".join(json.dumps(record) + "\n" for record in records),
+            encoding="utf-8",
+        )
+        meta_path = self.root / "results" / "baseline.meta.json"
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        meta["jsonl_sha256"] = gate.sha256_file(jsonl_path)
+        meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            RuntimeError, "invalid final-answer provenance"
+        ):
+            self.fixture.write_gate()
 
     def test_stop_certificate_is_rejected(self) -> None:
         self.fixture.write_runs(baseline_correct=False, single_correct=True)

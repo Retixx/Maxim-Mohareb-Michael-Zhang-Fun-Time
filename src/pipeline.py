@@ -874,6 +874,83 @@ def retrieval_events_for(q: dict, idx: dict) -> list[dict]:
     return events
 
 
+_NO_ANSWER_SENTINELS = frozenset({
+    "unknown",
+    "no answer",
+    "no answer found",
+    "no relevant information",
+    "no relevant information found",
+    "not enough information",
+    "insufficient information",
+    "cannot determine",
+    "unable to determine",
+    "i don't know",
+    "n/a",
+    "none",
+})
+
+
+def usable_short_answer(value: object) -> bool:
+    """Whether a candidate is a bounded answer rather than a no-answer marker."""
+    if not isinstance(value, str):
+        return False
+    answer = " ".join(value.split())
+    if not answer or len(answer.split()) > 12:
+        return False
+    normalized = answer.casefold().strip(" \t\r\n.,;:!?\"'`()[]{}")
+    return normalized not in _NO_ANSWER_SENTINELS
+
+
+def final_answer_for(
+    solo_rec: dict | None,
+    summary_rec: dict | None,
+    history: list[dict],
+) -> dict:
+    """Resolve one prediction without changing any call or parse measurement."""
+    if solo_rec is not None:
+        for key, source in (
+            ("parsed", "solo_parsed"),
+            ("salvaged", "solo_salvaged"),
+        ):
+            payload = solo_rec.get(key) or {}
+            answer = payload.get("answer")
+            if isinstance(answer, str) and answer.strip():
+                return {
+                    "answer": " ".join(answer.split()),
+                    "source": source,
+                    "grounded": None,
+                    "qa_step": None,
+                }
+        return {"answer": "", "source": "none", "grounded": None, "qa_step": None}
+
+    if summary_rec is not None:
+        for key, source in (
+            ("parsed", "summary_parsed"),
+            ("salvaged", "summary_salvaged"),
+        ):
+            payload = summary_rec.get(key) or {}
+            answer = payload.get("answer")
+            if usable_short_answer(answer):
+                return {
+                    "answer": " ".join(answer.split()),
+                    "source": source,
+                    "grounded": None,
+                    "qa_step": None,
+                }
+
+    for prior in reversed(history):
+        answer = prior.get("answer")
+        if usable_short_answer(answer):
+            return {
+                "answer": " ".join(answer.split()),
+                "source": "qa_fallback",
+                "grounded": prior.get("answer_grounded") is True,
+                "qa_step": prior.get("step_number"),
+            }
+
+    return {"answer": "", "source": "none", "grounded": None, "qa_step": None}
+
+
 def build_answer_records(
     questions: list[dict], idx: dict, run_id: str,
     question_manifest_sha256: str | None = None,
@@ -886,11 +963,12 @@ def build_answer_records(
         summary_rec = idx.get((q["question_id"], prompts.PLAN_SUMMARY_STAGE, 0))
         rec = solo_rec or summary_rec
         parsed = (rec.get("parsed") or rec.get("salvaged")) if rec else None
-        pred = (parsed or {}).get("answer", "")
         answer_stage = rec.get("stage") if rec else None
         plan = None if solo_rec else sub_questions_for(q, idx)
         depth_fields = {} if solo_rec else planner_depth_for(q, idx)
         history = [] if solo_rec else step_history_for(q, idx)
+        final_answer = final_answer_for(solo_rec, summary_rec, history)
+        pred = final_answer["answer"]
         retrieval_events = []
         if solo_rec:
             got = ((solo_rec.get("consumer_input") or {}).get("retrieval") or {})
@@ -1014,6 +1092,9 @@ def build_answer_records(
             "record_type": "answer",
             "question": q["question"],
             "gold_answer": q["answer"],
+            "final_answer_source": final_answer["source"],
+            "final_answer_grounded": final_answer["grounded"],
+            "final_answer_qa_step": final_answer["qa_step"],
             "predicted_answer": pred,
             "answer_stage": answer_stage,
             "question_manifest_sha256": question_manifest_sha256,
