@@ -1,0 +1,128 @@
+{
+ "model": "Qwen/Qwen2.5-3B-Instruct",
+ "precision": "4bit",
+ "n": 100,
+ "strata": {
+  "hidden_bridge": 70,
+  "fully_named": 30
+ },
+ "seed": 20260807,
+ "metrics": {
+  "f1_hidden_bridge": {
+   "multi": 0.1523809523809524,
+   "single": 0.395584336298622,
+   "delta_pp": -24.32033839176696
+  },
+  "f1_fully_named": {
+   "multi": 0.20666666666666664,
+   "single": 0.7144444444444444,
+   "delta_pp": -50.77777777777778
+  },
+  "f1_ALL": {
+   "multi": 0.16866666666666666,
+   "single": 0.49124236874236865,
+   "delta_pp": -32.2575702075702
+  },
+  "em_hidden_bridge": {
+   "multi": 0.1,
+   "single": 0.2857142857142857,
+   "delta_pp": -18.57142857142857
+  },
+  "em_fully_named": {
+   "multi": 0.16666666666666666,
+   "single": 0.6,
+   "delta_pp": -43.333333333333336
+  },
+  "em_ALL": {
+   "multi": 0.12,
+   "single": 0.38,
+   "delta_pp": -26.0
+  }
+ },
+ "calls": {
+  "multi": 2132,
+  "single": 100
+ },
+ "wall_s": {
+  "multi": 1587.962194000007,
+  "single": 1578.6070182999974
+ },
+ "samples": {
+  "malformed_json": [
+   {
+    "stage": "planner",
+    "output_tokens": 39,
+    "raw": "{\"analysis\": \"Find the drum machine and its features.\", \"sub_questions\": [\"What drum machine was introduced in 1989?\", \"What features did this drum machine have?\"\"]}"
+   },
+   {
+    "stage": "planner",
+    "output_tokens": 33,
+    "raw": "{\"analysis\": \"Determine the type of sexuality based on the subjects involved.\", \"sub_questions\": [\"What does sexual behavior toward both males and females describe?\"\"]}"
+   },
+   {
+    "stage": "planner",
+    "output_tokens": 34,
+    "raw": "{\"analysis\": \"Find the press company for the paranormal romance series.\", \"sub_questions\": [\"What paranormal romance series is 'Fallen In Love' based on?\"\"]}"
+   }
+  ],
+  "truncated": [
+   {
+    "stage": "extractor",
+    "output_tokens": 128,
+    "raw": "{\"spans\": [\"Apollo 8, the second human spaceflight mission in the United States Apollo space program, was launched on December 21, 1968, and became the first crewed spacecraft to leave Earth orbit, reach the Earth's Moon, orbit it and return safely to Earth. The three-astronaut crew \u2014 Commander Frank Borman, Command Module Pilot James Lovell, and Lunar Module Pilot William Anders \u2014 became the first humans to: travel beyond low Earth orbit; escape Earth's gravity; see Earth as a whole planet; enter the gravity well of another celestial body (Earth's moon); orbit another"
+   },
+   {
+    "stage": "extractor",
+    "output_tokens": 128,
+    "raw": "{\"spans\": [\"List of Outlander episodes: \\\"Outlander\\\" is a British-American television drama series based on the \\\"Outlander\\\" series of historical time travel novels by Diana Gabaldon. Developed by Ronald D. Moore and produced by Sony Pictures Television and Left Bank Pictures for Starz, the show premiered on August 9, 2014. It stars Caitriona Balfe as Claire Randall, a married former World War II nurse who in 1946 finds herself transported back to the Scotland of 1743, where she meets the dashing Highland warrior Jamie Fraser (Sam Heugh"
+   },
+   {
+    "stage": "extractor_step2",
+    "output_tokens": 128,
+    "raw": "{\"spans\": [\"Osbeckia is considered to be endemic to Sri Lanka, where it is known as \\\"Heen Bovitiya - \u0dc4\u0dd3\u0db1\u0dca \u0db6\u0ddd\u0dc0\u0dd2\u0da7\u0dd2\u0dba\u0dcf\\\" in Sinhala language. But some texts indicate that it is also found in Tamil Nadu of India.\", \"It is considered to be endemic to Sri Lanka, where it is known as \\\"Heen Bovitiya - \u0dc4\u0dd3\u0db1\u0dca \u0db6\u0ddd\u0dc0\u0dd2\u0da7\u0dd2\u0dba\u0dcf\\\" in Sinhala language. But"
+   }
+  ],
+  "schema_mismatch": [
+   {
+    "stage": "extractor",
+    "output_tokens": 67,
+    "raw": "{\"spans\": [[\"The Battle of the Ch'ongch'on River, also known as the Battle of the Ch'ongch'on () or the Second Phase Campaign Western Sector (), was a decisive battle in the Korean War, and it took place from November 25 to December 2, 1950\"]]}"
+   },
+   {
+    "stage": "extractor",
+    "output_tokens": 26,
+    "raw": "{\"spans\": [\"spans\":[{\"span\":\"Elton John\",\"start\":67,\"end\":71}]}[]}"
+   },
+   {
+    "stage": "qa",
+    "output_tokens": 41,
+    "raw": "{\"analysis\": \"The evidence lists a book that Mutarelli based Nina on, but does not provide the publication year.\", \"answer\": \"\", \"success\": \"no\", \"rating\": 2}"
+   }
+  ]
+ },
+ "parse": {
+  "planner|ok": 94,
+  "planner|malformed_json": 6,
+  "step_definer|ok": 100,
+  "extractor|ok": 983,
+  "extractor|malformed_json": 13,
+  "extractor|truncated": 2,
+  "extractor|schema_mismatch": 2,
+  "qa|ok": 88,
+  "qa|schema_mismatch": 12,
+  "step_definer_step2|ok": 53,
+  "step_definer_step2|schema_mismatch": 2,
+  "extractor_step2|ok": 539,
+  "extractor_step2|truncated": 5,
+  "extractor_step2|malformed_json": 6,
+  "qa_step2|ok": 50,
+  "qa_step2|schema_mismatch": 5,
+  "step_definer_step3|schema_mismatch": 3,
+  "step_definer_step3|ok": 3,
+  "extractor_step3|ok": 60,
+  "qa_step3|schema_mismatch": 1,
+  "qa_step3|ok": 5,
+  "plan_summary|ok": 87,
+  "plan_summary|schema_mismatch": 13
+ }
+}

@@ -1,0 +1,32 @@
+stratum            n   SINGLE    MULTI    delta   SINGLE all  MULTI all    delta
+--------------------------------------------------------------------------------
+hidden_bridge     70    0.729    0.571   -0.157        0.514      0.257   -0.257
+fully_named       30    0.883    0.800   -0.083        0.800      0.667   -0.133
+ALL              100    0.775    0.640   -0.135        0.600      0.380   -0.220
+
+mean unique passages read per question, single: 10.0
+
+mean unique passages read per question, multi: 15.2
+
+questions executing >1 retrieval step: 71
+  every step issued an identical query: 5 (7%)
+
+sample step-2 queries (the hop that must resolve the bridge):
+  [hidden_bridge]
+    step1: What is the name of the animated series based on the Teen Titans?
+    step2: Who played the character in the series?
+  [hidden_bridge]
+    step1: What is the name of the book Lourenço Mutarelli based 'Nina' on?
+    step2: When was the book 'Nina', which Lourenço Mutarelli based on, first published?
+  [hidden_bridge]
+    step1: What American country music group does Candy Coburn play with?
+    step2: In which band does Candy Coburn perform?
+  [hidden_bridge]
+    step1: Where did John MacGregor study before becoming Baron MacGregor of Pulham Market?
+    step2: What is the name of the other university he attended after studying at the University of St Andrews?
+  [hidden_bridge]
+    step1: What drum machine was released in 1989? And how many notes can it play at once?
+    step2: How many notes can be played at once by the Roland TR-808?
+  [fully_named]
+    step1: What is the Adoption and Safe Families Act?
+    step2: What is the Adoption 2002 Initiative?
