@@ -26,8 +26,10 @@ This experiment preserves that control flow:
    prior step answers.
 5. The QA result is appended to state. Execution stops when the plan completes
    or QA returns success=no.
-6. The Step Definer treatment is reused for a plan-summary call. That summary,
-   not the last intermediate QA answer, supplies the scored answer.
+6. The Step Definer treatment is reused for a required plan-summary call. A
+   usable parsed or salvaged summary supplies the scored answer; if that call
+   degrades, the last usable intermediate QA answer is retained with explicit
+   fallback provenance instead of being destroyed.
 
 The four conceptual agents are Planner, Step Definer, Extractor, and QA.
 Repeated reasoning steps are repeated invocations of those agents, not new
@@ -151,7 +153,11 @@ For plan step i, Step Definer receives:
 - the original question;
 - the full ordered plan;
 - the current sub-question and step position; and
-- the append-only history of earlier tasks, answers, success flags, and ratings.
+- the append-only history of earlier tasks, answers, success flags, ratings, and
+  evidence-grounding status.
+
+Only evidence-grounded prior answers are rendered as facts for later Step
+Definer calls. Unsupported fallback guesses remain logged but are withheld.
 
 It emits exactly one route:
 
@@ -166,28 +172,51 @@ question-answering on the current plan sub-question; there is no new generation.
 
 ### 4.3 Question-answering route
 
-The exact Step Definer task is the retrieval query. The BM25 index returns the
-top 10 passages for that step. Extractor is invoked separately for every
-returned document, preserving document rank and title in the call record.
-Extractor emits verbatim evidence spans or an empty list. QA then receives the
-current task and all spans collected for that step and emits:
+Every question-answering step exposes at most 10 fused documents. Step 1, and
+any later step without a grounded prior answer, uses the original-question BM25
+top 10. A later grounded step performs two independent searches:
+
+- anchor: the original question;
+- task: the resolved Step Definer task plus grounded prior answers.
+
+The fused ranking contains the first seven unique anchor results, then the first
+three unique task results not already selected; unused task slots are filled by
+later anchor results. Stable component order breaks ties. Gold labels, answers,
+supporting facts, and retrieval strata never enter either query or fusion.
+
+Extractor is invoked separately for every fused document, preserving document
+rank and title in the call record. Its raw parsed output is retained, but only
+spans that map unambiguously to exact source sentences are eligible for QA.
+Unique fragments expand to their exact sentence; whole-passage/multi-sentence
+echoes, ambiguous fragments, non-source text, duplicates, and spans beyond the
+three-sentence cap are rejected and logged. This is deterministic post-hoc
+normalization, not another generation.
+
+QA receives the current task and only non-empty normalized document blocks;
+empty documents remain in telemetry but do not pad the prompt. Cross-document
+duplicate sentences are shown once. If no evidence survives, QA sees one
+`(no evidence collected)` marker. QA emits:
 
     {"analysis": "...", "answer": "...", "success": "yes", "rating": 8}
 
 QA uses retrieved evidence first. When that evidence is insufficient, it gives
 its best short answer from general knowledge and emits `success=no` only when it
 cannot produce a usable short answer. This matches the reference fallback
-behavior and removes the earlier asymmetry with the single-agent control.
+behavior. Such a candidate is marked evidence-grounded only when its normalized
+answer occurs in evidence actually supplied to QA or in a grounded prior answer.
+Unsupported candidates may be summarized but never become retrieval facts.
 
-Each active question-answering step therefore has one retrieval event, up to ten
-Extractor generations, and one QA generation. Retrieval depth is determined by
-plan depth and routing, not by a global hop count.
+Each active question-answering step therefore has one fused retrieval event,
+one or two component queries, up to ten Extractor generations, and one QA
+generation. Retrieval depth is determined by plan depth and routing, not by a
+global hop count.
 
 ### 4.4 Aggregate route
 
 Aggregate is used when the current answer can be computed from prior step state.
 It performs no retrieval and invokes no Extractor. QA receives the earlier
-answers and emits the same feedback schema. Aggregate steps therefore remain
+evidence-grounded answers only and emits the same feedback schema. Unsupported
+guesses remain logged but are not presented as facts. Aggregate steps remain
 agentic reasoning steps while avoiding unnecessary corpus and generation work.
 
 ### 4.5 Semantic stop and finalization
@@ -205,16 +234,25 @@ stop reason. It emits:
 
     {"output": "Successful", "answer": "...", "score": 8}
 
-The answer field from this plan summary is scored. If finalization cannot be
-parsed or salvaged, the prediction is empty and remains in the denominator.
+A usable parsed summary answer takes precedence, followed by a usable salvaged
+summary answer. If neither exists, the scored prediction deterministically
+falls back to the most recent usable non-sentinel QA answer. The summary call is
+still always attempted, `answer_stage` remains `plan_summary`, and
+`final_answer_source` records `summary_parsed`, `summary_salvaged`,
+`qa_fallback`, or `none`. A fallback is not claimed correct merely because it is
+non-empty; when no usable candidate exists the empty prediction remains in the
+denominator.
 
 ## 5. Retrieval and baseline contracts
 
 The active retriever is a sparse, vectorized BM25 index with fixed tokenization,
 Lucene-style IDF, stable corpus-order tie-breaking, and unique passage titles.
-The configured policy is one top-10 query for every question-answering plan
-step. There is no learned bridge-query helper and no reserved retrieval budget
-between steps.
+The configured multi-agent policy is
+`anchored_original_question_7_plus_grounded_task_3_v1`: original-question
+top 10 before grounded state exists, then deterministic 7-anchor/3-task fusion
+at later grounded question-answering steps. There is no learned bridge-query
+helper. The quotas were frozen on excluded retrieval recall before the pilot,
+not chosen from pilot/final answer F1.
 
 The one-call control, single_fp16:
 
@@ -224,14 +262,22 @@ The one-call control, single_fp16:
 - receives no decomposition, state loop, Extractor, or extra query; and
 - uses the same answer normalization and immutable model revision.
 
-The control has the same per-query k, not the same total passage exposure.
-Multi-agent exposure varies with plan depth and route. Report retrieval-query
-count, passage exposures, unique titles, model calls, prompt/output tokens, F1,
-EM, memory, and timing for a fair architecture comparison.
+The control and multi-agent system each expose at most 10 passages per
+question-answering step, but they do not have the same total passage or query
+budget. Multi-agent exposure and component-query count vary with plan depth,
+route, and grounded state. Report component-query count, passage exposures,
+unique titles, model calls, prompt/output tokens, F1, EM, memory, and timing for
+a fair architecture comparison.
 
 Answer records include retrieval events, retrieved and gold titles, gold-title
-recall, all-gold retrieval, plan depth, executed steps, stop reason, and summary
-status. Gold fields are attached only after generation.
+recall, component recall, all-gold retrieval, fusion quotas, grounding rate,
+Extractor normalization, QA evidence filtering, plan depth, executed steps,
+stop reason, summary status, and final-answer provenance. Gold fields are
+attached only after generation.
+
+Repaired artifacts use experiment schema `open_corpus_marag_v2`. Resume,
+pilot-gate, and analysis paths reject v1 artifacts, stale prompt hashes, a stale
+query-policy fingerprint, or fusion quotas other than 7/3 summing to k=10.
 
 Questions are prespecified as hidden_bridge or fully_named from question text
 and gold titles. The frozen final cohort contains exactly 1,097 hidden_bridge

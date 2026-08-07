@@ -13,6 +13,10 @@ Every final accuracy invocation must resolve to:
     batch=32
     corpus passages=72094
     retrieval k=10 per question-answering plan step
+    multi query policy=anchored_original_question_7_plus_grounded_task_3_v1
+    fusion quotas=7 original-question anchor + 3 grounded-task, total exposure 10
+    experiment schema=open_corpus_marag_v2
+    extractor generation ceiling=320
     max plan steps=5
     conceptual roles=planner, step_definer, extractor, qa
     finalizer=step_definer_plan_summary
@@ -22,18 +26,19 @@ question-dependent. The value five is an edge-resource ceiling, not an expected
 depth and not a MA-RAG framework limit.
 
 Reject output from old seeds, old sample sizes, old batch sizes, old run names,
-or any artifact whose architecture/retrieval fingerprint predates the repeated
-Step Definer routing loop. Do not pass production overrides for n, seed, batch
-size, models, revisions, corpus, k, or plan ceiling.
+or any artifact whose experiment schema is not `open_corpus_marag_v2`, whose
+retrieval policy is not the frozen anchored 7/3 fusion, or whose prompt hashes
+  predate the repaired Extractor/QA contracts. Do not pass production overrides for n, seed,
+batch size, models, revisions, corpus, k, or plan ceiling.
 
 ## 2. Prepare a clean worker
 
 On every worker:
 
     git fetch origin
-    git checkout final-3b-reference
-    git pull --ff-only origin final-3b-reference
-    test "$(git rev-parse HEAD)" = "$(git rev-parse origin/final-3b-reference)"
+    git checkout no-bs
+    git pull --ff-only origin no-bs
+    test "$(git rev-parse HEAD)" = "$(git rev-parse origin/no-bs)"
     test -z "$(git status --porcelain)"
 
 Install the pinned project requirements inside the selected immutable container,
@@ -78,12 +83,12 @@ a clean checkout:
 
     git add config/environment.lock.json
     git commit -m 'Lock final MA-RAG environment'
-    git push origin final-3b-reference
+    git push origin no-bs
 
 Every worker then pulls that exact commit, exports the same container identity,
 and validates:
 
-    git pull --ff-only origin final-3b-reference
+    git pull --ff-only origin no-bs
     export EXPERIMENT_CONTAINER_REF='REGISTRY/IMAGE:TAG'
     export EXPERIMENT_CONTAINER_DIGEST='sha256:IMMUTABLE_DIGEST'
     python -m src.runner --validate-environment-lock
@@ -134,8 +139,9 @@ Then generate and validate the certificate:
 The checker must validate both finalized pilot JSONLs, their metadata and hashes,
 the cohort, environment, prompt bundle, architecture, retrieval fingerprint,
 and run order. It must report paired F1 and EM, overall and stratum-specific
-counts, parse/protocol success, retrieval recall, query/passages exposure, plan
-depth, and stop reasons.
+counts, parse/protocol success, anchor/task/fused retrieval recall, actual
+component-query/passages exposure, grounding rate, Extractor normalization, QA
+evidence filtering, final-answer sources, plan depth, and stop reasons.
 
 GO requires:
 
@@ -154,7 +160,7 @@ pilot worker, freeze and distribute the exact bytes produced by the checker:
 
     git add analysis/pilot_gate.json
     git commit -m 'Freeze excluded-pilot GO certificate'
-    git push origin final-3b-reference
+    git push origin no-bs
 
 Staging the certificate is insufficient: production verification compares it
 to HEAD, so an uncommitted or subsequently edited gate fails closed. Do not
@@ -163,8 +169,8 @@ commit a STOP certificate as authority to continue.
 Before timing or accuracy starts, every worker must pull the certificate commit
 and verify both the clean checkout and the certificate locally:
 
-    git pull --ff-only origin final-3b-reference
-    test "$(git rev-parse HEAD)" = "$(git rev-parse origin/final-3b-reference)"
+    git pull --ff-only origin no-bs
+    test "$(git rev-parse HEAD)" = "$(git rev-parse origin/no-bs)"
     test -z "$(git status --porcelain)"
     python scripts/check_pilot.py --verify
     python -m src.runner --validate-environment-lock
@@ -249,7 +255,7 @@ Do not edit either file. Commit and push both before executing any new selection
     git add analysis/ma_optimized_exploratory.selection.json \
             analysis/ma_optimized_exploratory.experiment.yaml
     git commit -m 'Freeze exploratory MA-RAG allocation'
-    git push origin final-3b-reference
+    git push origin no-bs
 
 Inspect materialized_new_run and execution_run_id in the selection trace.
 
@@ -322,7 +328,8 @@ Stop rather than improvising if:
 - a question-answering step does not retrieve top-k or does not create
   per-document Extractor records;
 - an aggregate step retrieves passages;
-- a multi-agent answer bypasses plan summary;
+- a multi-agent run does not attempt plan summary or reports invalid final-answer
+  provenance;
 - a later step runs after QA success=no;
 - a repeated stage uses a treatment different from its conceptual role;
 - an arm OOMs at batch 32;
