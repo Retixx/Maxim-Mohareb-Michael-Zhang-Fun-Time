@@ -69,6 +69,17 @@ class ExecutionIntegrityTests(unittest.TestCase):
             prompts.MAX_NEW_TOKENS,
         )
 
+    def test_ma_qa_uses_evidence_first_but_attempts_a_short_answer(self):
+        self.assertIn("Use the evidence first", prompts.QA_SYSTEM)
+        self.assertIn("best short answer", prompts.QA_SYSTEM)
+        self.assertIn("general knowledge", prompts.QA_SYSTEM)
+        self.assertIn(
+            "only when you cannot produce a usable short answer",
+            prompts.QA_SYSTEM,
+        )
+        self.assertEqual(prompts.ROLE_PROMPT_VERSIONS["qa"], "marag-v2")
+        self.assertEqual(prompts.ROLE_PROMPT_VERSIONS["solo"], "solo-v1")
+
     def test_loaded_precision_accepts_fp16_without_quantized_parameters(self):
         model = FakeModel([
             fake_parameter("Parameter", 100, models.torch.float16)
@@ -354,7 +365,7 @@ class ExecutionIntegrityTests(unittest.TestCase):
             "planner": "c91c48626dd0b17c8ba3d29ce30ea216762404b24da3f88ddd689c71056bbc03",
             "step_definer": "9ef3f1c68808719f05c8f860a98c6e1cf4bc61df370419ec3be291b2b8c8b156",
             "extractor": "8f84d86ae84278916dcb483b5ba8891f65360327701048d48c4a7d4df403018c",
-            "qa": "29fec31ad932c0992fe5e3629bddcf6e55fa7d850b170d076dec68de8b84b422",
+            "qa": "b0d20fb1dadc957c2701131c1a76cb20ab4231ac904eeaa0568c6c5512cd3e47",
             "plan_summary": "12f441ef882350502fe6842e32ff6969847937d7a16194446f4129d0870f260f",
             "solo": "337626135fa3a5054bb5a065cc638a9ca05c4e1f21b44977b4700c5a0cba94cb",
         })

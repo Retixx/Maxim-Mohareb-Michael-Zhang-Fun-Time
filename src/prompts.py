@@ -12,8 +12,8 @@ import hashlib
 # contracts because downstream steps must consume prior step results.  The
 # Extractor remains byte-for-byte v5 and the architecture control remains
 # solo-v1.  Every arm in the redesigned experiment uses this same bundle.
-PROMPT_VERSION = "marag-v1"
-PROMPT_BUNDLE_VERSION = "marag-v1+extractor-v5+solo-v1"
+PROMPT_VERSION = "marag-v2"
+PROMPT_BUNDLE_VERSION = "marag-v1+qa-v2+extractor-v5+solo-v1"
 
 # ==========================================================================
 #  PROMPTS ARE FROZEN FOR THE OPEN-CORPUS CAMPAIGN. DO NOT EDIT THEM.
@@ -300,7 +300,9 @@ question.
 Rules:
 - The answer must be SHORT: a name, a date, a number, a title, or "yes" / "no".
 - Never answer in a sentence. Never explain. Never restate the question.
-- Base the answer on the evidence. If it is insufficient, set "success" to "no".
+- Use the evidence first whenever it supports an answer.
+- If the evidence is insufficient, give your best short answer using general knowledge.
+- Set "success" to "no" only when you cannot produce a usable short answer; otherwise set it to "yes".
 - "success" is exactly "yes" or "no". "rating" is an integer confidence
   score from 0 to 10. "analysis" is one short sentence.
 - Reply with JSON only. No explanation, no markdown fences.
@@ -416,7 +418,7 @@ ROLE_PROMPT_VERSIONS = {
     "planner": "marag-v1",
     "step_definer": "marag-v1",
     "extractor": "v5",
-    "qa": "marag-v1",
+    "qa": "marag-v2",
     "plan_summary": "marag-v1",
     "solo": "solo-v1",
 }
