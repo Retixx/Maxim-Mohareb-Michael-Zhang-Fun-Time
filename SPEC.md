@@ -370,6 +370,51 @@ Repeated calls are not independent observations. Cluster role diagnostics by
 question. Resample complete batches for timing intervals. Sort question IDs
 before seeded resampling so write order cannot affect results.
 
+## 8a. Multiplicity — one primary test, everything else descriptive
+
+Ported from SPEC v2.1 §5f (branch `results-n3000`), which the `no-bs` merge
+overwrote. The prior experiment's terms are translated to this one: F1 primary
+rather than EM, 8-bit rather than 4-bit. **This is the most likely statistical
+objection to the paper.**
+
+Counting honestly: 4 roles on the quantization axis, 4 on the size axis, 4 axis
+contrasts, across F1 / EM / ev-F1 is up to 36 hypothesis tests. The v2 write-up
+reported "Extractor +3.20 [+0.53, +5.87], SIGNIFICANT" uncorrected; under
+Bonferroni at even 4 tests (α = 0.0125) that interval no longer excludes zero. A
+referee who checks will call the headline a multiple-comparisons artifact, and on
+that framing they would be right.
+
+The fix is to designate one pre-registered primary test and demote the rest,
+rather than correcting 36 tests into oblivion:
+
+- **PRIMARY — confirmatory, one test, no correction needed.** The pooled contrast
+  between format-heavy roles (Step Definer, Extractor) and knowledge-heavy roles
+  (Planner, QA). It was pre-registered before the confirmatory data existed, it is
+  a *single* number, and it is better powered than any per-role test because it
+  pools two roles per side. Report on the §8 primary outcome (F1), with EM
+  co-reported.
+- **SECONDARY — pre-registered, Holm-corrected.** The four role contrasts of §8.
+  Holm–Bonferroni is uniformly more powerful than Bonferroni and assumes no
+  independence — these tests share a baseline and are positively correlated, which
+  Holm tolerates and Šidák does not.
+- **DESCRIPTIVE — no significance claims at all.** Every per-role number, both
+  rankings, and the Spearman correlation between them. Report point estimates with
+  intervals and describe them as estimates. **Do not write "significant" next to a
+  per-role result.** "The Extractor is the only role whose interval excludes zero
+  uncorrected" is true, informative, and not a significance claim.
+
+**Consequence for how the paper is written.** Lead with the format-heavy vs
+knowledge-heavy contrast, because that is the one claim the design licenses. The
+four-way ranking becomes a figure and a paragraph of description, not the
+headline. This is a presentation change, not a re-analysis — every number stays.
+
+**Axis-contrast variance.** `size cost − quantization cost` is a difference of two
+differences, but both are paired against the same baseline on the same questions,
+so they are positively correlated and Var(A−B) = Var(A) + Var(B) − 2Cov(A,B) is
+materially less than 2·Var. **Compute the paired bootstrap on the per-question
+contrast directly; never estimate it by adding the two arms' variances.** The
+latter overstates the interval and would bury a real effect.
+
 ## 9. Memory and edge-efficiency contract
 
 Measured resident model footprints are:
