@@ -34,11 +34,12 @@ After each model load and before any warm-up, preflight, timing, or scored
 generation, validate the loaded parameters against the requested precision:
 
 - FP16 must have zero bitsandbytes quantized parameters.
-- Q8 and Q4 must have a positive, substantial quantized-parameter population,
+- Q8 and Q4 must report at least 50% of nominal parameters in the matching
+  bitsandbytes tensor type and zero parameters in the other quantized type,
   not merely quantization metadata in configuration.
 - A mismatch raises a descriptive `RuntimeError` containing the model ID,
-  requested precision, nominal parameter count, quantized parameter count, and
-  quantized fraction.
+  requested precision, nominal parameter count, quantized parameter count,
+  aggregate quantized fraction, and separate 4-bit/8-bit fractions.
 
 The guard uses the existing `param_census` tensor inspection, not configured
 precision labels or reported memory alone. Its validated census is recorded in

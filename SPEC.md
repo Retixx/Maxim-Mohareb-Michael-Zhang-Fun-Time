@@ -174,6 +174,11 @@ current task and all spans collected for that step and emits:
 
     {"analysis": "...", "answer": "...", "success": "yes", "rating": 8}
 
+QA uses retrieved evidence first. When that evidence is insufficient, it gives
+its best short answer from general knowledge and emits `success=no` only when it
+cannot produce a usable short answer. This matches the reference fallback
+behavior and removes the earlier asymmetry with the single-agent control.
+
 Each active question-answering step therefore has one retrieval event, up to ten
 Extractor generations, and one QA generation. Retrieval depth is determined by
 plan depth and routing, not by a global hop count.
@@ -348,6 +353,13 @@ thermal, and wall-time performance require measurements on those devices.
 
 - Greedy generation only; no sampling.
 - Prompt templates, parsers, and token caps are frozen across treatments.
+- Frozen generation ceilings are Planner 160, Step Definer 160, Extractor 320,
+  QA 96, plan summary 128, and solo 48 new tokens. The complete mapping is part
+  of the experiment fingerprint.
+- Before any generation, loaded parameter tensors must match requested precision:
+  FP16 has zero recognized quantized parameters; Q8 and Q4 each require at least
+  50% of nominal parameters in the matching bitsandbytes tensor type and reject
+  parameters from the other quantized type. The validated census is logged.
 - No size-, precision-, or role-ablation-specific prompt tuning.
 - No grammar-constrained decoding.
 - No generation retry or regeneration after parse/protocol failure.
