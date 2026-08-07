@@ -369,6 +369,10 @@ class StageWiringTests(unittest.TestCase):
         first = build_stage_calls("extractor", [self.q], self.idx, retriever=self.ctx)[0]
         self.assertIn("directed", first["consumer_input"]["retrieval"]["query"])
         self.assertEqual(len(first["consumer_input"]["retrieval"]["titles"]), 10)
+        self.assertEqual(
+            first["consumer_input"]["document_sentences"],
+            self.ctx.index.get(first["consumer_input"]["document_title"]).sentences,
+        )
         self.idx[("q1", "extractor", 0)] = {
             "parsed": {"spans": ["It was directed by Xawery Zulawski."]},
             "salvaged": None,

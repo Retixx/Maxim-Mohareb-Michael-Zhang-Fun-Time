@@ -28,6 +28,7 @@ noninferiority constraint, so format compliance alone cannot win an allocation.
 import json
 import re
 
+from .extraction import normalize_spans
 from .parsing import _VALIDATORS
 
 
@@ -71,6 +72,7 @@ def protocol_ok(
     parsed: dict | None,
     *,
     paragraphs: str | None = None,
+    source_sentences: list[str] | None = None,
     max_plan_steps: int = 5,
 ) -> bool:
     """Strict functional-output compliance, separate from tolerant parsing."""
@@ -85,6 +87,13 @@ def protocol_ok(
         )
     if role == "extractor":
         spans = parsed.get("spans") or []
+        if source_sentences is not None:
+            normalized, telemetry = normalize_spans(spans, source_sentences)
+            return (
+                len(spans) <= 3
+                and telemetry["rejected_input_count"] == 0
+                and len(normalized) == len(spans)
+            )
         fidelity = verbatim_rate(spans, paragraphs or "")
         return len(spans) <= 3 and (fidelity is None or fidelity == 1.0)
     if role == "qa":

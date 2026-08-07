@@ -25,7 +25,7 @@ import json
 import time
 from datetime import datetime, timezone
 
-from . import mechanism, prompts
+from . import extraction, mechanism, prompts
 from .models import generate_batch
 from .parsing import parse_output, salvage
 
@@ -203,6 +203,28 @@ def run_calls(
         conf = {k: gen[k] for k in ("mean_logprob", "min_logprob", "mean_entropy")
                 if k in gen}
         paragraphs = call.get("fields", {}).get("paragraphs")
+        consumer_payload = None
+        extractor_normalization = None
+        source_sentences = (
+            (call.get("consumer_input") or {}).get("document_sentences")
+            if prompt_role == "extractor"
+            else None
+        )
+        if prompt_role == "extractor":
+            producer_payload = parsed if parsed is not None else salvaged
+            if source_sentences is not None:
+                normalized, extractor_normalization = extraction.normalize_spans(
+                    (producer_payload or {}).get("spans", []), source_sentences
+                )
+                consumer_payload = {"spans": normalized}
+            else:
+                consumer_payload = producer_payload
+                extractor_normalization = {
+                    "status": "source_sentences_unavailable",
+                    "input_span_count": len(
+                        (producer_payload or {}).get("spans", [])
+                    ),
+                }
         copy_rate = (
             mechanism.verbatim_rate(
                 ((parsed or salvaged) or {}).get("spans", []), paragraphs or ""
@@ -241,12 +263,15 @@ def run_calls(
                 "parse_status": status,
                 "parsed": parsed,
                 "salvaged": salvaged,
+                "consumer_payload": consumer_payload,
+                "extractor_normalization": extractor_normalization,
                 "strict_format_ok": mechanism.strict_format_ok(
                     prompt_role, gen["raw_output"]
                 ),
                 "protocol_ok": mechanism.protocol_ok(
                     prompt_role, gen["raw_output"], parsed,
                     paragraphs=paragraphs,
+                    source_sentences=source_sentences,
                     max_plan_steps=MAX_SUB_QUESTIONS,
                 ),
                 "verbatim_copy_rate": copy_rate,

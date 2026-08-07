@@ -311,8 +311,18 @@ def spans_of(rec: dict | None) -> tuple[list[str], str]:
     SPEC §13b.1: prefer the validated payload, else whatever was salvageable from
     a failed call. The call still counts as a parse failure — this only stops
     usable spans being discarded along with a malformed container.
+
+    Repaired runs additionally preserve the producer payload while exposing a
+    sentence-normalized ``consumer_payload``. Prefer that deterministic payload
+    and retain whether its source was parsed or salvaged in the telemetry label.
     """
     if rec:
+        if rec.get("consumer_payload") is not None:
+            source = "parsed" if rec.get("parsed") is not None else "salvaged"
+            return (
+                (rec["consumer_payload"] or {}).get("spans", []),
+                f"normalized_{source}",
+            )
         if rec.get("parsed") is not None:
             return (rec["parsed"] or {}).get("spans", []), "parsed"
         if rec.get("salvaged") is not None:
@@ -549,6 +559,7 @@ def build_stage_calls(stage: str, questions: list[dict], idx: dict,
                         "retrieval": event,
                         "document_rank": document_rank,
                         "document_title": passage.title,
+                        "document_sentences": list(passage.sentences),
                     },
                 })
         return calls
