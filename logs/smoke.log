@@ -1,0 +1,102 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+=== run baseline | Qwen/Qwen2.5-1.5B-Instruct | n=10 seed=1234 batch=64 prompts=v5 ===
+    planner        Qwen/Qwen2.5-1.5B-Instruct @ fp16
+    step_definer   Qwen/Qwen2.5-1.5B-Instruct @ fp16
+    extractor      Qwen/Qwen2.5-1.5B-Instruct @ fp16
+    qa             Qwen/Qwen2.5-1.5B-Instruct @ fp16
+Generating train split:   0%|                                                                       | 0/90447 [00:00<?, ? examples/s]Generating train split:   6%|███▏                                                     | 5000/90447 [00:00<00:02, 38401.36 examples/s]Generating train split:  14%|████████                                                | 13000/90447 [00:00<00:01, 47871.88 examples/s]Generating train split:  22%|████████████▍                                           | 20000/90447 [00:00<00:01, 50698.67 examples/s]Generating train split:  30%|████████████████▋                                       | 27000/90447 [00:00<00:01, 52462.19 examples/s]Generating train split:  39%|█████████████████████▋                                  | 35000/90447 [00:00<00:00, 56816.76 examples/s]Generating train split:  46%|██████████████████████████                              | 42000/90447 [00:00<00:00, 56630.13 examples/s]Generating train split:  56%|███████████████████████████████                         | 50224/90447 [00:00<00:00, 54555.42 examples/s]Generating train split:  63%|███████████████████████████████████▍                    | 57224/90447 [00:01<00:00, 53554.56 examples/s]Generating train split:  70%|███████████████████████████████████████▏                | 63224/90447 [00:01<00:00, 53325.47 examples/s]Generating train split:  79%|████████████████████████████████████████████            | 71224/90447 [00:01<00:00, 56550.21 examples/s]Generating train split:  86%|████████████████████████████████████████████████▍       | 78224/90447 [00:01<00:00, 56458.64 examples/s]Generating train split:  94%|████████████████████████████████████████████████████▊   | 85224/90447 [00:01<00:00, 55985.40 examples/s]Generating train split: 100%|████████████████████████████████████████████████████████| 90447/90447 [00:01<00:00, 55067.93 examples/s]
+Generating validation split:   0%|                                                                   | 0/7405 [00:00<?, ? examples/s]Generating validation split:  81%|██████████████████████████████████████████▉          | 6000/7405 [00:00<00:00, 50357.03 examples/s]Generating validation split: 100%|█████████████████████████████████████████████████████| 7405/7405 [00:00<00:00, 58037.49 examples/s]
+
+--- stage planner @ Qwen/Qwen2.5-1.5B-Instruct fp16: 10 calls, 10 pending ---
+Loading weights:   0%|                                                                                       | 0/338 [00:00<?, ?it/s]Loading weights:   0%|▏                                                                              | 1/338 [00:00<00:43,  7.71it/s]Loading weights:  19%|██████████████▌                                                              | 64/338 [00:00<00:00, 330.82it/s]Loading weights:  36%|███████████████████████████▋                                                | 123/338 [00:00<00:00, 414.79it/s]Loading weights:  54%|█████████████████████████████████████████▎                                  | 184/338 [00:00<00:00, 480.87it/s]Loading weights:  72%|██████████████████████████████████████████████████████▋                     | 243/338 [00:00<00:00, 490.83it/s]Loading weights:  90%|████████████████████████████████████████████████████████████████████▎       | 304/338 [00:00<00:00, 516.65it/s]Loading weights: 100%|████████████████████████████████████████████████████████████████████████████| 338/338 [00:00<00:00, 469.21it/s]
+    loaded in 34.0s
+    10/10 (bs=64)
+    done in 3.7s  final_batch_size=64  peak_vram_mb=3927
+
+--- stage step_definer @ Qwen/Qwen2.5-1.5B-Instruct fp16: 22 calls, 22 pending ---
+    reusing loaded Qwen/Qwen2.5-1.5B-Instruct @ fp16
+    22/22 (bs=64)
+    done in 1.5s  final_batch_size=64  peak_vram_mb=3715
+
+--- stage extractor @ Qwen/Qwen2.5-1.5B-Instruct fp16: 22 calls, 22 pending ---
+    reusing loaded Qwen/Qwen2.5-1.5B-Instruct @ fp16
+    22/22 (bs=64)
+    done in 6.5s  final_batch_size=64  peak_vram_mb=7481
+
+--- stage qa @ Qwen/Qwen2.5-1.5B-Instruct fp16: 10 calls, 10 pending ---
+    reusing loaded Qwen/Qwen2.5-1.5B-Instruct @ fp16
+    10/10 (bs=64)
+    done in 0.6s  final_batch_size=64  peak_vram_mb=3324
+
+
+=== baseline complete: EM 20.0%  F1 24.4%  n=10  wall 47s ===
+    deduped_footprint_mb=2944  (SPEC §5d — the paper's number)
+    coresident_footprint_mb=11778  (one server per agent)
+    -> results/baseline_qwen2.5-1.5b_n10_seed1234.jsonl
+    -> results/baseline_qwen2.5-1.5b_n10_seed1234.meta.json
+
+##############################################################################
+# SMOKE REPORT — run=baseline model=Qwen/Qwen2.5-1.5B-Instruct prompts=v5
+##############################################################################
+stage precision: {'planner': 'fp16', 'step_definer': 'fp16', 'extractor': 'fp16', 'qa': 'fp16'}
+
+--- Verbatim raw outputs (2 per agent) ---
+
+=== PLANNER ===
+[qid=5a85fb085542994775f606de call_index=0 status=ok]
+{"sub_questions": ["What is the name of the film whose score was composed by Jerry Goldsmith?", "Who produced that film?"]}
+[qid=5a8dd5f955429917b4a5bcc7 call_index=0 status=ok]
+{"sub_questions": ["What is the 1998 Toyota Grand Prix championship winner?", "What sports do they practice besides racing?"]}
+
+=== STEP_DEFINER ===
+[qid=5a85fb085542994775f606de call_index=0 status=ok]
+{"search_terms": ["Jerry Goldsmith", "score composed", "film"], "target_entity": "film", "answer_type": "title"}
+[qid=5a85fb085542994775f606de call_index=1 status=ok]
+{"search_terms": ["Jerry Goldsmith", "score composed", "film"], "target_entity": "executive producer", "answer_type": "person"}
+
+=== EXTRACTOR ===
+[qid=5a85fb085542994775f606de call_index=0 status=ok]
+{
+  "spans": ["Total Recall"]
+}
+[qid=5a85fb085542994775f606de call_index=1 status=ok]
+{
+  "spans": ["Jerry Goldsmith", "executive producer"]
+}
+
+=== QA ===
+[qid=5a85fb085542994775f606de call_index=0 status=ok]
+{"answer": "Total Recall"}
+[qid=5a8dd5f955429917b4a5bcc7 call_index=0 status=ok]
+{"answer": "sports"}
+
+--- Parse status per agent ---
+role            calls     ok     ok%   breakdown
+planner            10     10  100.0%   -
+step_definer       22     21   95.5%   {'schema_mismatch': 1}
+extractor          22     21   95.5%   {'malformed_json': 1}
+qa                 10     10  100.0%   -
+
+--- Answers vs gold ---
+#   EM  F1    predicted                          gold
+1   0   0.00  Total Recall                       Ronald Shusett
+2   0   0.00  sports                             paracyclist
+3   0   0.00  The Tonight Show                   Ghostbusters Spooktacular
+4   0   0.44  Robert Smigel                      Robert Smigel, Michael Koman and David F
+5   0   0.00  2005                               1999
+6   0   0.00  The World of Kong: A Natural His   Firestorm
+7   1   1.00  no                                 no
+8   0   0.00  9,803                              8,515
+9   0   0.00  Michael Peter Fay                  American
+10  1   1.00  The Seasiders                      "the Seasiders"
+
+EM = 20.0%   F1 = 24.4%   (n=10)
+
+--- Throughput & memory ---
+    planner        n=10   mean 0.34s   peak_vram_mb=3927.2  weights_mb=2944.4
+    step_definer   n=22   mean 0.06s   peak_vram_mb=3715.5  weights_mb=2944.4
+    extractor      n=22   mean 0.24s   peak_vram_mb=7481.3  weights_mb=2944.4
+    qa             n=10   mean 0.05s   peak_vram_mb=3324.0  weights_mb=2944.4
+wall 47s for 10 questions, 64 agent calls
+extrapolated GPU-hours for one 300-question run: 0.39
+coresident_footprint_mb=11777.6

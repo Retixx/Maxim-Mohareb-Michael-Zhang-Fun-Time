@@ -1,0 +1,51 @@
+nohup: ignoring input
+=== run single_fp16 | Qwen/Qwen2.5-1.5B-Instruct | n=3000 seed=7 batch=64 prompts=v5 ===
+    solo           Qwen/Qwen2.5-1.5B-Instruct @ fp16
+Generating train split:   0%|          | 0/90447 [00:00<?, ? examples/s]Generating train split:   4%|▍         | 4000/90447 [00:00<00:02, 34269.71 examples/s]Generating train split:  11%|█         | 10000/90447 [00:00<00:01, 44216.80 examples/s]Generating train split:  20%|█▉        | 18000/90447 [00:00<00:01, 49847.31 examples/s]Generating train split:  29%|██▊       | 26000/90447 [00:00<00:01, 55510.69 examples/s]Generating train split:  36%|███▋      | 33000/90447 [00:00<00:01, 55579.83 examples/s]Generating train split:  44%|████▍     | 40000/90447 [00:00<00:00, 55662.50 examples/s]Generating train split:  51%|█████     | 46224/90447 [00:00<00:00, 53256.17 examples/s]Generating train split:  60%|█████▉    | 54224/90447 [00:01<00:00, 54276.75 examples/s]Generating train split:  68%|██████▊   | 61224/90447 [00:01<00:00, 56006.62 examples/s]Generating train split:  75%|███████▌  | 68224/90447 [00:01<00:00, 55551.28 examples/s]Generating train split:  82%|████████▏ | 74224/90447 [00:01<00:00, 54310.59 examples/s]Generating train split:  90%|████████▉ | 81224/90447 [00:01<00:00, 54696.40 examples/s]Generating train split:  99%|█████████▊| 89224/90447 [00:01<00:00, 57363.36 examples/s]Generating train split: 100%|██████████| 90447/90447 [00:01<00:00, 54792.74 examples/s]
+Generating validation split:   0%|          | 0/7405 [00:00<?, ? examples/s]Generating validation split:  81%|████████  | 6000/7405 [00:00<00:00, 50534.90 examples/s]Generating validation split: 100%|██████████| 7405/7405 [00:00<00:00, 58193.97 examples/s]
+
+--- stage solo @ Qwen/Qwen2.5-1.5B-Instruct fp16: 3000 calls, 3000 pending ---
+Loading weights:   0%|          | 0/338 [00:00<?, ?it/s]Loading weights:   0%|          | 1/338 [00:00<00:49,  6.84it/s]Loading weights:  19%|█▊        | 63/338 [00:00<00:00, 304.44it/s]Loading weights:  33%|███▎      | 112/338 [00:00<00:00, 368.86it/s]Loading weights:  49%|████▉     | 165/338 [00:00<00:00, 426.26it/s]Loading weights:  65%|██████▍   | 219/338 [00:00<00:00, 461.94it/s]Loading weights:  81%|████████▏ | 275/338 [00:00<00:00, 492.96it/s]Loading weights:  97%|█████████▋| 329/338 [00:00<00:00, 505.21it/s]Loading weights: 100%|██████████| 338/338 [00:00<00:00, 441.66it/s]
+    loaded in 9.8s
+    64/3000 (bs=64)    128/3000 (bs=64)    192/3000 (bs=64)    256/3000 (bs=64)    320/3000 (bs=64)    384/3000 (bs=64)    448/3000 (bs=64)    512/3000 (bs=64)    576/3000 (bs=64)    640/3000 (bs=64)    704/3000 (bs=64)    768/3000 (bs=64)[W806 02:54:44.758274471 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 3779067904 bytes (free: 2963865600, total: 42405855232).
+    832/3000 (bs=64)    896/3000 (bs=64)    960/3000 (bs=64)    1024/3000 (bs=64)    1088/3000 (bs=64)    1152/3000 (bs=64)    1216/3000 (bs=64)    1280/3000 (bs=64)    1344/3000 (bs=64)    1408/3000 (bs=64)    1472/3000 (bs=64)    1536/3000 (bs=64)    1600/3000 (bs=64)    1664/3000 (bs=64)    1728/3000 (bs=64)    1792/3000 (bs=64)    1856/3000 (bs=64)    1920/3000 (bs=64)    1984/3000 (bs=64)    2048/3000 (bs=64)    2112/3000 (bs=64)    2176/3000 (bs=64)    2240/3000 (bs=64)    2304/3000 (bs=64)    2368/3000 (bs=64)    2432/3000 (bs=64)    2496/3000 (bs=64)    2560/3000 (bs=64)    2624/3000 (bs=64)    2688/3000 (bs=64)    2752/3000 (bs=64)    2816/3000 (bs=64)    2880/3000 (bs=64)    2944/3000 (bs=64)    3000/3000 (bs=64)
+    done in 486.7s  final_batch_size=64  peak_vram_mb=25973
+
+
+=== single_fp16 complete: EM 41.4%  F1 53.4%  n=3000  wall 497s ===
+    deduped_footprint_mb=2944  (SPEC §5d — the paper's number)
+    coresident_footprint_mb=2944  (one server per agent)
+    -> results/single_fp16_qwen2.5-1.5b_n3000_seed7.jsonl
+    -> results/single_fp16_qwen2.5-1.5b_n3000_seed7.meta.json
+=== run single_4bit | Qwen/Qwen2.5-1.5B-Instruct | n=3000 seed=7 batch=64 prompts=v5 ===
+    solo           Qwen/Qwen2.5-1.5B-Instruct @ 4bit
+
+--- stage solo @ Qwen/Qwen2.5-1.5B-Instruct 4bit: 3000 calls, 3000 pending ---
+Loading weights:   0%|          | 0/338 [00:00<?, ?it/s]Loading weights:   0%|          | 1/338 [00:00<01:38,  3.42it/s]Loading weights:   1%|▏         | 5/338 [00:00<00:21, 15.33it/s]Loading weights:  10%|█         | 35/338 [00:00<00:02, 105.58it/s]Loading weights:  23%|██▎       | 77/338 [00:00<00:01, 199.49it/s]Loading weights:  36%|███▋      | 123/338 [00:00<00:00, 278.52it/s]Loading weights:  49%|████▉     | 165/338 [00:00<00:00, 320.86it/s]Loading weights:  62%|██████▏   | 208/338 [00:00<00:00, 351.94it/s]Loading weights:  75%|███████▌  | 255/338 [00:01<00:00, 382.35it/s]Loading weights:  88%|████████▊ | 297/338 [00:01<00:00, 392.10it/s]Loading weights: 100%|██████████| 338/338 [00:01<00:00, 282.25it/s]
+    loaded in 3.9s
+    64/3000 (bs=64)    128/3000 (bs=64)    192/3000 (bs=64)    256/3000 (bs=64)    320/3000 (bs=64)    384/3000 (bs=64)    448/3000 (bs=64)    512/3000 (bs=64)    576/3000 (bs=64)    640/3000 (bs=64)    704/3000 (bs=64)    768/3000 (bs=64)[W806 03:03:09.058464162 CUDACachingAllocator.cpp:3933] memory allocation failed with OOM on device 0 while trying to allocate 3779067904 bytes (free: 1130954752, total: 42405855232).
+    832/3000 (bs=64)    896/3000 (bs=64)    960/3000 (bs=64)    1024/3000 (bs=64)    1088/3000 (bs=64)    1152/3000 (bs=64)    1216/3000 (bs=64)    1280/3000 (bs=64)    1344/3000 (bs=64)Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/jupyter-mrbe-8c5f/Maxim-Mohareb-Michael-Zhang-Fun-Time/src/runner.py", line 563, in <module>
+    main()
+  File "/home/jupyter-mrbe-8c5f/Maxim-Mohareb-Michael-Zhang-Fun-Time/src/runner.py", line 559, in main
+    run(cfg, args.run, args.n, args.seed, args.batch_size)
+  File "/home/jupyter-mrbe-8c5f/Maxim-Mohareb-Michael-Zhang-Fun-Time/src/runner.py", line 427, in run
+    bs = _run_stage(
+         ^^^^^^^^^^^
+  File "/home/jupyter-mrbe-8c5f/Maxim-Mohareb-Michael-Zhang-Fun-Time/src/runner.py", line 248, in _run_stage
+    store.write(recs)
+  File "/home/jupyter-mrbe-8c5f/Maxim-Mohareb-Michael-Zhang-Fun-Time/src/runner.py", line 203, in write
+    self.flush()
+  File "/home/jupyter-mrbe-8c5f/Maxim-Mohareb-Michael-Zhang-Fun-Time/src/runner.py", line 207, in flush
+    self._fh.flush()
+OSError: [Errno 28] No space left on device
+=== run single_small | Qwen/Qwen2.5-0.5B-Instruct | n=3000 seed=7 batch=64 prompts=v5 ===
+    solo           Qwen/Qwen2.5-0.5B-Instruct @ fp16
+
+--- stage solo @ Qwen/Qwen2.5-0.5B-Instruct fp16: 3000 calls, 3000 pending ---
+Loading weights:   0%|          | 0/290 [00:00<?, ?it/s]Loading weights:  22%|██▏       | 63/290 [00:00<00:00, 623.78it/s]Loading weights:  79%|███████▉  | 229/290 [00:00<00:00, 1229.96it/s]Loading weights: 100%|██████████| 290/290 [00:00<00:00, 1229.23it/s]
+    loaded in 7.0s
+    64/3000 (bs=64)    128/3000 (bs=64)    192/3000 (bs=64)    256/3000 (bs=64)    320/3000 (bs=64)    384/3000 (bs=64)    448/3000 (bs=64)    512/3000 (bs=64)    576/3000 (bs=64)    640/3000 (bs=64)    704/3000 (bs=64)    768/3000 (bs=64)    832/3000 (bs=64)    896/3000 (bs=64)    960/3000 (bs=64)    1024/3000 (bs=64)    1088/3000 (bs=64)    1152/3000 (bs=64)    1216/3000 (bs=64)    1280/3000 (bs=64)    1344/3000 (bs=64)    1408/3000 (bs=64)    1472/3000 (bs=64)    1536/3000 (bs=64)    1600/3000 (bs=64)Traceback (most recent call last):
+  File "/home/jupyter-mrbe-8c5f/Maxim-Mohareb-Michael-Zhang-Fun-Time/src/runner.py", line 427, in run

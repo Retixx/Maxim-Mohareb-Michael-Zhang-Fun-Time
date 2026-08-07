@@ -1,0 +1,98 @@
+{
+  "run_id": "qa_8bit",
+  "model_id": "Qwen/Qwen2.5-1.5B-Instruct",
+  "n": 3000,
+  "seed": 7,
+  "batch_size": 64,
+  "log_confidence": true,
+  "prompt_version": "v5",
+  "stage_precision": {
+    "planner": "fp16",
+    "step_definer": "fp16",
+    "extractor": "fp16",
+    "qa": "8bit"
+  },
+  "stage_models": {
+    "planner": "Qwen/Qwen2.5-1.5B-Instruct",
+    "step_definer": "Qwen/Qwen2.5-1.5B-Instruct",
+    "extractor": "Qwen/Qwen2.5-1.5B-Instruct",
+    "qa": "Qwen/Qwen2.5-1.5B-Instruct"
+  },
+  "stages": {
+    "planner": {
+      "precision": "fp16",
+      "method": "none",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "model_id": "Qwen/Qwen2.5-1.5B-Instruct",
+      "peak_vram_mb": 4393.6,
+      "weight_footprint_mb": 2944.4,
+      "calls": 3000,
+      "stage_wall_s": 114.2,
+      "final_batch_size": 64,
+      "oom_autotuned": false,
+      "nominal_params": 1543714304,
+      "quantized_params": 0
+    },
+    "step_definer": {
+      "precision": "fp16",
+      "method": "none",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "model_id": "Qwen/Qwen2.5-1.5B-Instruct",
+      "peak_vram_mb": 4901.9,
+      "weight_footprint_mb": 2944.4,
+      "calls": 6410,
+      "stage_wall_s": 240.2,
+      "final_batch_size": 64,
+      "oom_autotuned": false,
+      "nominal_params": 1543714304,
+      "quantized_params": 0
+    },
+    "extractor": {
+      "precision": "fp16",
+      "method": "none",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "model_id": "Qwen/Qwen2.5-1.5B-Instruct",
+      "peak_vram_mb": 25583.7,
+      "weight_footprint_mb": 2944.4,
+      "calls": 6410,
+      "stage_wall_s": 2606.6,
+      "final_batch_size": 64,
+      "oom_autotuned": false,
+      "nominal_params": 1543714304,
+      "quantized_params": 0
+    },
+    "qa": {
+      "precision": "8bit",
+      "method": "bitsandbytes-llm.int8",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "llm_int8_threshold": 6.0,
+      "model_id": "Qwen/Qwen2.5-1.5B-Instruct",
+      "peak_vram_mb": 7313.1,
+      "weight_footprint_mb": 1694.9,
+      "calls": 3000,
+      "stage_wall_s": 307.0,
+      "final_batch_size": 64,
+      "oom_autotuned": false,
+      "nominal_params": 1543714304,
+      "quantized_params": 1310195712
+    }
+  },
+  "coresident_footprint_mb": 10528.1,
+  "deduped_footprint_mb": 4639.3,
+  "metadata_complete": true,
+  "git_commit": "9f183476546727b7b0f9ddd9108ca6567795c1b8",
+  "library_versions": {
+    "torch": "2.13.0+cu130",
+    "transformers": "5.14.1",
+    "bitsandbytes": "0.50.0",
+    "datasets": "5.0.1",
+    "cuda": "13.0"
+  },
+  "gpu_name": "NVIDIA A100-SXM4-40GB",
+  "total_wall_s": 3276.0,
+  "finished_at": "2026-08-03T02:16:52.752154+00:00"
+}

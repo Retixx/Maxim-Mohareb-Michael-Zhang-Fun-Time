@@ -330,6 +330,10 @@ def _validate_plan_summary(obj):
 
 
 _VALIDATORS = {
+    # SPEC §4a: the single-call baseline emits the same {"answer": "..."} shape
+    # as QA, so it reuses QA's validator. Identical contract, identical taxonomy
+    # — the comparison isolates decomposition, not output format.
+    "solo": _validate_qa,
     "planner": _validate_planner,
     "step_definer": _validate_step_definer,
     "extractor": _validate_extractor,

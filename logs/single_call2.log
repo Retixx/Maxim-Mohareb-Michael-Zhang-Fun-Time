@@ -1,0 +1,10 @@
+nohup: ignoring input
+=== run single_4bit | Qwen/Qwen2.5-1.5B-Instruct | n=3000 seed=7 batch=64 prompts=v5 ===
+    solo           Qwen/Qwen2.5-1.5B-Instruct @ 4bit
+  [resume] dropping torn line 1337 of single_4bit_qwen2.5-1.5b_n3000_seed7.jsonl
+    [resume] found 1336 completed agent calls on disk
+
+--- stage solo @ Qwen/Qwen2.5-1.5B-Instruct 4bit: 3000 calls, 1664 pending ---
+Loading weights:   0%|          | 0/338 [00:00<?, ?it/s]Loading weights:   0%|          | 1/338 [00:00<01:09,  4.87it/s]Loading weights:   1%|          | 4/338 [00:00<00:22, 14.65it/s]Loading weights:  12%|█▏        | 39/338 [00:00<00:02, 132.82it/s]Loading weights:  22%|██▏       | 76/338 [00:00<00:01, 207.98it/s]Loading weights:  33%|███▎      | 112/338 [00:00<00:00, 255.22it/s]Loading weights:  44%|████▍     | 149/338 [00:00<00:00, 286.01it/s]Loading weights:  58%|█████▊    | 195/338 [00:00<00:00, 328.45it/s]Loading weights:  69%|██████▉   | 233/338 [00:00<00:00, 338.76it/s]Loading weights:  80%|███████▉  | 269/338 [00:01<00:00, 338.05it/s]Loading weights:  93%|█████████▎| 316/338 [00:01<00:00, 369.63it/s]Loading weights: 100%|██████████| 338/338 [00:01<00:00, 280.35it/s]
+    loaded in 4.2s
+    64/1664 (bs=64)    128/1664 (bs=64)    192/1664 (bs=64)    256/1664 (bs=64)

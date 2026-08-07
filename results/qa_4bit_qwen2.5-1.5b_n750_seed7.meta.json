@@ -1,0 +1,82 @@
+{
+  "run_id": "qa_4bit",
+  "model_id": "Qwen/Qwen2.5-1.5B-Instruct",
+  "n": 750,
+  "seed": 7,
+  "batch_size": 16,
+  "log_confidence": false,
+  "prompt_version": "v5",
+  "stage_precision": {
+    "planner": "fp16",
+    "step_definer": "fp16",
+    "extractor": "fp16",
+    "qa": "4bit"
+  },
+  "stages": {
+    "planner": {
+      "precision": "fp16",
+      "method": "none",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "peak_vram_mb": 3294.2,
+      "weight_footprint_mb": 2944.4,
+      "calls": 750,
+      "stage_wall_s": 122.4,
+      "final_batch_size": 16,
+      "nominal_params": 1543714304,
+      "quantized_params": 0
+    },
+    "step_definer": {
+      "precision": "fp16",
+      "method": "none",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "peak_vram_mb": 5897.9,
+      "weight_footprint_mb": 2944.4,
+      "calls": 1597,
+      "stage_wall_s": 265.0,
+      "final_batch_size": 16,
+      "nominal_params": 1543714304,
+      "quantized_params": 0
+    },
+    "extractor": {
+      "precision": "fp16",
+      "method": "none",
+      "group_size": null,
+      "compute_dtype": "float16",
+      "peak_vram_mb": 7509.8,
+      "weight_footprint_mb": 2944.4,
+      "calls": 1597,
+      "stage_wall_s": 2468.9,
+      "final_batch_size": 16,
+      "nominal_params": 1543714304,
+      "quantized_params": 0
+    },
+    "qa": {
+      "precision": "4bit",
+      "method": "bitsandbytes-nf4",
+      "group_size": 64,
+      "compute_dtype": "float16",
+      "double_quant": true,
+      "peak_vram_mb": 4078.4,
+      "weight_footprint_mb": 1070.2,
+      "calls": 750,
+      "stage_wall_s": 115.9,
+      "final_batch_size": 16,
+      "nominal_params": 1543714304,
+      "quantized_params": 1310195712
+    }
+  },
+  "coresident_footprint_mb": 9903.4,
+  "git_commit": "bef487656265a90bc6625edc7d85fae752bca639",
+  "library_versions": {
+    "torch": "2.10.0+cu128",
+    "transformers": "5.14.1",
+    "bitsandbytes": "0.50.0",
+    "datasets": "5.0.1",
+    "cuda": "12.8"
+  },
+  "gpu_name": "Tesla T4",
+  "total_wall_s": 2989.7,
+  "finished_at": "2026-07-30T22:46:14.585675+00:00"
+}

@@ -1,0 +1,36 @@
+nohup: ignoring input
+=== run extractor_8bit | Qwen/Qwen2.5-1.5B-Instruct | n=3000 seed=7 batch=64 prompts=v5 ===
+    planner        Qwen/Qwen2.5-1.5B-Instruct @ fp16
+    step_definer   Qwen/Qwen2.5-1.5B-Instruct @ fp16
+    extractor      Qwen/Qwen2.5-1.5B-Instruct @ 8bit
+    qa             Qwen/Qwen2.5-1.5B-Instruct @ fp16
+
+--- stage planner @ Qwen/Qwen2.5-1.5B-Instruct fp16: 3000 calls, 3000 pending ---
+Loading weights:   0%|          | 0/338 [00:00<?, ?it/s]Loading weights:   0%|          | 1/338 [00:00<00:49,  6.76it/s]Loading weights:  19%|█▊        | 63/338 [00:00<00:00, 306.06it/s]Loading weights:  34%|███▍      | 116/338 [00:00<00:00, 397.21it/s]Loading weights:  51%|█████     | 171/338 [00:00<00:00, 450.57it/s]Loading weights:  65%|██████▍   | 219/338 [00:00<00:00, 436.59it/s]Loading weights:  82%|████████▏ | 276/338 [00:00<00:00, 478.86it/s]Loading weights:  97%|█████████▋| 327/338 [00:00<00:00, 480.59it/s]Loading weights: 100%|██████████| 338/338 [00:00<00:00, 432.99it/s]
+    loaded in 9.7s
+    64/3000 (bs=64)    128/3000 (bs=64)    192/3000 (bs=64)    256/3000 (bs=64)    320/3000 (bs=64)    384/3000 (bs=64)    448/3000 (bs=64)    512/3000 (bs=64)    576/3000 (bs=64)    640/3000 (bs=64)    704/3000 (bs=64)    768/3000 (bs=64)    832/3000 (bs=64)    896/3000 (bs=64)    960/3000 (bs=64)    1024/3000 (bs=64)    1088/3000 (bs=64)    1152/3000 (bs=64)    1216/3000 (bs=64)    1280/3000 (bs=64)    1344/3000 (bs=64)    1408/3000 (bs=64)    1472/3000 (bs=64)    1536/3000 (bs=64)    1600/3000 (bs=64)    1664/3000 (bs=64)    1728/3000 (bs=64)    1792/3000 (bs=64)    1856/3000 (bs=64)    1920/3000 (bs=64)    1984/3000 (bs=64)    2048/3000 (bs=64)    2112/3000 (bs=64)    2176/3000 (bs=64)    2240/3000 (bs=64)    2304/3000 (bs=64)    2368/3000 (bs=64)    2432/3000 (bs=64)    2496/3000 (bs=64)    2560/3000 (bs=64)    2624/3000 (bs=64)    2688/3000 (bs=64)    2752/3000 (bs=64)    2816/3000 (bs=64)    2880/3000 (bs=64)    2944/3000 (bs=64)    3000/3000 (bs=64)
+    done in 101.1s  final_batch_size=64  peak_vram_mb=4394
+
+--- stage step_definer @ Qwen/Qwen2.5-1.5B-Instruct fp16: 6410 calls, 6410 pending ---
+    reusing loaded Qwen/Qwen2.5-1.5B-Instruct @ fp16
+    64/6410 (bs=64)    128/6410 (bs=64)    192/6410 (bs=64)    256/6410 (bs=64)    320/6410 (bs=64)    384/6410 (bs=64)    448/6410 (bs=64)    512/6410 (bs=64)    576/6410 (bs=64)    640/6410 (bs=64)    704/6410 (bs=64)    768/6410 (bs=64)    832/6410 (bs=64)    896/6410 (bs=64)    960/6410 (bs=64)    1024/6410 (bs=64)    1088/6410 (bs=64)    1152/6410 (bs=64)    1216/6410 (bs=64)    1280/6410 (bs=64)    1344/6410 (bs=64)    1408/6410 (bs=64)    1472/6410 (bs=64)    1536/6410 (bs=64)    1600/6410 (bs=64)    1664/6410 (bs=64)    1728/6410 (bs=64)    1792/6410 (bs=64)    1856/6410 (bs=64)    1920/6410 (bs=64)    1984/6410 (bs=64)    2048/6410 (bs=64)    2112/6410 (bs=64)    2176/6410 (bs=64)    2240/6410 (bs=64)    2304/6410 (bs=64)    2368/6410 (bs=64)    2432/6410 (bs=64)    2496/6410 (bs=64)    2560/6410 (bs=64)    2624/6410 (bs=64)    2688/6410 (bs=64)    2752/6410 (bs=64)    2816/6410 (bs=64)    2880/6410 (bs=64)    2944/6410 (bs=64)    3008/6410 (bs=64)    3072/6410 (bs=64)    3136/6410 (bs=64)    3200/6410 (bs=64)    3264/6410 (bs=64)    3328/6410 (bs=64)    3392/6410 (bs=64)    3456/6410 (bs=64)    3520/6410 (bs=64)    3584/6410 (bs=64)    3648/6410 (bs=64)    3712/6410 (bs=64)    3776/6410 (bs=64)    3840/6410 (bs=64)    3904/6410 (bs=64)    3968/6410 (bs=64)    4032/6410 (bs=64)    4096/6410 (bs=64)    4160/6410 (bs=64)    4224/6410 (bs=64)    4288/6410 (bs=64)    4352/6410 (bs=64)    4416/6410 (bs=64)    4480/6410 (bs=64)    4544/6410 (bs=64)    4608/6410 (bs=64)    4672/6410 (bs=64)    4736/6410 (bs=64)    4800/6410 (bs=64)    4864/6410 (bs=64)    4928/6410 (bs=64)    4992/6410 (bs=64)    5056/6410 (bs=64)    5120/6410 (bs=64)    5184/6410 (bs=64)    5248/6410 (bs=64)    5312/6410 (bs=64)    5376/6410 (bs=64)    5440/6410 (bs=64)    5504/6410 (bs=64)    5568/6410 (bs=64)    5632/6410 (bs=64)    5696/6410 (bs=64)    5760/6410 (bs=64)    5824/6410 (bs=64)    5888/6410 (bs=64)    5952/6410 (bs=64)    6016/6410 (bs=64)    6080/6410 (bs=64)    6144/6410 (bs=64)    6208/6410 (bs=64)    6272/6410 (bs=64)    6336/6410 (bs=64)    6400/6410 (bs=64)    6410/6410 (bs=64)
+    done in 200.0s  final_batch_size=64  peak_vram_mb=4904
+
+--- stage extractor @ Qwen/Qwen2.5-1.5B-Instruct 8bit: 6410 calls, 6410 pending ---
+Loading weights:   0%|          | 0/338 [00:00<?, ?it/s]Loading weights:   0%|          | 1/338 [00:00<00:35,  9.59it/s]Loading weights:   6%|▌         | 21/338 [00:00<00:02, 118.67it/s]Loading weights:  12%|█▏        | 42/338 [00:00<00:01, 159.61it/s]Loading weights:  21%|██        | 71/338 [00:00<00:01, 208.69it/s]Loading weights:  29%|██▉       | 99/338 [00:00<00:01, 228.07it/s]Loading weights:  37%|███▋      | 124/338 [00:00<00:00, 231.00it/s]Loading weights:  44%|████▍     | 149/338 [00:00<00:00, 233.02it/s]Loading weights:  53%|█████▎    | 179/338 [00:00<00:00, 253.60it/s]Loading weights:  61%|██████    | 207/338 [00:00<00:00, 255.83it/s]Loading weights:  69%|██████▉   | 233/338 [00:01<00:00, 244.00it/s]Loading weights:  78%|███████▊  | 263/338 [00:01<00:00, 259.72it/s]Loading weights:  86%|████████▌ | 291/338 [00:01<00:00, 259.00it/s]Loading weights:  94%|█████████▍| 318/338 [00:01<00:00, 247.75it/s]Loading weights: 100%|██████████| 338/338 [00:01<00:00, 234.89it/s]
+    loaded in 3.7s
+    64/6410 (bs=64)    128/6410 (bs=64)    192/6410 (bs=64)    256/6410 (bs=64)    320/6410 (bs=64)    384/6410 (bs=64)    448/6410 (bs=64)    512/6410 (bs=64)    576/6410 (bs=64)    640/6410 (bs=64)    704/6410 (bs=64)Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/jupyter-mrbe-8c5f/Maxim-Mohareb-Michael-Zhang-Fun-Time/src/runner.py", line 563, in <module>
+    main()
+  File "/home/jupyter-mrbe-8c5f/Maxim-Mohareb-Michael-Zhang-Fun-Time/src/runner.py", line 559, in main
+    run(cfg, args.run, args.n, args.seed, args.batch_size)
+  File "/home/jupyter-mrbe-8c5f/Maxim-Mohareb-Michael-Zhang-Fun-Time/src/runner.py", line 427, in run
+    bs = _run_stage(
+         ^^^^^^^^^^^
+  File "/home/jupyter-mrbe-8c5f/Maxim-Mohareb-Michael-Zhang-Fun-Time/src/runner.py", line 248, in _run_stage
+    store.write(recs)
+  File "/home/jupyter-mrbe-8c5f/Maxim-Mohareb-Michael-Zhang-Fun-Time/src/runner.py", line 200, in write
+    self._fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+OSError: [Errno 28] No space left on device

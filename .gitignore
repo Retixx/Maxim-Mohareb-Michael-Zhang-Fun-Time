@@ -5,9 +5,10 @@ __pycache__/
 .coverage
 htmlcov/
 
-# Generated production/smoke outputs never belong in the active source tree.
-results/*
-!results/.gitkeep
+# Run outputs ARE committed (SPEC §13a item 9). A Kaggle/Colab session can die
+# without warning — one full n=750 sweep was already lost that way before the
+# push-after-every-run habit existed. Committing them is the archive.
+!results/
 logs/
 figures/
 *.zip
