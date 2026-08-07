@@ -2135,6 +2135,10 @@ def run(
                 if post_load_allocated is not None and pre_load_allocated is not None
                 else None
             )
+            census = models.validate_loaded_precision(
+                model, precision, stage_model_id
+            )
+            memory = models.memory_footprint_mib(model)
             store.write([{
                 "record_type": "model_load",
                 "run_id": run_id,
@@ -2144,6 +2148,7 @@ def run(
                 "model_revision": revision,
                 "tokenizer_revision": tokenizer_revision,
                 **resolved_revisions,
+                **census,
                 "config_fingerprint": treatment["config_fingerprint"],
                 "conceptual_role": prompts.role_for(stage),
                 "prompt_role": prompts.prompt_for(stage),
@@ -2159,8 +2164,6 @@ def run(
             }])
             store.durable_flush()
 
-            memory = models.memory_footprint_mib(model)
-            census = models.param_census(model)
             if use_manifest:
                 natural_warmup_calls = build_stage_calls(
                     stage, warmup_questions, warmup_idx, retriever=retriever

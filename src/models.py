@@ -207,19 +207,77 @@ def resolved_revision_metadata(
 
 
 def param_census(model) -> dict:
-    """Nominal vs quantized parameter counts, for the paper's memory table."""
-    quantized = nominal = 0
+    """Nominal and actual bitsandbytes parameter counts."""
+    nominal = quantized_4bit = quantized_8bit = 0
     for p in model.parameters():
         if p.__class__.__name__ == "Params4bit":
             n = p.numel() * 2  # two 4-bit values per packed uint8
-            quantized += n
+            quantized_4bit += n
             nominal += n
         elif p.__class__.__name__ == "Int8Params" or p.dtype == torch.int8:
-            quantized += p.numel()
+            quantized_8bit += p.numel()
             nominal += p.numel()
         else:
             nominal += p.numel()
-    return {"nominal_params": nominal, "quantized_params": quantized}
+    return {
+        "nominal_params": nominal,
+        "quantized_params": quantized_4bit + quantized_8bit,
+        "quantized_4bit_params": quantized_4bit,
+        "quantized_8bit_params": quantized_8bit,
+    }
+
+
+MIN_QUANTIZED_FRACTION = 0.5
+
+
+def validate_loaded_precision(model, precision: str, model_id: str) -> dict:
+    """Prove requested precision from loaded tensor types before generation."""
+    if precision not in PRECISIONS:
+        raise ValueError(
+            f"unknown precision {precision!r}; expected one of {PRECISIONS}"
+        )
+    census = param_census(model)
+    nominal = int(census["nominal_params"])
+    quantized = int(census["quantized_params"])
+    if nominal <= 0:
+        raise RuntimeError(f"{model_id}: loaded model has no nominal parameters")
+
+    total_fraction = quantized / nominal
+    four_bit_fraction = int(census["quantized_4bit_params"]) / nominal
+    eight_bit_fraction = int(census["quantized_8bit_params"]) / nominal
+    if precision == "fp16":
+        requested_fraction = 1.0 - total_fraction
+        valid = quantized == 0
+        expectation = "zero quantized parameters"
+    elif precision == "4bit":
+        requested_fraction = four_bit_fraction
+        valid = (
+            four_bit_fraction >= MIN_QUANTIZED_FRACTION
+            and census["quantized_8bit_params"] == 0
+        )
+        expectation = f"4bit fraction>={MIN_QUANTIZED_FRACTION:.2f} and no 8bit parameters"
+    else:
+        requested_fraction = eight_bit_fraction
+        valid = (
+            eight_bit_fraction >= MIN_QUANTIZED_FRACTION
+            and census["quantized_4bit_params"] == 0
+        )
+        expectation = f"8bit fraction>={MIN_QUANTIZED_FRACTION:.2f} and no 4bit parameters"
+
+    if not valid:
+        raise RuntimeError(
+            f"{model_id}: requested {precision} but loaded tensor census has "
+            f"nominal_params={nominal}, quantized_params={quantized}, "
+            f"quantized fraction={total_fraction:.6f}, "
+            f"4bit fraction={four_bit_fraction:.6f}, "
+            f"8bit fraction={eight_bit_fraction:.6f}; expected {expectation}"
+        )
+    return {
+        **census,
+        "quantized_fraction": total_fraction,
+        "requested_precision_fraction": requested_fraction,
+        "precision_validation_passed": True,
+    }
 
 
 def unload(model=None) -> None:

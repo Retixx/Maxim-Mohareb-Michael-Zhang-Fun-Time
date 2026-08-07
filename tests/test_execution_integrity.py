@@ -43,6 +43,22 @@ class MemoryStore:
         pass
 
 
+class FakeModel:
+    def __init__(self, parameters):
+        self._parameters = parameters
+
+    def parameters(self):
+        return iter(self._parameters)
+
+
+def fake_parameter(class_name, n, dtype):
+    cls = type(class_name, (), {})
+    value = cls()
+    value.numel = lambda: n
+    value.dtype = dtype
+    return value
+
+
 class ExecutionIntegrityTests(unittest.TestCase):
     def test_extractor_budget_restores_pre_merge_ceiling(self):
         self.assertEqual(prompts.MAX_NEW_TOKENS["extractor"], 320)
@@ -52,6 +68,45 @@ class ExecutionIntegrityTests(unittest.TestCase):
             json.loads(json.dumps(prompts.MAX_NEW_TOKENS, sort_keys=True)),
             prompts.MAX_NEW_TOKENS,
         )
+
+    def test_loaded_precision_accepts_fp16_without_quantized_parameters(self):
+        model = FakeModel([
+            fake_parameter("Parameter", 100, models.torch.float16)
+        ])
+        proof = models.validate_loaded_precision(model, "fp16", "model")
+        self.assertTrue(proof["precision_validation_passed"])
+        self.assertEqual(proof["quantized_fraction"], 0.0)
+
+    def test_loaded_precision_rejects_metadata_only_q4(self):
+        model = FakeModel([
+            fake_parameter("Parameter", 100, models.torch.float16)
+        ])
+        with self.assertRaisesRegex(RuntimeError, "requested 4bit.*quantized fraction"):
+            models.validate_loaded_precision(model, "4bit", "model")
+
+    def test_loaded_precision_accepts_material_q4(self):
+        model = FakeModel([
+            fake_parameter("Params4bit", 40, models.torch.uint8),
+            fake_parameter("Parameter", 20, models.torch.float16),
+        ])
+        proof = models.validate_loaded_precision(model, "4bit", "model")
+        self.assertGreaterEqual(proof["quantized_fraction"], 0.5)
+
+    def test_loaded_precision_rejects_partial_q8(self):
+        model = FakeModel([
+            fake_parameter("Int8Params", 20, models.torch.int8),
+            fake_parameter("Parameter", 80, models.torch.float16),
+        ])
+        with self.assertRaisesRegex(RuntimeError, "requested 8bit.*quantized fraction"):
+            models.validate_loaded_precision(model, "8bit", "model")
+
+    def test_loaded_precision_rejects_wrong_quantization_kind(self):
+        model = FakeModel([
+            fake_parameter("Int8Params", 80, models.torch.int8),
+            fake_parameter("Parameter", 20, models.torch.float16),
+        ])
+        with self.assertRaisesRegex(RuntimeError, "requested 4bit.*4bit fraction"):
+            models.validate_loaded_precision(model, "4bit", "model")
 
     def test_pinned_bitsandbytes_configs_match_the_quantization_contract(self):
         int8 = models._bnb_config("8bit").to_dict()
