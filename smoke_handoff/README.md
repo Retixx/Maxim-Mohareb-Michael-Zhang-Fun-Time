@@ -49,3 +49,71 @@ Qwen2.5-0.5B-Instruct scores 0.007 EM on HotpotQA as a search agent;
 Search-R1-PPO-3B scores 0.340 (arXiv 2508.20324). This 1.5B-4bit result
 (0.11 EM multi) sits between them, which is evidence the harness measures
 reality rather than a bug.
+
+---
+
+# SECOND COMMIT — measured retrieval recall + repaired driver
+
+## The number the anchored-fusion design was gated on
+
+Top-10 gold recall of the SHIPPED pipeline, Qwen2.5-1.5B-Instruct @ fp16, n=100:
+
+  stratum          n   SINGLE   MULTI    delta   SINGLE all-gold  MULTI all-gold  delta
+  hidden_bridge   70    0.729   0.571   -0.157        0.514           0.257      -0.257
+  fully_named     30    0.883   0.800   -0.083        0.800           0.667      -0.133
+  ALL            100    0.775   0.640   -0.135        0.600           0.380      -0.220
+
+  mean unique passages read per question: single 10.0, multi 15.2
+
+MULTI READS 52% MORE TEXT AND RETRIEVES LESS GOLD.
+
+## Why the earlier +0.158 number did not transfer
+
+scripts/bridge_recall.py measured hidden-bridge all-gold 0.520 -> 0.678 using
+the ORIGINAL QUESTION as the hop-1 query and a regex-derived entity as hop-2.
+The shipped pipeline queries with generated Step Definer text:
+
+    src/pipeline.py:526   search_titles(task["task"], k)      <- multi
+    src/pipeline.py:680   search_titles(q["question"], k)      <- solo
+
+Different retrievers. The earlier figure never described the running system.
+It was produced and reported by Claude, and using it to argue the pilot would
+likely pass was wrong.
+
+## Mechanism: step-2 queries never resolve the bridge
+
+Queries do vary across steps (only 7% of multi-step questions repeat a query),
+but step 2 carries unresolved references instead of the bridge entity:
+
+    step1: What is the name of the animated series based on the Teen Titans?
+    step2: Who played the character in the series?          <- "the character"
+
+    step1: Where did John MacGregor study before becoming Baron MacGregor...?
+    step2: ...other university he attended after...          <- "he"
+
+    step1: What American country music group does Candy Coburn play with?
+    step2: In which band does Candy Coburn perform?          <- restated, not a hop
+
+This is the naive per-sub-question failure measured before the redesign
+(recall@10 0.743 vs 0.794 for question-as-query). It was never fixed; it was
+inherited by the variable-depth executor.
+
+## Answer quality across three configs (same 100 questions)
+
+  config             hidden_bridge F1        ALL F1
+  1.5B 4bit          8.1 vs 35.5  (-27.4)   17.0 vs 45.5  (-28.5)
+  3B   4bit         15.2 vs 39.6  (-24.3)   16.9 vs 49.1  (-32.3)
+  1.5B fp16         15.3 vs 35.2  (-20.0)   19.2 vs 46.5  (-27.3)
+
+Doubling parameters did not close the gap; fp16 over 4bit buys ~7pp on
+hidden_bridge. Consistent with a mechanical retrieval deficit rather than a
+pure capability floor.
+
+## New files
+
+- retrieval_recall.py / .txt ... the recall computation and its output
+- local_smoke_{multi,single}_Qwen2.5-1.5B-Instruct_fp16.jsonl / .meta.json
+                                 per-call records (agent_call + answer)
+- smoke_fp16_*.json, smoke_4bit_Qwen2.5-3B-Instruct.json, run logs
+- smoke_local.py .............. REPAIRED (the version in a68bbd1 had a
+                                SyntaxError at line 189 and could not run)

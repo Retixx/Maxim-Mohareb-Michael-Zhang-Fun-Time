@@ -1,0 +1,62 @@
+{
+ "model": "Qwen/Qwen2.5-1.5B-Instruct",
+ "precision": "fp16",
+ "n": 100,
+ "strata": {
+  "hidden_bridge": 70,
+  "fully_named": 30
+ },
+ "seed": 20260807,
+ "metrics": {
+  "f1_hidden_bridge": {
+   "single": 0.3523340851492112,
+   "delta_pp": -35.23340851492112
+  },
+  "f1_fully_named": {
+   "single": 0.7273015873015872,
+   "delta_pp": -72.73015873015872
+  },
+  "f1_ALL": {
+   "single": 0.46482433579492394,
+   "delta_pp": -46.482433579492394
+  },
+  "em_hidden_bridge": {
+   "single": 0.21428571428571427,
+   "delta_pp": -21.428571428571427
+  },
+  "em_fully_named": {
+   "single": 0.6333333333333333,
+   "delta_pp": -63.33333333333333
+  },
+  "em_ALL": {
+   "single": 0.34,
+   "delta_pp": -34.0
+  }
+ },
+ "calls": {
+  "single": 100
+ },
+ "wall_s": {
+  "single": 135.18554060001043
+ },
+ "samples": {
+  "malformed_json": [
+   {
+    "stage": "solo",
+    "output_tokens": 1,
+    "raw": "no"
+   },
+   {
+    "stage": "solo",
+    "output_tokens": 3,
+    "raw": "bisexuality"
+   },
+   {
+    "stage": "solo",
+    "output_tokens": 4,
+    "raw": "\"Pollywood\""
+   }
+  ]
+ },
+ "parse": {}
+}

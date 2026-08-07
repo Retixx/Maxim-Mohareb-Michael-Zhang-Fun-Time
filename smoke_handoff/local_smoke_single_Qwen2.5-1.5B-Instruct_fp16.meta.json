@@ -1,0 +1,42 @@
+{
+ "run_id": "local_smoke_single_Qwen2.5-1.5B-Instruct_fp16",
+ "arm": "single",
+ "record_counts": {
+  "agent_call": 100,
+  "answer": 100
+ },
+ "model_id": "Qwen/Qwen2.5-1.5B-Instruct",
+ "precision": "fp16",
+ "batch_size": 2,
+ "stages": [
+  "solo"
+ ],
+ "n": 100,
+ "strata": {
+  "hidden_bridge": 70,
+  "fully_named": 30
+ },
+ "question_ids_sha256": "fe5a4e9455e9f54e1589ca7f70dcc7a2945a479c39918ab0eee3044025349ae0",
+ "sampling": {
+  "seed": 20260807,
+  "source": "smoke100.json",
+  "disjoint_from_frozen_cohorts": true,
+  "reserved_ids_count": 4531
+ },
+ "retrieval": {
+  "corpus_passages": 72094,
+  "corpus_sha256": "931425de7b123e3081ed63387c8d591a8aba4cf872d2cf47144e924260d92b73",
+  "algorithm": "sparse_bm25_lucene_idf_v1",
+  "tie_break": "score_desc_corpus_index_asc",
+  "query_policy": "step_definer_top_k_per_question_answering_step_v1",
+  "k_per_step": 10,
+  "bm25_k1": 1.5,
+  "bm25_b": 0.75,
+  "vocab_terms": 180483
+ },
+ "prompt_bundle_version": "marag-v1+qa-v2+extractor-v5+solo-v1",
+ "git_commit": "298137d23d6c0b0df898c68b5718f985371a97dd",
+ "calls": 100,
+ "wall_s": 135.2,
+ "NOT_THE_PILOT": "local rehearsal on excluded IDs; not campaign evidence"
+}

@@ -1,0 +1,63 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+repo clean at 8cefd92
+reserved (must never be touched): 4531
+smoke questions: 100  {'hidden_bridge': 70, 'fully_named': 30}
+building pooled corpus (distractor + fullwiki)...
+  72,094 passages  {'corpus_passages': 72094, 'corpus_sha256': '931425de7b123e3081ed63387c8d591a8aba4cf872d2cf47144e924260d92b73', 'algorithm': 'sparse_bm25_lucene_idf_v1', 'tie_break': 'score_desc_corpus_index_asc', 'query_policy': 'step_definer_top_k_per_question_answering_step_v1', 'k_per_step': 10, 'bm25_k1': 1.5, 'bm25_b': 0.75, 'vocab_terms': 180483}
+  gold titles absent from corpus: 0
+
+=== ARM multi  (Qwen/Qwen2.5-3B-Instruct @ 4bit) ===
+Loading weights:   0%|          | 0/434 [00:00<?, ?it/s]Loading weights:   0%|          | 1/434 [00:00<03:55,  1.84it/s]Loading weights:   1%|          | 3/434 [00:00<01:18,  5.46it/s]Loading weights:   3%|▎         | 15/434 [00:00<00:14, 29.93it/s]Loading weights:   6%|▌         | 27/434 [00:00<00:08, 48.92it/s]Loading weights:   9%|▉         | 39/434 [00:01<00:06, 62.62it/s]Loading weights:  12%|█▏        | 51/434 [00:01<00:05, 71.67it/s]Loading weights:  15%|█▍        | 63/434 [00:01<00:04, 76.41it/s]Loading weights:  17%|█▋        | 75/434 [00:01<00:04, 81.81it/s]Loading weights:  20%|██        | 87/434 [00:01<00:03, 86.93it/s]Loading weights:  23%|██▎       | 99/434 [00:01<00:03, 91.11it/s]Loading weights:  26%|██▌       | 111/434 [00:01<00:03, 93.64it/s]Loading weights:  28%|██▊       | 123/434 [00:01<00:03, 93.20it/s]Loading weights:  31%|███       | 135/434 [00:02<00:03, 94.10it/s]Loading weights:  34%|███▍      | 147/434 [00:02<00:02, 96.28it/s]Loading weights:  37%|███▋      | 159/434 [00:02<00:03, 88.19it/s]Loading weights:  39%|███▉      | 169/434 [00:02<00:02, 88.58it/s]Loading weights:  41%|████      | 179/434 [00:02<00:02, 87.29it/s]Loading weights:  43%|████▎     | 188/434 [00:02<00:02, 84.74it/s]Loading weights:  45%|████▌     | 197/434 [00:02<00:02, 79.88it/s]Loading weights:  48%|████▊     | 208/434 [00:03<00:03, 57.72it/s]Loading weights:  51%|█████     | 220/434 [00:03<00:03, 66.50it/s]Loading weights:  53%|█████▎    | 232/434 [00:03<00:02, 73.74it/s]Loading weights:  56%|█████▌    | 244/434 [00:03<00:02, 81.05it/s]Loading weights:  59%|█████▉    | 256/434 [00:03<00:02, 85.34it/s]Loading weights:  62%|██████▏   | 268/434 [00:03<00:01, 85.59it/s]Loading weights:  64%|██████▍   | 279/434 [00:03<00:01, 85.43it/s]Loading weights:  66%|██████▋   | 288/434 [00:03<00:01, 81.55it/s]Loading weights:  68%|██████▊   | 297/434 [00:04<00:01, 75.64it/s]Loading weights:  70%|███████   | 305/434 [00:04<00:02, 64.20it/s]Loading weights:  73%|███████▎  | 315/434 [00:04<00:01, 71.35it/s]Loading weights:  74%|███████▍  | 323/434 [00:04<00:01, 59.96it/s]Loading weights:  76%|███████▌  | 330/434 [00:04<00:01, 61.45it/s]Loading weights:  79%|███████▊  | 341/434 [00:04<00:01, 67.98it/s]Loading weights:  81%|████████▏ | 353/434 [00:04<00:01, 76.50it/s]Loading weights:  84%|████████▍ | 365/434 [00:05<00:00, 83.63it/s]Loading weights:  87%|████████▋ | 377/434 [00:05<00:00, 88.08it/s]Loading weights:  90%|████████▉ | 389/434 [00:05<00:00, 92.43it/s]Loading weights:  92%|█████████▏| 401/434 [00:05<00:00, 93.48it/s]Loading weights:  95%|█████████▍| 412/434 [00:05<00:00, 97.55it/s]Loading weights:  97%|█████████▋| 423/434 [00:05<00:00, 100.39it/s]Loading weights: 100%|██████████| 434/434 [00:05<00:00, 75.88it/s] 
+  loaded in 13.0s  {'parameter_mib': 1917.0, 'parameter_bytes_mib': 1917.0, 'buffer_mib': 0.0, 'buffer_bytes_mib': 0.0, 'model_footprint_mib': 1917.0, 'model_footprint_bytes': 2010079744}
+    planner                  100 calls    112.8s   1.13s/call
+    step_definer             100 calls     72.6s   0.73s/call
+    extractor               1000 calls    671.3s   0.67s/call
+    qa                       100 calls    138.8s   1.39s/call
+    step_definer_step2        55 calls     47.6s   0.87s/call
+    extractor_step2          550 calls    374.6s   0.68s/call
+    qa_step2                  55 calls     68.1s   1.24s/call
+    step_definer_step3         6 calls      5.4s   0.91s/call
+    extractor_step3           60 calls     35.6s   0.59s/call
+    qa_step3                   6 calls      7.7s   1.28s/call
+    plan_summary             100 calls     53.1s   0.53s/call
+  2132 calls in 1588s
+
+=== ARM single  (Qwen/Qwen2.5-3B-Instruct @ 4bit) ===
+Loading weights:   0%|          | 0/434 [00:00<?, ?it/s]Loading weights:   0%|          | 1/434 [00:00<04:03,  1.78it/s]Loading weights:   2%|▏         | 8/434 [00:00<00:27, 15.53it/s]Loading weights:   4%|▍         | 17/434 [00:00<00:13, 30.99it/s]Loading weights:   7%|▋         | 29/434 [00:00<00:08, 50.17it/s]Loading weights:   9%|▉         | 41/434 [00:01<00:06, 65.45it/s]Loading weights:  12%|█▏        | 52/434 [00:01<00:04, 76.49it/s]Loading weights:  15%|█▍        | 64/434 [00:01<00:04, 80.49it/s]Loading weights:  18%|█▊        | 76/434 [00:01<00:04, 83.51it/s]Loading weights:  20%|██        | 88/434 [00:01<00:04, 84.89it/s]Loading weights:  23%|██▎       | 99/434 [00:01<00:03, 89.57it/s]Loading weights:  26%|██▌       | 111/434 [00:01<00:03, 90.31it/s]Loading weights:  28%|██▊       | 121/434 [00:02<00:04, 66.39it/s]Loading weights:  30%|██▉       | 129/434 [00:02<00:04, 64.79it/s]Loading weights:  32%|███▏      | 137/434 [00:02<00:04, 64.43it/s]Loading weights:  34%|███▍      | 148/434 [00:02<00:03, 74.08it/s]Loading weights:  37%|███▋      | 159/434 [00:02<00:03, 81.80it/s]Loading weights:  39%|███▊      | 168/434 [00:02<00:03, 83.44it/s]Loading weights:  41%|████      | 177/434 [00:02<00:03, 77.82it/s]Loading weights:  43%|████▎     | 186/434 [00:02<00:03, 78.23it/s]Loading weights:  45%|████▌     | 196/434 [00:02<00:02, 82.35it/s]Loading weights:  48%|████▊     | 207/434 [00:03<00:02, 88.12it/s]Loading weights:  50%|████▉     | 216/434 [00:03<00:02, 86.08it/s]Loading weights:  52%|█████▏    | 225/434 [00:03<00:02, 76.98it/s]Loading weights:  54%|█████▎    | 233/434 [00:03<00:02, 70.66it/s]Loading weights:  56%|█████▌    | 244/434 [00:03<00:02, 76.85it/s]Loading weights:  59%|█████▉    | 255/434 [00:03<00:02, 78.99it/s]Loading weights:  61%|██████    | 264/434 [00:03<00:02, 76.14it/s]Loading weights:  63%|██████▎   | 272/434 [00:03<00:02, 66.73it/s]Loading weights:  65%|██████▍   | 280/434 [00:04<00:02, 66.46it/s]Loading weights:  66%|██████▌   | 287/434 [00:04<00:03, 48.49it/s]Loading weights:  68%|██████▊   | 293/434 [00:04<00:03, 42.91it/s]Loading weights:  70%|███████   | 304/434 [00:04<00:02, 52.38it/s]Loading weights:  73%|███████▎  | 315/434 [00:04<00:01, 60.15it/s]Loading weights:  74%|███████▍  | 322/434 [00:04<00:01, 59.21it/s]Loading weights:  76%|███████▌  | 329/434 [00:05<00:02, 45.91it/s]Loading weights:  79%|███████▊  | 341/434 [00:05<00:01, 57.73it/s]Loading weights:  81%|████████▏ | 353/434 [00:05<00:01, 68.26it/s]Loading weights:  84%|████████▍ | 365/434 [00:05<00:00, 75.65it/s]Loading weights:  87%|████████▋ | 376/434 [00:05<00:00, 81.34it/s]Loading weights:  89%|████████▉ | 387/434 [00:05<00:00, 87.55it/s]Loading weights:  92%|█████████▏| 399/434 [00:05<00:00, 90.15it/s]Loading weights:  95%|█████████▍| 411/434 [00:06<00:00, 91.96it/s]Loading weights:  97%|█████████▋| 423/434 [00:06<00:00, 91.22it/s]Loading weights: 100%|██████████| 434/434 [00:06<00:00, 69.35it/s]
+  loaded in 8.3s  {'parameter_mib': 1917.0, 'parameter_bytes_mib': 1917.0, 'buffer_mib': 0.0, 'buffer_bytes_mib': 0.0, 'model_footprint_mib': 1917.0, 'model_footprint_bytes': 2010079744}
+    solo                     100 calls   1578.4s  15.78s/call
+  100 calls in 1579s
+
+==========================================================================
+stratum             n       multi      single     delta
+--------------------------------------------------------------------------
+
+-- F1 --
+hidden_bridge      70       15.2%       39.6%    -24.3pp
+fully_named        30       20.7%       71.4%    -50.8pp
+ALL               100       16.9%       49.1%    -32.3pp
+
+-- EM --
+hidden_bridge      70       10.0%       28.6%    -18.6pp
+fully_named        30       16.7%       60.0%    -43.3pp
+ALL               100       12.0%       38.0%    -26.0pp
+
+-- parse status by stage (multi arm) --
+  planner                   94/100   ok (94.0%)   {'malformed_json': 6}
+  step_definer             100/100   ok (100.0%)
+  extractor                983/1000  ok (98.3%)   {'malformed_json': 13, 'truncated': 2, 'schema_mismatch': 2}
+  qa                        88/100   ok (88.0%)   {'schema_mismatch': 12}
+  step_definer_step2        53/55    ok (96.4%)   {'schema_mismatch': 2}
+  extractor_step2          539/550   ok (98.0%)   {'truncated': 5, 'malformed_json': 6}
+  qa_step2                  50/55    ok (90.9%)   {'schema_mismatch': 5}
+  step_definer_step3         3/6     ok (50.0%)   {'schema_mismatch': 3}
+  extractor_step3           60/60    ok (100.0%)
+  qa_step3                   5/6     ok (83.3%)   {'schema_mismatch': 1}
+  plan_summary              87/100   ok (87.0%)   {'schema_mismatch': 13}
+
+-- cost --
+  multi      2132 calls     1588s
+  single      100 calls     1579s
+
+wrote C:\Users\maxim\AppData\Local\Temp\claude\C--Users-maxim-Projects-IndieVST-IndieVST\97b5313d-d004-4586-9023-986c0fb75a0d\scratchpad\smoke_4bit_Qwen2.5-3B-Instruct.json
+repo clean at a68bbd1

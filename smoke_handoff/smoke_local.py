@@ -186,11 +186,9 @@ def main() -> int:
         jsonl = SCRATCH / f"{slug}.jsonl"
         with jsonl.open("w", encoding="utf-8") as fh:
             for rec in idx.values():
-                fh.write(json.dumps(rec, ensure_ascii=False) + "
-")
+                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
             for ans in answers:
-                fh.write(json.dumps(ans, ensure_ascii=False) + "
-")
+                fh.write(json.dumps(ans, ensure_ascii=False) + "\n")
         meta = {
             "run_id": slug, "arm": arm, "record_counts":
                 {"agent_call": len(idx), "answer": len(answers)},
