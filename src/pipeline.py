@@ -651,7 +651,6 @@ def build_stage_calls(stage: str, questions: list[dict], idx: dict,
                     "fields": agents.build_extractor_fields(
                         retrieval.format_passages([passage]),
                         task["task"],
-                        {"target_entity": task["task"], "search_terms": [task["task"]]},
                     ),
                     "consumer_payload_source": source,
                     "consumer_input": {
@@ -677,18 +676,25 @@ def build_stage_calls(stage: str, questions: list[dict], idx: dict,
                 q, idx, step_index, task, retriever
             )
             blocks = []
+            seen_prompt_spans: set[str] = set()
             consumed = []
             sources = []
             if task["type"] == "aggregate":
                 for prior in history:
-                    blocks.append((
-                        prior["sub_question"],
-                        [f"Prior step answer: {prior['answer'] or '(no answer)'}"],
-                    ))
+                    grounded = prior.get("answer_grounded") is True
+                    prompt_spans = (
+                        [f"Prior step answer: {prior['answer']}"]
+                        if grounded and prior.get("answer") else []
+                    )
+                    if prompt_spans:
+                        blocks.append((prior["sub_question"], prompt_spans))
                     consumed.append({
                         "sub_question": prior["sub_question"],
                         "answer": prior["answer"],
+                        "answer_grounded": grounded,
                         "spans": [],
+                        "prompt_spans": prompt_spans,
+                        "included_in_prompt": bool(prompt_spans),
                         "document_title": None,
                         "document_rank": None,
                         "consumer_payload_source": prior["qa_source"],
@@ -714,24 +720,32 @@ def build_stage_calls(stage: str, questions: list[dict], idx: dict,
                         )
                     else:
                         prompt_label = task["task"]
-                    blocks.append((prompt_label, spans))
+                    prompt_spans = [
+                        span for span in spans if span not in seen_prompt_spans
+                    ]
+                    seen_prompt_spans.update(prompt_spans)
+                    if prompt_spans:
+                        blocks.append((prompt_label, prompt_spans))
                     consumed.append({
                         "sub_question": task["task"],
                         "answer": None,
                         "spans": spans,
+                        "prompt_spans": prompt_spans,
+                        "included_in_prompt": bool(prompt_spans),
                         "document_title": document_title,
                         "document_rank": document_rank,
                         "consumer_payload_source": source,
                     })
                 if not extractor_records:
                     # A QA call still runs after a valid zero-result query.  Its
-                    # empty evidence block and retrieval event make that state
-                    # different from an aggregate step, which did not query.
-                    blocks.append((task["task"], []))
+                    # retrieval event keeps that state distinct from an
+                    # aggregate step, which did not query.
                     consumed.append({
                         "sub_question": task["task"],
                         "answer": None,
                         "spans": [],
+                        "prompt_spans": [],
+                        "included_in_prompt": False,
                         "document_title": None,
                         "document_rank": None,
                         "consumer_payload_source": "retrieval_empty",
@@ -749,6 +763,8 @@ def build_stage_calls(stage: str, questions: list[dict], idx: dict,
                 "consumer_input": {
                     "task_type": task["type"],
                     "step_definition": task,
+                    "evidence_document_count": len(consumed),
+                    "evidence_prompt_block_count": len(blocks),
                     "evidence_blocks": consumed,
                     "retrieval": retrieval_event,
                 },

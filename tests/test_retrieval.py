@@ -539,11 +539,19 @@ class StageWiringTests(unittest.TestCase):
             },
         }
         self.idx[("q1", "extractor", 1)] = {
-            "parsed": {"spans": ["Xawery was a Polish director."]},
+            "parsed": {"spans": ["Directed by Xawery.", "Xawery was a Polish director."]},
             "consumer_input": {
                 "retrieval": event,
                 "document_rank": 1,
                 "document_title": "Director page",
+            },
+        }
+        self.idx[("q1", "extractor", 2)] = {
+            "parsed": {"spans": []},
+            "consumer_input": {
+                "retrieval": event,
+                "document_rank": 2,
+                "document_title": "Empty page",
             },
         }
 
@@ -556,12 +564,22 @@ class StageWiringTests(unittest.TestCase):
         blocks = call["consumer_input"]["evidence_blocks"]
         self.assertEqual(
             [(b["document_title"], b["document_rank"]) for b in blocks],
-            [("Film page", 0), ("Director page", 1)],
+            [("Film page", 0), ("Director page", 1), ("Empty page", 2)],
         )
         self.assertEqual(blocks[0]["spans"], ["Directed by Xawery."])
-        self.assertEqual(blocks[1]["spans"], ["Xawery was a Polish director."])
+        self.assertEqual(
+            blocks[1]["spans"],
+            ["Directed by Xawery.", "Xawery was a Polish director."],
+        )
+        self.assertEqual(
+            blocks[1]["prompt_spans"], ["Xawery was a Polish director."]
+        )
+        self.assertFalse(blocks[2]["included_in_prompt"])
         self.assertIn("Film page", call["fields"]["evidence"])
         self.assertIn("Director page", call["fields"]["evidence"])
+        self.assertNotIn("Empty page", call["fields"]["evidence"])
+        self.assertNotIn("no supporting text found", call["fields"]["evidence"])
+        self.assertEqual(call["fields"]["evidence"].count("Directed by Xawery."), 1)
 
         self.idx[("q1", "qa", 0)] = {
             "stage": "qa",
@@ -609,6 +627,10 @@ class StageWiringTests(unittest.TestCase):
         self.assertEqual(answer["retrieval_aggregate_step_count"], 0)
         self.assertEqual(answer["retrieval_events"], [event])
 
+        self.assertEqual(
+            qa_call["fields"]["evidence"], "(no evidence collected)"
+        )
+        self.assertFalse(qa_call["consumer_input"]["evidence_blocks"][0]["included_in_prompt"])
     def test_rounds_are_question_dependent_and_keep_agent_order(self):
         one_step = dict(self.q, question_id="one")
         three_step = dict(self.q, question_id="three")
@@ -651,6 +673,35 @@ class StageWiringTests(unittest.TestCase):
             "components": [],
             "titles": [],
         })
+
+    def test_aggregate_qa_renders_only_grounded_prior_answers(self):
+        self.idx[("q1", "qa", 0)] = {
+            "parsed": {"answer": "Bay of Biscay", "success": "yes", "rating": 10},
+        }
+        self.idx[("q1", "step_definer_step2", 1)] = {
+            "parsed": {"type": "aggregate", "task": "Use the prior answer."},
+        }
+        unsupported = build_stage_calls("qa_step2", [self.q], self.idx)[0]
+        self.assertEqual(
+            unsupported["fields"]["evidence"], "(no evidence collected)"
+        )
+        self.assertFalse(
+            unsupported["consumer_input"]["evidence_blocks"][0][
+                "included_in_prompt"
+            ]
+        )
+
+        self.idx[("q1", "extractor", 0)] = {
+            "parsed": {"spans": ["It was directed by Xawery Zulawski."]},
+        }
+        self.idx[("q1", "qa", 0)]["parsed"]["answer"] = "Xawery Zulawski"
+        grounded = build_stage_calls("qa_step2", [self.q], self.idx)[0]
+        self.assertIn("Prior step answer: Xawery Zulawski", grounded["fields"]["evidence"])
+        self.assertTrue(
+            grounded["consumer_input"]["evidence_blocks"][0][
+                "included_in_prompt"
+            ]
+        )
 
     def test_semantic_failure_stops_later_steps_and_summarizes(self):
         self.idx[("q1", "qa", 0)] = {

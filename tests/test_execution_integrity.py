@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from src import prompts
+from src import agents
 from src import mechanism
 from src import models
 from src.pipeline import (
@@ -77,8 +78,37 @@ class ExecutionIntegrityTests(unittest.TestCase):
             "only when you cannot produce a usable short answer",
             prompts.QA_SYSTEM,
         )
-        self.assertEqual(prompts.ROLE_PROMPT_VERSIONS["qa"], "marag-v2")
+        self.assertEqual(prompts.ROLE_PROMPT_VERSIONS["qa"], "marag-v3")
         self.assertEqual(prompts.ROLE_PROMPT_VERSIONS["solo"], "solo-v1")
+
+    def test_extractor_fields_match_the_one_document_runtime_shape(self):
+        fields = agents.build_extractor_fields("[1] Doc: Sentence.", "Find it.")
+        self.assertEqual(fields, {
+            "document": "[1] Doc: Sentence.",
+            "sub_question": "Find it.",
+        })
+        rendered = prompts.build_messages("extractor", **fields)[1]["content"]
+        self.assertIn("Document:\n[1] Doc: Sentence.", rendered)
+        self.assertNotIn("Look for:", rendered)
+        self.assertNotIn("Keywords:", rendered)
+
+    def test_qa_example_matches_current_step_document_layout(self):
+        self.assertIn("1. Document 1: Jaws", prompts.QA_SYSTEM)
+        self.assertIn("Current sub-question: Who directed", prompts.QA_SYSTEM)
+        self.assertIn('\"answer\": \"Steven Spielberg\"', prompts.QA_SYSTEM)
+        self.assertNotIn(
+            "Which university did that director attend?\n   -",
+            prompts.QA_SYSTEM,
+        )
+
+    def test_summary_marks_unsupported_guesses_as_candidates_not_evidence(self):
+        self.assertIn(
+            "Unsupported guesses are candidates, not evidence",
+            prompts.PLAN_SUMMARY_SYSTEM,
+        )
+        self.assertEqual(
+            prompts.ROLE_PROMPT_VERSIONS["plan_summary"], "marag-v2"
+        )
 
     def test_loaded_precision_accepts_fp16_without_quantized_parameters(self):
         model = FakeModel([
@@ -364,9 +394,9 @@ class ExecutionIntegrityTests(unittest.TestCase):
         self.assertEqual(prompts.prompt_template_hashes() | {}, {
             "planner": "c91c48626dd0b17c8ba3d29ce30ea216762404b24da3f88ddd689c71056bbc03",
             "step_definer": "9ef3f1c68808719f05c8f860a98c6e1cf4bc61df370419ec3be291b2b8c8b156",
-            "extractor": "8f84d86ae84278916dcb483b5ba8891f65360327701048d48c4a7d4df403018c",
-            "qa": "b0d20fb1dadc957c2701131c1a76cb20ab4231ac904eeaa0568c6c5512cd3e47",
-            "plan_summary": "12f441ef882350502fe6842e32ff6969847937d7a16194446f4129d0870f260f",
+            "extractor": "4a9f59f3a1c464bc9a64743bf7fe254adb46428b68a6caba6120a54b8d88b441",
+            "qa": "88dfe73142f7fbcf76ca54a431188f265e25e24a0ff4595661e32f798fcf8ae5",
+            "plan_summary": "c12dc220a69d842c75be944273bfeb90fa6c64f2bc7a2d0f2bf9402935b1ba9e",
             "solo": "337626135fa3a5054bb5a065cc638a9ca05c4e1f21b44977b4700c5a0cba94cb",
         })
 

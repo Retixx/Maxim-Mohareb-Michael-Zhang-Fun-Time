@@ -107,14 +107,10 @@ def build_plan_summary_fields(
     }
 
 
-def build_extractor_fields(paragraphs: str, sub_question: str, spec: dict | None) -> dict:
-    spec = spec or {}
-    terms = spec.get("search_terms") or []
+def build_extractor_fields(document: str, sub_question: str) -> dict:
     return {
-        "paragraphs": paragraphs,
+        "document": document,
         "sub_question": sub_question,
-        "target_entity": spec.get("target_entity") or "(unspecified)",
-        "search_terms": ", ".join(terms) if terms else "(none)",
     }
 
 
@@ -127,13 +123,14 @@ def build_qa_fields(
     plan_steps: int = 1,
 ) -> dict:
     lines = []
-    for i, (sub_q, spans) in enumerate(evidence_blocks, start=1):
-        lines.append(f"{i}. {sub_q}")
-        if spans:
-            for s in spans:
-                lines.append(f"   - {s}")
-        else:
-            lines.append("   - (no supporting text found)")
+    displayed = 0
+    for sub_q, spans in evidence_blocks:
+        if not spans:
+            continue
+        displayed += 1
+        lines.append(f"{displayed}. {sub_q}")
+        for s in spans:
+            lines.append(f"   - {s}")
     evidence = "\n".join(lines) if lines else "(no evidence collected)"
     return {
         "question": question,

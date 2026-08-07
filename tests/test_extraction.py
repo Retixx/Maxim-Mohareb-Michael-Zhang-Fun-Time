@@ -90,10 +90,8 @@ class AgentNormalizationIntegrationTests(unittest.TestCase):
             "question_id": "q1",
             "call_index": 0,
             "fields": {
-                "paragraphs": "[1] Apollo 8: " + raw_span,
+                "document": "[1] Apollo 8: " + raw_span,
                 "sub_question": "When did Apollo 8 launch?",
-                "target_entity": "Apollo 8",
-                "search_terms": "launch",
             },
             "consumer_input": {
                 "document_title": "Apollo 8",

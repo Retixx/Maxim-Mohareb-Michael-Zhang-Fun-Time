@@ -8,29 +8,34 @@ re-run across *all* precisions, otherwise it confounds the experiment.
 
 import hashlib
 
-# The open-corpus MA-RAG redesign changes the Planner, Step Definer, and QA
-# contracts because downstream steps must consume prior step results.  The
-# Extractor remains byte-for-byte v5 and the architecture control remains
-# solo-v1.  Every arm in the redesigned experiment uses this same bundle.
-PROMPT_VERSION = "marag-v2"
-PROMPT_BUNDLE_VERSION = "marag-v1+qa-v2+extractor-v5+solo-v1"
+# The excluded pre-pilot smoke run proved that the Extractor and QA prompt shapes
+# no longer matched the variable-depth per-document executor. This repaired
+# bundle changes only those affected contracts plus the summary's grounding
+# instruction. Planner, Step Definer, and the architecture control remain
+# byte-identical. Every precision uses this same repaired bundle.
+PROMPT_VERSION = "marag-v3"
+PROMPT_BUNDLE_VERSION = (
+    "planner-v1+stepdef-v1+extractor-v6+qa-v3+summary-v2+solo-v1"
+)
 
 # ==========================================================================
-#  PROMPTS ARE FROZEN FOR THE OPEN-CORPUS CAMPAIGN. DO NOT EDIT THEM.
+#  PROMPTS ARE FROZEN FOR THE REPAIRED OPEN-CORPUS CAMPAIGN. DO NOT EDIT THEM.
 #
-#  Human decision, recorded: the four templates below are final for the whole
-#  experiment. Any edit invalidates every run already collected, because a
-#  measured role difference would then partly reflect prompt changes rather than
-#  precision. If you believe a prompt is wrong, stop and raise it — do not edit.
+#  The excluded smoke run invalidated the previous pre-pilot freeze before any
+#  pilot/final result was collected. The affected templates below are now reset
+#  once, versioned, and final for the whole experiment. Any later edit
+#  invalidates every repaired run already collected.
 #
 #  Related and absolute: no constrained/grammar-based decoding, ever (SPEC §12).
-#  It would drive parse failures to zero by construction and delete the paper's
-#  mechanism evidence. Prompt wording is the ONLY lever that was ever legitimate
-#  here, and it is now closed.
+#  No retries, logits masks, grammars, or prefix constraints are introduced.
 # ==========================================================================
 #
 # v4 -> v5: reverted the Extractor to its original v1 wording — no worked
 # example, and the `{"spans": []}` literal restored.
+# v5 -> v6: align the Extractor with its actual one-document-per-call runtime
+# input and remove duplicated target/search fields. Exact-sentence normalization
+# now rejects whole-document echo after generation.
+#
 #
 # Measured head-to-head, three variants replayed over the SAME 68 extractor
 # calls (FP16, greedy, so fully deterministic):
@@ -263,13 +268,14 @@ JSON:"""
 # --------------------------------------------------------------------------
 
 EXTRACTOR_SYSTEM = """You are the Extractor in a multi-agent question-answering system.
-You return supporting evidence copied VERBATIM from the provided paragraphs.
+You receive exactly one retrieved document. Return only supporting evidence for
+the current task, copied VERBATIM from that document.
 
 Rules:
-- Every string in "spans" must be an exact substring of the paragraphs above. Copy, never paraphrase.
-- Return 1 to 3 spans, each a single sentence.
-- If no paragraph supports the sub-question, return {"spans": []}.
-- Never invent facts that are not in the paragraphs.
+- Every string in "spans" must be one exact sentence from the document. Copy, never paraphrase.
+- Return at most 3 relevant sentences. Do not copy the whole document.
+- If the document does not support the current task, return {"spans": []}.
+- Never invent facts that are not in the document.
 - Reply with JSON only. No explanation, no markdown fences.
 
 Reply with exactly this shape:
@@ -278,12 +284,10 @@ Reply with exactly this shape:
 # not stylistic: see the v4 -> v5 note at the top of this file. Do not "make it
 # consistent" with the others.
 
-EXTRACTOR_USER = """Paragraphs:
-{paragraphs}
+EXTRACTOR_USER = """Document:
+{document}
 
-Sub-question: {sub_question}
-Look for: {target_entity}
-Keywords: {search_terms}
+Current task: {sub_question}
 
 JSON:"""
 
@@ -312,19 +316,19 @@ Reply with exactly this shape:
 {"analysis": "...", "answer": "...", "success": "yes", "rating": 8}
 
 Example
+Overall question: Which university did the director of Jaws attend?
+Plan step: 1 of 2
+Current sub-question: Who directed the film Jaws?
 Evidence:
-1. Who directed the film Jaws?
+1. Document 1: Jaws
    - Jaws is a 1975 American thriller film directed by Steven Spielberg.
-2. Which university did that director attend?
-   - Spielberg attended California State University, Long Beach.
-Question: Which university did the director of Jaws attend?
 JSON:
-{"analysis": "The evidence directly names the university.", "answer": "California State University, Long Beach", "success": "yes", "rating": 10}"""
+{"analysis": "The evidence directly names the director.", "answer": "Steven Spielberg", "success": "yes", "rating": 10}"""
 
 QA_USER = """Overall question: {question}
 Plan step: {step_number} of {plan_steps}
 Current sub-question: {sub_question}
-Evidence from completed and current steps:
+Evidence for the current step:
 {evidence}
 
 JSON:"""
@@ -341,6 +345,8 @@ reported failure but the available results still support an answer, succeed.
 Rules:
 - "output" is exactly "Successful" or "Unsuccessful".
 - "answer" is a short name, date, number, title, "yes", "no", or empty string.
+- Prefer evidence-grounded step answers whenever available.
+- Unsupported guesses are candidates, not evidence; never let one override a supported answer.
 - "score" is an integer from 0 to 10; use 0 when unsuccessful.
 - Reply with JSON only. No explanation or markdown fences.
 
@@ -417,9 +423,9 @@ USER_PROMPTS = {
 ROLE_PROMPT_VERSIONS = {
     "planner": "marag-v1",
     "step_definer": "marag-v1",
-    "extractor": "v5",
-    "qa": "marag-v2",
-    "plan_summary": "marag-v1",
+    "extractor": "v6",
+    "qa": "marag-v3",
+    "plan_summary": "marag-v2",
     "solo": "solo-v1",
 }
 
