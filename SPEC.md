@@ -1064,7 +1064,7 @@ requires for prompt hashes.
 
 | Check | Expectation |
 |---|---|
-| Full test suite | **157 passed, 26 subtests passed, zero failures** on the offline CPU suite. |
+| Full test suite | **158 passed, 26 subtests passed, zero failures** on the offline CPU suite. |
 | Manifest hash pins | Every `*_sha256` in `config/experiment.yaml` matches the committed blob. |
 | Arm definitions | 32 unique static arms; the immutable 22-arm prefix expands deterministically to all 32 with no duplicate or orphan. |
 | `timing.run_ids` | Exactly the 27 current non-tiny static arms; §16 single-hop additions were not started. |
