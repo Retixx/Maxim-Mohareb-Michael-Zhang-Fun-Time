@@ -859,7 +859,11 @@ def _preflight_stage(
         longest = max(range(len(chunk)), key=lambda i: rendered_tokens(chunk[i]))
         pad_fields = {
             "planner": "question", "step_definer": "prior_state",
-            "extractor": "paragraphs", "qa": "evidence",
+            # "document", not "paragraphs": the per-document Extractor contract
+            # hands each call one retrieved document. The old name predates that
+            # refactor and raised KeyError the first time preflight reached this
+            # stage. build_extractor_fields is the authority.
+            "extractor": "document", "qa": "evidence",
             "plan_summary": "prior_state", "solo": "paragraphs",
         }
         field = pad_fields[prompt_role]
