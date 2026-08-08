@@ -252,6 +252,60 @@ the original question. There is exactly one query per question-answering step
 and no learned bridge-query helper. This policy was frozen before the pilot and
 was not chosen from pilot/final answer F1.
 
+### 5.1 Measured retrieval headroom (2026-08-07)
+
+The policy above is only worth its cost if a second query can reach evidence the
+first cannot. That is a property of the corpus and is measurable without any
+model. Measured on the pooled 72,094-passage corpus, k=10, n=600, by
+`clean_room/retrieval_headroom.py`:
+
+| Stratum | n | SINGLE both-gold | ORACLE two-pass | Headroom |
+|---|---:|---:|---:|---:|
+| hidden_bridge | 475 | 0.4716 | 0.8863 | **+0.4147** |
+| fully_named | 125 | 0.8320 | 0.8880 | +0.0560 |
+
+Headroom is large and falls where the design predicts: on hidden_bridge, which
+is 1,097 of the frozen 1,500. `single_any_recall` on hidden_bridge is 0.9684 —
+one gold passage is nearly always retrieved by the first query; it is the
+second, hidden one that is missed. That is exactly what the second hop exists to
+reach. On fully_named there is effectively no headroom and decomposition can
+only lose.
+
+ORACLE is an upper bound: it is handed the hidden gold title for free, which a
+real pipeline must resolve by reading. The gap between a live pipeline and
+0.8863 is the cost of bridge-entity resolution, and it is a reportable result of
+this experiment rather than an error term.
+
+### 5.2 Known deviation of the implementation from this contract
+
+The implementation does not currently satisfy §5. `_retrieval_decision`
+(`src/pipeline.py`) builds the grounded follow-up query as
+`[task["task"], *grounded_answers]` and **omits the original question**. The
+contract text above ("a later evidence-grounded Step Definer task plus grounded
+answers owns that step's full top 10") describes intended behaviour that the
+code does not implement in the form that preserves anchor signal.
+
+Measured consequence, using the real planner sub-questions from
+`baseline_qwen2.5-1.5b_n750_seed7` (n=730, unstratified, k=10):
+
+| Arm | both-gold recall@10 |
+|---|---:|
+| single query (question only) | 0.495 |
+| decomposed, equal read budget | **0.296** |
+| decomposed, double read budget | 0.410 |
+
+Decomposition moves retrieval backwards. Combined with the follow-up firing gate
+(§14, BUG-2), this is the mechanism by which the multi-agent system loses to the
+one-call control on multi-hop questions, and why that loss did not shrink across
+a 0.5B→7B sweep: the deficit is created upstream of the reader, so reader
+capacity cannot recover it.
+
+No accuracy claim comparing multi-agent to `single_fp16` may be published from
+any artifact produced before BUG-1 and BUG-2 are fixed and the query-policy
+fingerprint is re-frozen. All existing `results/` artifacts predate the fix and
+originate from commit `fa661f5`, which is not an ancestor of the current
+lineage; they are diagnostic only.
+
 The one-call control, single_fp16:
 
 - uses one 8B FP16 generation;
@@ -627,3 +681,140 @@ Do not claim:
 RUNBOOK.md is the normative execution order. Any silent change in sample,
 corpus, plan ceiling, routing, retrieval k, model/revision, precision, prompt,
 parser, batch membership, or artifact path invalidates the affected comparison.
+
+## 14. Open defect register
+
+Status as of 2026-08-07 at commit `e1d8072`. Every entry below is either
+reproduced from a measurement or read directly from source. Launch is blocked
+until BUG-1 through BUG-5 are closed.
+
+### BUG-1 — grounded follow-up query discards the original question (BLOCKER)
+
+`src/pipeline.py`, `_retrieval_decision`: the follow-up query is built as
+`[task["task"], *grounded_answers]`. The original question is omitted. The
+ORACLE arm in §5.1 reaches 0.8863 precisely by retaining it.
+
+Measured: both-gold recall@10 falls 0.495 → 0.296 at equal read budget on real
+planner sub-questions (n=730). Even at double budget it only reaches 0.410.
+
+Fix: include `q["question"]` in `query_parts`. Bump `QUERY_POLICY` and re-freeze
+the retrieval fingerprint.
+
+### BUG-2 — second hop is gated behind a verbatim-substring test (BLOCKER)
+
+`grounded_followup_fired = bool(step_index > 0 and grounded_answers)`, where
+`_grounded_prior_answers` admits only answers for which `_answer_is_grounded`
+finds the answer as a literal token phrase inside Extractor spans. When that
+test fails the code falls back to the anchor branch and **re-issues the same
+query as step 1** — identical top-10, zero new evidence.
+
+Consequence: on an unmeasured but likely large fraction of questions the
+pipeline silently degenerates to single-hop retrieval plus roughly four times
+the model calls. This is the primary suspect for the multi-agent-loses-to-
+single-hop result, and it explains why that gap did not close across a 0.5B→7B
+sweep: the deficit is created upstream of the reader.
+
+Fix: when no grounded answer exists, still issue `anchor + task` rather than
+bare `anchor`, so the second hop always contributes a distinct query. Retain
+`answer_grounded` as telemetry, not as a fire/no-fire switch. Log the firing
+rate per stratum.
+
+### BUG-3 — retrieval replaces instead of unioning (BLOCKER)
+
+Each branch performs exactly one `search_titles(...)`. The `components` list
+already declares both `original_question_anchor` and `grounded_step_task`, but
+exactly one is ever `attempted` — the structure anticipates a union that was
+never implemented. ORACLE reaches 0.8863 by unioning anchor top-k/2 with
+follow-up top-k/2.
+
+Fix: retrieve both components, dedupe, cap at k. Populate both entries.
+
+### BUG-4 — follow-up query is built from the digest, not the passages
+
+The bridge entity must survive retrieval → Extractor compression → QA answer →
+verbatim grounding check → query string. Four lossy stages. Meanwhile
+`single_any_recall` on hidden_bridge is 0.9684: the passage naming the bridge
+entity is already retrieved at hop 1 in ~97% of cases, and
+`retriever.passages(titles)` is available at the call site but never consulted
+for query construction.
+
+Fix (phase 2, after BUG-1..3): derive follow-up candidates from hop-1 retrieved
+titles and passage text. This is what closes the remaining distance to 0.8863.
+
+### BUG-5 — every model revision is `TBD` (BLOCKER)
+
+`config/experiment.yaml` pins `TBD` for all five Qwen3 sizes.
+`scripts/prefetch_assets.py` and `a100_entrypoint.py prepare` fail closed on
+unpinned revisions. No campaign can start.
+
+Fix: resolve and commit immutable Hugging Face commit SHAs for Qwen3-14B, -8B,
+-4B, -1.7B, -0.6B.
+
+### BUG-6 — hash pins are not portable across line-ending platforms
+
+There is no `.gitattributes` and `core.autocrlf=true` is common on Windows. The
+frozen manifests are pinned by raw file SHA-256, so a Windows checkout expands
+LF→CRLF (`final_n1500_seed20260805.json`: 153,098 → 157,681 bytes) and three
+integrity tests fail against correct data. The committed blobs are intact; only
+the working tree diverges.
+
+Fix: add `.gitattributes` with `*.json text eol=lf` (or `* -text`).
+
+### BUG-7 — all existing `results/` artifacts are off-lineage
+
+Every artifact in `results/` was produced at commit `fa661f5`, which is **not**
+an ancestor of the current lineage, and records `prompt_version: v5` against the
+current `PROMPT_VERSION = "marag-v3"`. They also predate BUG-1..3. They are
+diagnostic only and must not appear in any published comparison.
+
+### BUG-9 — the Qwen3 migration did not propagate to the test suite (BLOCKER)
+
+Commit `e1d8072` updated `config/experiment.yaml` and SPEC §6/§7/§9 to the
+five-size Qwen3 axis (22 → 32 arms, 5 → 7 selector treatments, 5^4 → 7^4) but
+left the tests asserting the old Qwen2.5 matrix. On `e1d8072`: **13 failed, 123
+passed**. Eleven are the un-propagated matrix (e.g.
+`test_frozen_plan_is_exact_six_shard_22_arm_contract` — `AssertionError: 32 != 22`;
+`test_selector_enumerates_five_configs_and_fixed_charges`); two are BUG-6.
+
+This is a launch blocker because `a100_entrypoint.py prepare` runs the full
+suite and fails closed.
+
+Fix: update `tests/test_a100_production.py`, `tests/test_analyze.py`,
+`tests/test_campaign.py`, `tests/test_contract.py` to the 32-arm / 7-treatment
+contract, and rename the arm-count assertions so they read from config rather
+than hard-coding 22.
+
+### BUG-8 — §9 memory table is estimated, not measured
+
+The footprints in §9 are estimates. An independent shard-planner check against
+the real model config gives Qwen3-14B FP16 = 27.51 GiB weights (≈28,170 MiB)
+versus the tabulated ~28,000 MiB, so the estimates are close — but the primary
+memory metric must be measured on target hardware before publication.
+
+### Resolved — recorded so they are not re-raised
+
+- **14B FP16 memory envelope.** Qwen3-14B FP16 is 27.51 GiB of weights plus
+  7.81 GiB of KV cache at batch 32 / seq 1600 (40 layers, 8 GQA kv-heads,
+  head_dim 128) = 35.32 GiB. It fits one A100-40GB with ~2.7 GiB spare. No
+  sharding required. Verified by `clean_room/fleet_fit.py`.
+- **`device_count() != 1` in `a100_production.py`.** Not a defect. The accuracy
+  matrix uses six frozen *logical* shards executed as parallel single-GPU
+  workers; one GPU per worker is the intended topology.
+- **Qwen3 vs Qwen2.5 regression.** Not reproducible in a clean harness. A
+  paired n=300 run gives Qwen3-1.7B-4bit F1 0.5300 vs Qwen2.5-1.5B-4bit 0.4815
+  (ΔF1 +0.0485, 95% CI [−0.0034, 0.0992], McNemar p=0.3135 — not significant).
+  Qwen3 strict-JSON adherence was 300/300 versus 297/300. Earlier reports of a
+  large Qwen3 deficit came from a harness with a divergent generation path, not
+  from the model. Batch-size invariance under greedy decoding is 1.000 for both
+  families in the clean harness.
+
+### Claim boundary inherited from MA-RAG
+
+MA-RAG (arXiv:2505.20096) reports HotpotQA EM against other published systems
+(Atlas 11B, RECOMP 20B, RA-DIT 65B, Self-RAG 8B, ChatQA-1.5 8B/70B, RankRAG
+8B/70B, ReAct 70B, Adaptive-RAG GPT-3.5); MA-RAG (Llama3-8B) scores 40.3. It
+contains **no single-hop same-backbone baseline** and tests no model below 8B,
+and it retrieves densely (gte-multilingual + FAISS) over the full
+Karpukhin/DPR Wikipedia corpus. This experiment therefore cannot inherit a
+"multi-agent beats one-call RAG" result from MA-RAG; it must establish or refute
+it directly on this corpus.
