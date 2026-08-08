@@ -818,3 +818,335 @@ and it retrieves densely (gte-multilingual + FAISS) over the full
 Karpukhin/DPR Wikipedia corpus. This experiment therefore cannot inherit a
 "multi-agent beats one-call RAG" result from MA-RAG; it must establish or refute
 it directly on this corpus.
+
+## 15. Additive work — sequential deployment frontier
+
+Additive to §1–§13. Does not alter the frozen cohort, corpus, plan ceiling,
+retrieval k, or any manifest hash.
+
+### 15.1 Sequential is the declared deployment topology
+
+Execution is already stage-major with one model resident at a time (§10). This
+promotes that to the declared deployment topology. Concurrent residency is not a
+deployment target and will not be run as a campaign.
+
+The two costs aggregate differently over the same allocation:
+
+    peak memory   =  max over roles of resident footprint (+ KV cache)
+    added latency =  sum over stage transitions of model load time
+
+Memory is set by the single largest role. Latency is paid by every role,
+weighted by firing frequency. Shrinking three roles saves zero memory if the
+fourth still holds the largest model.
+
+Accuracy is invariant to residency topology — identical weights, greedy
+decoding, and prompts give identical outputs whether models are co-resident or
+swapped. No accuracy arm is re-run for topology. Any concurrent probe is
+timing-only on the 128-question cohort, used to validate
+`concurrent = sequential − swap time`.
+
+### 15.2 Two primary findings
+
+**Finding 1 — per-role quantization ranking (headline).** Size fixed at 8B, only
+precision varies, one role at a time, against the uniform 8B FP16 reference. The
+direct analogue of MA-RAG Table 2 ("Ablation study on LLMs' size") on the
+precision axis, which that paper does not examine at all.
+`analysis.primary_family` moves to `role_8bit_vs_reference`, Holm-corrected
+across the four roles.
+
+**Finding 2 — memory-budget deployment frontier.** At a fixed peak-memory
+budget, is capacity better spent on a quantized large model or a native smaller
+one? Evaluated per role and uniformly. `role_8bit_vs_mid_fp16` is demoted to
+secondary but retains full paired statistics.
+
+### 15.3 Memory-matched treatment tiers
+
+Footprints from model configs (params × bytes/param; 4-bit assumes NF4 with
+double quantization, ~0.55 B/param):
+
+| Tier | Treatments | MiB | Spread |
+|---|---|---|---|
+| ~8 GiB | 14B 4-bit / 8B 8-bit / 4B FP16 | 7,746 / 7,811 / 8,414 | 8% |
+| ~15 GiB | 14B 8-bit / 8B FP16 | 14,084 / 15,623 | 10% |
+
+The ~8 GiB tier is a three-point capacity-versus-precision frontier at constant
+memory, not a pairwise contrast.
+
+### 15.4 Run matrix extension: 32 → 44 arms
+
+| # | Family | Arms | New |
+|---|---|---:|:-:|
+| 1 | Uniform 8B FP16 reference (`baseline`) | 1 | |
+| 2 | One-role 8B 8-bit | 4 | |
+| 3 | One-role 8B 4-bit | 4 | |
+| 4 | One-role 4B FP16 (mid) | 4 | |
+| 5 | One-role 1.7B FP16 (small) | 4 | |
+| 6 | One-role 0.6B FP16 (tiny) | 4 | |
+| 7 | One-role 14B FP16 (large) | 4 | |
+| 8 | One-role 14B 4-bit | 4 | ✅ |
+| 9 | Uniform MA controls (8bit, 4bit, mid, small, tiny, large) | 6 | |
+| 10 | Uniform MA 14B 4-bit | 1 | ✅ |
+| 11 | Single-hop control `single_fp16` | 1 | |
+| 12 | Single-hop, memory-matched | 7 | ✅ |
+| | **Total** | **44** | |
+
+Row 12 is `single_8bit`, `single_4bit`, `single_mid`, `single_small`,
+`single_tiny`, `single_large`, `single_14b_4bit`. Every uniform MA arm gains a
+one-call comparator at the same peak footprint:
+
+| Peak MiB | Uniform MA | Single-hop |
+|---:|---|---|
+| 1,200 | `ma_uniform_tiny` | `single_tiny` |
+| 3,400 | `ma_uniform_small` | `single_small` |
+| 4,296 | `ma_uniform_4bit` | `single_4bit` |
+| 7,746 | `ma_uniform_14b_4bit` | `single_14b_4bit` |
+| 7,811 | `ma_uniform_8bit` | `single_8bit` |
+| 8,414 | `ma_uniform_mid` | `single_mid` |
+| 15,623 | `baseline` | `single_fp16` |
+| 28,168 | `ma_uniform_large` | `single_large` |
+
+Compute impact is ~+20%, not +38%: a single-hop arm issues one call per question
+against ~6.3 for a multi-agent arm, measured at 16% of a multi-agent arm's wall
+time (497 s vs 3,084 s at n=3000). Selector universe becomes 8⁴ = 4,096.
+
+### 15.5 Latency: two denominators
+
+§12 defines one ratio, against `baseline` = 1.00×. This adds a second. Both are
+required.
+
+| Ratio | Denominator | Purpose |
+|---|---|---|
+| `inverse_throughput_ratio_vs_baseline` | uniform MA 8B FP16 | Scientific — architecture constant, isolates one-role change |
+| `inverse_throughput_ratio_vs_matched_single` | that arm's memory-matched single-hop arm | Deployment — "at this budget, what does multi-agent cost over one call?" |
+
+The second requires all seven new single-hop arms in `timing.run_ids`. Without
+them there are memory-matched accuracy pairs with no memory-matched latency
+pairs, and the deployment claim cannot be made.
+
+Log per-transition model load time so batch-1 on-device latency is re-derivable:
+
+    device_latency_per_question = service_time + (stage_transitions × model_load_s)
+
+Stage-major batching amortizes swap cost across 1,500 questions to near zero; at
+batch 1 it is paid per question. The campaign figure systematically understates
+on-device swap cost. Both must be reported.
+
+Reportable unit per arm: peak MiB, F1 vs matched single-hop, latency ÷ baseline,
+latency ÷ matched single-hop.
+
+### 15.6 Pareto frontier under sequential residency
+
+Because peak memory is `max` over roles, the frontier is a step function with
+one step per treatment footprint. For budget B, the best allocation assigns
+every role the highest-F1 treatment costing ≤ B.
+
+| Budget B (MiB) | Treatments affordable |
+|---:|---|
+| 1,200 | 0.6B FP16 |
+| 3,400 | + 1.7B FP16 |
+| 4,296 | + 8B 4-bit |
+| 7,746 | + 14B 4-bit |
+| 7,811 | + 8B 8-bit |
+| 8,414 | + 4B FP16 |
+| 15,623 | + 8B FP16 |
+| 28,168 | + 14B FP16 |
+
+Computed post hoc from the one-role ablations. Costs no additional GPU time.
+
+### 15.7 Additivity test — three allocations, not one
+
+The frontier composes one-role effects additively, because one-role ablations
+are the only available data. That assumption is untested if one allocation is
+executed: a single measurement cannot distinguish a correct prediction from a
+lucky one.
+
+Execute three allocations at **best, median, and worst** predicted F1 and report
+predicted versus measured. Spread is required; three near-optimal allocations
+would score similarly and could not detect miscalibration.
+
+| Outcome | Interpretation | Frontier status |
+|---|---|---|
+| Ranking preserved, small errors | Effects compose additively | All 4,096 predicted points usable |
+| Ranking preserved, large consistent errors | Additive with bias | Usable for ranking, not absolute F1 |
+| Ranking inverted | Roles interact | Measured points only: 8 uniform + 3 allocations = 11 |
+
+Non-additivity is a reportable finding, not a failure — MA-RAG's per-agent
+ablation assumes role independence, and showing it fails at SLM scale is a
+result. Report direction: measured consistently worse than predicted means
+effects compound and allocation must be conservative.
+
+Cost: two arms beyond the already-budgeted `ma_optimized_exploratory`.
+
+### 15.8 Claim boundary
+
+The frontier is in-sample and exploratory. The publishable claim is "a
+Pareto-optimal allocation method with a tested additivity assumption", not "the
+optimal allocation". Parse and protocol status remain a reported covariate — the
+confound control separating "quantization degraded reasoning" from "quantization
+degraded JSON emission". At 4-bit the Extractor's parse-OK rate was 0.947, worst
+of the four roles and the same role that is most accuracy-sensitive.
+
+## 16. Bug report — multi-agent loses to single-hop (Codex handoff)
+
+Authoritative, self-contained description of the defect blocking every result in
+this repository. Read with §5, §5.1, §5.2, and §14.
+
+### 16.1 Symptom
+
+The four-agent pipeline loses to the one-call control on multi-hop questions,
+and the deficit does not shrink with model scale (observed across 0.5B → 7B).
+
+Paired on identical question IDs, `baseline` vs `single_fp16`:
+
+| Cohort | n | MA F1 | single F1 | Δ |
+|---|---:|---:|---:|---:|
+| n750 | 731 | 0.412 | 0.542 | −0.129 |
+| n300 | 299 | 0.442 | 0.550 | −0.108 |
+| n200 | 199 | 0.445 | 0.547 | −0.102 |
+
+Win/loss/tie on n750: MA wins 89, loses 202, ties 440. A 60% tie rate with a
+2.3:1 loss ratio on divergence is the signature of information destruction, not
+reasoning failure.
+
+Ruled out: answer verbosity (predicted lengths 2.15–2.32 words vs 2.43 gold
+across all arms); schema collapse (parse-OK 0.969/0.995/0.947/0.997 for
+planner/step_definer/extractor/qa); model family (Qwen3 vs Qwen2.5 ΔF1 +0.0485,
+n.s.).
+
+### 16.2 Working hypothesis — unverified, probably incomplete
+
+**This section is a lead, not a diagnosis.** It was produced by static reading
+plus retrieval-level probes, and no fix derived from it has been executed
+end-to-end. Treat it as one plausible account among several. It may be partly
+wrong, it is very likely incomplete, and the true cause may lie somewhere not
+named here — in the Extractor contract, the QA evidence filter, prompt/schema
+handling, plan-depth routing, the stop condition, or the aggregate route.
+
+Diagnose independently before acting on it. If the evidence contradicts this
+section, the evidence wins and this section should be rewritten. What is *not*
+hypothesis is §16.1 (the measured symptom) and §16.3 (the measured headroom):
+those are reproducible from the artifacts and scripts named.
+
+The four candidate defects below are all in `_retrieval_decision`,
+`src/pipeline.py`.
+
+**BUG-1 — the follow-up query discards the original question.**
+
+```python
+query_parts = [task["task"]]
+```
+
+The grounded follow-up query is `task | grounded_answers`; `q["question"]` is
+omitted. Measured on real planner sub-questions from
+`baseline_qwen2.5-1.5b_n750_seed7` (n=730, k=10):
+
+| Arm | both-gold recall@10 |
+|---|---:|
+| single query | 0.495 |
+| decomposed, equal read budget | 0.296 |
+| decomposed, double read budget | 0.410 |
+
+Decomposition moves retrieval backwards by 19.9 points at equal budget. The
+ORACLE arm reaching 0.8863 (§5.1) does so by *retaining* the question.
+
+**BUG-2 — the second hop is gated behind a verbatim substring test.**
+
+```python
+grounded_followup_fired = bool(step_index > 0 and grounded_answers)
+```
+
+`_grounded_prior_answers` admits only answers where `answer_grounded is True`,
+which requires `_answer_is_grounded` to find the QA answer as a literal token
+phrase inside Extractor spans. The Extractor emits a median of 22 words, so this
+check fails often. When it fails, control reaches the anchor branch and
+**re-issues step 1's identical query** — same top-10, zero new evidence.
+
+The pipeline then degenerates to single-hop retrieval plus ~4× the model calls.
+This is the primary suspect for the scale-invariant gap: the deficit is created
+upstream of the reader, so reader capacity cannot recover it. The firing rate has
+never been logged and must be instrumented as part of the fix.
+
+**BUG-3 — retrieval replaces instead of unioning.**
+
+Each branch performs exactly one `search_titles(...)`. The `components` list
+declares both `original_question_anchor` and `grounded_step_task`, but exactly
+one is ever `attempted` — the structure anticipates a union never implemented.
+ORACLE reaches 0.8863 by unioning anchor top-k/2 with follow-up top-k/2.
+
+**BUG-4 — the follow-up query is built from the digest, not the passages.**
+
+The bridge entity must survive retrieval → Extractor compression → QA answer →
+verbatim grounding check → query string. Four lossy stages. Measured
+compression: Extractor sees 1,588 prompt tokens and hands QA 376 (median 22
+words retained, p10 = 3). Gold answer present in Extractor output on 30.7% of MA
+losses versus 68.5% of wins.
+
+Meanwhile `single_any_recall` on hidden_bridge is 0.9684 — the passage naming
+the bridge entity is already retrieved at hop 1 in 97% of cases, and
+`retriever.passages(titles)` is available at the call site but never consulted
+for query construction.
+
+### 16.3 Proof the defect is fixable
+
+`clean_room/retrieval_headroom.py`, n=600, k=10, pooled 72,094-passage corpus:
+
+| Stratum | n | SINGLE both-gold | ORACLE two-pass | Headroom |
+|---|---:|---:|---:|---:|
+| hidden_bridge | 475 | 0.4716 | 0.8863 | **+0.4147** |
+| fully_named | 125 | 0.8320 | 0.8880 | +0.0560 |
+
+Verdict GO. 41.5 points of both-gold recall are reachable by a second query and
+unreachable by the first, on the stratum that is 1,097 of the frozen 1,500.
+fully_named has effectively no headroom — decomposition can only lose there,
+which is a required sanity check on any fix.
+
+### 16.4 Candidate fix, in order (verify before applying)
+
+1. **BUG-1** — include `q["question"]` in `query_parts`.
+2. **BUG-2** — when no grounded answer exists, still issue `anchor + task`
+   rather than bare `anchor`, so the second hop always contributes a distinct
+   query. Demote `answer_grounded` to telemetry. Log follow-up firing rate per
+   stratum.
+3. **BUG-3** — retrieve both components, dedupe, cap at k; populate both
+   `components` entries.
+4. **BUG-4** (phase 2) — derive follow-up candidates from hop-1 retrieved titles
+   and passage text.
+5. Bump `retrieval.QUERY_POLICY` and re-freeze the retrieval fingerprint.
+
+### 16.5 Acceptance criteria
+
+A fix is accepted only if all four gates pass. Gates A and D are CPU-only and
+deterministic; run them first.
+
+**Gate A — retrieval (CPU, no GPU, no model).** On hidden_bridge, n ≥ 1000,
+k = 10: both-gold recall@10 ≥ **0.75** (from 0.4716, toward the 0.8863 oracle).
+This gate is deterministic — no sampling, no model — so passing it is strong
+evidence the mechanism is repaired.
+
+**Gate B — follow-up firing.** Follow-up fires on ≥ **0.80** of hidden_bridge
+question-answering steps beyond step 1. Directly tests BUG-2.
+
+**Gate C — accuracy (GPU, minimal).** On ≥ 200 excluded questions, paired,
+multi-agent versus its memory-matched single-hop control:
+
+- overall ΔF1 ≥ **+5.0** points;
+- paired bootstrap 95% CI lower bound > **+2.0**;
+- McNemar p < **0.01**;
+- hidden_bridge ΔF1 ≥ **+8.0** points.
+
+**Gate D — stratum sanity.** fully_named ΔF1 within **±2.0** points. There is
+only +0.056 headroom there; a large multi-agent win on fully_named indicates
+leakage or a bug, not a fix, and fails the gate.
+
+Threshold justification: closing hidden_bridge both-gold recall from 0.4716 to
+~0.85 makes the answer reachable on ~38 additional points of that stratum. At a
+conservative 60% conversion from reachable evidence to correct answer, that is
+~+23 F1 on hidden_bridge, which at 73% cohort weight is ~+17 F1 versus the
+current multi-agent arm (0.412), landing near 0.58 against single-hop's 0.542.
+The +5.0 overall threshold is deliberately below that projection and is
+consistent with published multi-agent gains at comparable scale — MA-RAG
+(Llama3-8B) reports 40.3 EM on HotpotQA against 35.3 for the best same-scale
+comparator (RankRAG 8B), a ~5-point margin.
+
+Artifacts predating the fix must not be used for any multi-agent versus
+single-hop claim (§14 BUG-7).
