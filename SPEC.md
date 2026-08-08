@@ -989,6 +989,27 @@ PyTorch build, has no cached Qwen3 snapshots, and all model revisions remain
 `TBD` by explicit scope. The repair is therefore not accepted for publication
 until a target-GPU n≥200 pilot independently passes both accuracy gates.
 
+The local Gate C/D path is now executable without weakening the production
+A100 contract:
+
+    python scripts/run_retrieval_smoke.py --model tiny --batch-size 4 --allow-unpinned-tbd --execute
+
+It derives an ignored config under `analysis/local_smoke/`, reuses the exact
+excluded 200-ID manifest (160 hidden_bridge, 40 fully_named), and runs uniform
+Qwen3-0.6B 4-bit MA-RAG against a one-call control with the identical model,
+runtime revision, quantization fingerprint, and fixed batch. `small` selects
+Qwen3-1.7B; batches 1–4 are allowed. Its checker emits
+`PASS_LOCAL_SMOKE`/`FAIL_LOCAL_SMOKE`, never `GO`, and production
+`verify_gate` rejects it categorically. With the explicitly deferred `TBD` pin,
+this non-publication smoke profile records and cross-checks the revision actually
+resolved at runtime but does not write it into the authoritative config.
+
+The CPU MVP exercises a synthetic 200-row 160/40 pair through metric
+recomputation, 10,000-sample paired bootstrap, exact McNemar, all Gate C/D
+thresholds, memory matching, and production rejection. The real command reaches
+the intended CUDA precondition here and stops before loading data or models;
+there is no NVIDIA device in this workspace.
+
 ### 15.6 Merge hygiene, regression guards, post-merge integrity
 
 **Merge hygiene — the branch must fast-forward into `main`.**
@@ -1043,7 +1064,7 @@ requires for prompt hashes.
 
 | Check | Expectation |
 |---|---|
-| Full test suite | **149 passed, 14 subtests passed, zero failures** on the offline CPU suite. |
+| Full test suite | **157 passed, 26 subtests passed, zero failures** on the offline CPU suite. |
 | Manifest hash pins | Every `*_sha256` in `config/experiment.yaml` matches the committed blob. |
 | Arm definitions | 32 unique static arms; the immutable 22-arm prefix expands deterministically to all 32 with no duplicate or orphan. |
 | `timing.run_ids` | Exactly the 27 current non-tiny static arms; §16 single-hop additions were not started. |
