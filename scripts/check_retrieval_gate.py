@@ -23,12 +23,27 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src import retrieval  # noqa: E402
-from src.pipeline import load_questions  # noqa: E402
+from src.pipeline import _retrieval_decision, load_questions  # noqa: E402
 
 
-GATE_SCHEMA_VERSION = 1
+GATE_SCHEMA_VERSION = 2
 MIN_HIDDEN_QUESTIONS = 1000
 MIN_HIDDEN_BOTH_GOLD_RECALL = 0.75
+MIN_HIDDEN_FOLLOWUP_FIRING_RATE = 0.80
+
+
+class _FiringProbeIndex:
+    """Minimal deterministic index for Gate B, which scores query issuance only."""
+
+    def search_titles(self, _query: str, k: int) -> list[str]:
+        return [f"gate-b-document-{index}" for index in range(k)]
+
+
+class _FiringProbeRetriever:
+    k = 10
+    anchor_k = 7
+    task_k = 3
+    index = _FiringProbeIndex()
 
 
 def _sha256(path: Path) -> str:
@@ -171,7 +186,7 @@ def run_gate(config_path: Path) -> dict:
         }
 
     hidden = strata["hidden_bridge"]
-    checks = {
+    gate_a_checks = {
         "hidden_bridge_n_at_least_1000": hidden["n"] >= MIN_HIDDEN_QUESTIONS,
         "k_is_10": context.k == 10,
         "hidden_bridge_both_gold_recall_at_least_0_75": (
@@ -183,11 +198,70 @@ def run_gate(config_path: Path) -> dict:
             strata["fully_named"]["delta"] == 0.0
         ),
     }
+    firing_probe = _FiringProbeRetriever()
+    eligible_followups = 0
+    fired_followups = 0
+    ungrounded_followups = 0
+    anchored_followup_queries = 0
+    for question in questions:
+        if question["retrieval_stratum"] != "hidden_bridge":
+            continue
+        question_id = question["question_id"]
+        safe_question = {
+            "question_id": question_id,
+            "question": question["question"],
+        }
+        state = {
+            (question_id, "planner", 0): {
+                "parsed": {"sub_questions": ["Find bridge", "Resolve target"]},
+            },
+            (question_id, "qa", 0): {
+                "parsed": {
+                    "answer": "unsupported probe answer",
+                    "success": "yes",
+                    "rating": 5,
+                },
+            },
+        }
+        event = _retrieval_decision(
+            safe_question,
+            state,
+            1,
+            {
+                "type": "question-answering",
+                "task": f"Resolve the next evidence step for {question['question']}",
+            },
+            firing_probe,
+        )
+        eligible_followups += 1
+        fired_followups += int(event["task_component_attempted"] is True)
+        ungrounded_followups += int(event["grounded_prior_answers"] == [])
+        anchored_followup_queries += int(
+            question["question"] in str(event["task_query"])
+        )
+    followup_firing_rate = (
+        fired_followups / eligible_followups if eligible_followups else 0.0
+    )
+    gate_b_checks = {
+        "hidden_bridge_eligible_steps_at_least_1000": (
+            eligible_followups >= MIN_HIDDEN_QUESTIONS
+        ),
+        "followup_firing_rate_at_least_0_80": (
+            followup_firing_rate >= MIN_HIDDEN_FOLLOWUP_FIRING_RATE
+        ),
+        "probe_has_no_verbatim_grounding": (
+            ungrounded_followups == eligible_followups
+        ),
+        "every_followup_query_contains_anchor": (
+            anchored_followup_queries == eligible_followups
+        ),
+    }
+    passed = all(gate_a_checks.values()) and all(gate_b_checks.values())
     return {
         "schema_version": GATE_SCHEMA_VERSION,
-        "gate": "SPEC_15_GATE_A",
-        "status": "PASS" if all(checks.values()) else "FAIL",
-        "passed": all(checks.values()),
+        "gate": "SPEC_15_GATES_A_AND_B_CPU",
+        "status": "PASS" if passed else "FAIL",
+        "passed": passed,
         "oracle_query_uses_hidden_gold_titles": True,
         "claim_boundary": (
             "mechanism-only upper bound; not live Step Definer or accuracy evidence"
@@ -196,7 +270,13 @@ def run_gate(config_path: Path) -> dict:
         "manifest_file_sha256": _sha256(manifest_path),
         "question_ids_sha256": dataset_metadata["question_ids_sha256"],
         "retrieval_fingerprint": fingerprint,
-        "checks": checks,
+        "gate_a_checks": gate_a_checks,
+        "gate_b": {
+            "eligible_steps": eligible_followups,
+            "fired_steps": fired_followups,
+            "firing_rate": followup_firing_rate,
+            "checks": gate_b_checks,
+        },
         "strata": strata,
         "max_unique_titles": max_unique_titles,
     }
@@ -214,10 +294,17 @@ def main() -> int:
     hidden = report["strata"]["hidden_bridge"]
     fully_named = report["strata"]["fully_named"]
     print(
-        f"Gate A {report['status']}: hidden_bridge n={hidden['n']}, "
+        f"Gate A {'PASS' if all(report['gate_a_checks'].values()) else 'FAIL'}: "
+        f"hidden_bridge n={hidden['n']}, "
         f"single={hidden['single_both_gold_recall_at_10']:.4f}, "
         f"repaired={hidden['repaired_both_gold_recall_at_10']:.4f}; "
         f"fully_named delta={fully_named['delta']:+.4f}"
+    )
+    gate_b = report["gate_b"]
+    print(
+        f"Gate B {'PASS' if all(gate_b['checks'].values()) else 'FAIL'}: "
+        f"{gate_b['fired_steps']}/{gate_b['eligible_steps']} = "
+        f"{gate_b['firing_rate']:.4f}"
     )
     print(f"wrote {output_path}")
     return 0 if report["passed"] else 2
