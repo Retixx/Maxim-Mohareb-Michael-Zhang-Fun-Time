@@ -330,7 +330,7 @@ normalization, QA evidence filtering, plan depth, executed steps, stop reason,
 summary status, and final-answer provenance. Gold fields are attached only after
 generation.
 
-Repaired artifacts use experiment schema `open_corpus_marag_v3`. Resume,
+Repaired artifacts use experiment schema `open_corpus_marag_v4`. Resume,
 pilot-gate, and analysis paths reject v1/v2 artifacts, stale prompt hashes, a
 stale query-policy fingerprint, a non-original initial query, a grounded
 follow-up search depth other than k=10, a fusion quota other than 7+3, or a
@@ -1064,13 +1064,60 @@ requires for prompt hashes.
 
 | Check | Expectation |
 |---|---|
-| Full test suite | **158 passed, 26 subtests passed, zero failures** on the offline CPU suite. |
+| Full test suite | **168 passed, 37 subtests passed, zero failures** on the offline CPU suite. |
 | Manifest hash pins | Every `*_sha256` in `config/experiment.yaml` matches the committed blob. |
 | Arm definitions | 32 unique static arms; the immutable 22-arm prefix expands deterministically to all 32 with no duplicate or orphan. |
 | `timing.run_ids` | Exactly the 27 current non-tiny static arms; §16 single-hop additions were not started. |
 | `model_revisions` | All five remain `TBD` by explicit scope; target-GPU launch remains blocked (§14 BUG-5). |
 | Dataset block | Unchanged from `f92391b`; `git diff f92391b..HEAD -- config/manifests/` must be empty. |
 | Orphaned artifacts | Everything in `results/` predates the current lineage (§14 BUG-7) and must be excluded from analysis inputs. |
+
+### 15.7 Qwen3 model-mode integrity repair (2026-08-08)
+
+The Qwen3 migration's non-thinking claim was declarative, not executable.
+`config/experiment.yaml` contained `thinking_mode: false`, but no production
+Python read the key and all three chat-template sites omitted
+`enable_thinking=False`: actual generation, largest-first batch sizing, and
+excluded preflight sizing. The Qwen3 tokenizer therefore used its thinking-on
+default for planner, every step-definer/extractor/QA round, plan summary, and
+solo across all five parameter sizes. Fixing generation alone would have left
+preflight and inference rendering different prompts.
+
+Live run evidence confirms the defect: 204/256 planner outputs contained
+`<think>` with parse-OK 0.000, and 100/126 step-definer outputs contained
+`<think>` with parse-OK 0.063. Outputs were observed truncating mid-reasoning at
+the frozen role ceilings. These artifacts do not test the specified
+non-thinking experiment and are off-lineage.
+
+Production now has one renderer, `src.models.render_chat`, which always calls
+the tokenizer with `tokenize=False`, `add_generation_prompt=True`, and
+`enable_thinking=False`. Generation, batch ordering, and preflight sizing all
+use it. There is no prompt suffix, tokenizer mutation, capability fallback, or
+role-specific behavior.
+
+The model axis is also fail-closed to the original April 2025 switchable Qwen3
+checkpoint family: `Qwen/Qwen3-14B`, `Qwen/Qwen3-8B`, `Qwen/Qwen3-4B`,
+`Qwen/Qwen3-1.7B`, and `Qwen/Qwen3-0.6B`. Later dedicated Instruct/Thinking
+variants, literal foreign repositories, alias drift, and CLI substitutions are
+rejected before environment locking, prefetch, treatment resolution, or model
+loading. Parameter size and fp16/8-bit/4-bit precision remain experimental
+variables; checkpoint subtype does not. The local Gate C/D profile may select
+the approved 0.6B or 1.7B checkpoint as its active base, but both arms use that
+same checkpoint and non-thinking policy.
+
+`EXPERIMENT_SCHEMA` is now `open_corpus_marag_v4`. Its fingerprint payload and
+immutable run metadata pin `thinking_mode: false` plus the exact five-model
+family. Resume, pilot, campaign completion discovery, and final analysis reject
+missing, thinking-on, or self-consistently rehashed stale identities. CPU
+verification passes 168 tests and 37 subtests, including real generation with a
+tokenizer spy, both auxiliary render paths, family/config mutation guards,
+local-smoke preservation, and rehashed thinking-on artifact rejection. Frozen
+manifests, dataset, retrieval policy, plan ceiling, retrieval k, and all hash
+pins are unchanged. Model revisions remain `TBD` by the existing scope.
+
+The GPU Gate C/D pilot must be regenerated from this schema; prior thinking-on
+outputs cannot satisfy the gate.
+
 ## 16. Additive work — sequential deployment frontier
 
 Additive to §1–§13, and gated on §15. Do not begin this work until the §15
@@ -1238,4 +1285,3 @@ optimal allocation". Parse and protocol status remain a reported covariate — t
 confound control separating "quantization degraded reasoning" from "quantization
 degraded JSON emission". At 4-bit the Extractor's parse-OK rate was 0.947, worst
 of the four roles and the same role that is most accuracy-sensitive.
-
