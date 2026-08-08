@@ -1,0 +1,50 @@
+[tool.ruff]
+# The experiment is frozen and mid-campaign, so lint is scoped to rules that
+# catch BUGS, not style. A formatting sweep would produce a large diff across
+# files whose behaviour is pinned by committed hashes, and reviewing it against
+# a frozen prompt bundle is not worth the risk.
+target-version = "py311"
+line-length = 100
+extend-exclude = [".venv", "results", "figures", "logs", "smoke_handoff", "notebooks"]
+
+[tool.ruff.lint]
+select = [
+    "E9",   # syntax / IO errors
+    "F",    # pyflakes: undefined names, unused imports, f-string bugs
+    "B",    # bugbear: mutable defaults, loop-variable capture, silent except
+    "T10",  # forgotten breakpoint()
+    "PLE",  # pylint errors: bad format strings, dupe keys
+    "RUF",  # ruff-native correctness (mutable class defaults, unused noqa)
+]
+ignore = [
+    "B008",   # function call in default arg — deliberate for Path defaults
+    "B905",   # zip() strict= — the union interleave relies on zip_longest
+    "B904",   # raise ... from — chaining style, not a defect
+    "RUF001", # ambiguous unicode: SPEC prose legitimately uses en/em dashes
+    "RUF002",
+    "RUF003",
+    "RUF005", # literal concatenation — style
+    "RUF012", # mutable class default — noise on test fixture tables
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests bind fixtures that read as unused and re-import inside test bodies.
+"tests/*" = ["F811", "E402"]
+# Scripts must extend sys.path before importing src, so imports follow code.
+"scripts/*" = ["E402"]
+"analyze.py" = ["E402"]
+# B023: `follow()` closes over the enclosing `for k in ks` variables, but is
+# both defined and called inside that same iteration, so the late binding is
+# never observable. Restructuring a frozen clean-room measurement script to
+# satisfy the linter would risk changing a published number for no benefit.
+"scripts/bridge_recall.py" = ["B023"]
+"clean_room/*" = ["RUF034", "RUF059"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# -q keeps CI logs readable; --strict-markers stops a typo'd marker from
+# silently skipping a test.
+addopts = "-q --strict-markers"
+filterwarnings = [
+    "ignore::DeprecationWarning:torch.*",
+]

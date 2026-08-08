@@ -340,7 +340,7 @@ class ContextTests(unittest.TestCase):
         self.assertFalse(a["grounded_followup_requires_evidence"])
         self.assertEqual(
             a["query_policy"],
-            "original_question_anchor_7_plus_anchored_step_task_3_v2",
+            "original_question_anchor_7_plus_anchored_step_task_3_linked_v3",
         )
 
     def test_format_passages_is_byte_identical_to_the_frozen_renderer(self):

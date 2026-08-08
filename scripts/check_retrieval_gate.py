@@ -22,8 +22,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src import retrieval  # noqa: E402
-from src.pipeline import _retrieval_decision, load_questions  # noqa: E402
+from src import retrieval
+from src.pipeline import _retrieval_decision, load_questions
 
 
 GATE_SCHEMA_VERSION = 2

@@ -17,21 +17,21 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src import prompts  # noqa: E402
-from src.metrics import (  # noqa: E402
+from src import prompts
+from src.metrics import (
     exact_match,
     exact_mcnemar,
     f1_score,
     joint_paired_bootstrap,
 )
-from src.contracts import (  # noqa: E402
+from src.contracts import (
     EXPERIMENT_SCHEMA,
     PILOT_GATE_SCHEMA_VERSION,
     QWEN3_THINKING_MODE,
     model_policy_identity,
     validate_model_contract,
 )
-from src.runner import resolve_treatments  # noqa: E402
+from src.runner import resolve_treatments
 
 
 def sha256_file(path: Path) -> str:

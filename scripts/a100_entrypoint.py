@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.runner import _gpu_metadata  # noqa: E402
+from src.runner import _gpu_metadata
 
 
 def run(command: list[str]) -> None:
@@ -40,7 +40,7 @@ def main() -> int:
     parser.add_argument("--worker-index", type=int, default=0)
     args = parser.parse_args()
     config_path = Path(args.config).resolve()
-    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    _ = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     gpu = require_a100()
     print(json.dumps({"phase": args.phase, "gpu": gpu}, indent=2))
 

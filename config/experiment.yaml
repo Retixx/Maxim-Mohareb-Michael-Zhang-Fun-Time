@@ -17,11 +17,11 @@ models:
 # The runner must record the resolved revision in every run metadata file.
 # TODO: pin exact commit SHAs before campaign launch.
 model_revisions:
-  Qwen/Qwen3-14B: TBD
-  Qwen/Qwen3-8B: TBD
-  Qwen/Qwen3-4B: TBD
-  Qwen/Qwen3-1.7B: TBD
-  Qwen/Qwen3-0.6B: TBD
+  Qwen/Qwen3-14B: 40c069824f4251a91eefaf281ebe4c544efd3e18
+  Qwen/Qwen3-8B: b968826d9c46dd6066d109eabc6255188de91218
+  Qwen/Qwen3-4B: 1cfa9a7208912126459214e8b04321603b3df60c
+  Qwen/Qwen3-1.7B: 70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  Qwen/Qwen3-0.6B: c1899de289a04d12100db370d81485cdf75e47ca
 
 # Qwen3 non-thinking mode. The runner must pass enable_thinking=False (or the
 # equivalent chat-template flag) to every generation call. Thinking tokens would
@@ -76,7 +76,7 @@ retrieval:
   required_gold_title_coverage: 1.0
   required_gold_sentence_coverage: 1.0
   algorithm: sparse_bm25_lucene_idf_v1
-  query_policy: original_question_anchor_7_plus_anchored_step_task_3_v2
+  query_policy: original_question_anchor_7_plus_anchored_step_task_3_linked_v3
   k: 10
   initial_query_source: original_question
   grounded_followup_k: 10

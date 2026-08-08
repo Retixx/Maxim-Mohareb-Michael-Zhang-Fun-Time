@@ -5,6 +5,13 @@ from __future__ import annotations
 import os
 import subprocess
 
+import sys
+from pathlib import Path as _Path
+
+_ROOT = _Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 from scripts.a100_production import canonical_full_gpu_uuid
 
 

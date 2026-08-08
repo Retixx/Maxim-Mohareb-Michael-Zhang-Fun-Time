@@ -17,6 +17,9 @@ from pathlib import Path
 from . import agents, evidence, prompts, retrieval
 from .metrics import exact_match, f1_score
 
+# How many hop-1 documents feed BUG-4 entity linking. Measured best at 2.
+LINK_SOURCE_DOCS = 2
+
 _HOTPOT_SOURCES = ("hotpotqa/hotpot_qa", "hotpot_qa")
 
 
@@ -103,7 +106,7 @@ def load_questions(
         try:
             ds = load_dataset(src, config, split=split, revision=revision)
             break
-        except Exception as e:  # noqa: BLE001 - report all attempts if none work
+        except Exception as e:
             errors.append(f"{src}: {type(e).__name__}: {e}")
     if ds is None:
         raise RuntimeError(
@@ -318,7 +321,17 @@ def spans_of(rec: dict | None) -> tuple[list[str], str]:
     """
     if rec:
         if rec.get("consumer_payload") is not None:
-            source = "parsed" if rec.get("parsed") is not None else "salvaged"
+            # Three-way, not two. `consumer_payload` is ALWAYS populated for
+            # the Extractor ({"spans": []} even when parse AND salvage failed),
+            # so a two-way split labelled every hard failure "salvaged" and made
+            # the fallback branch unreachable for that role. This label flows
+            # into QA's consumer_payload_source, which attributes downstream
+            # degradation to parsing vs salvage — inflated by every total failure.
+            source = (
+                "parsed" if rec.get("parsed") is not None
+                else "salvaged" if rec.get("salvaged") is not None
+                else "fallback"
+            )
             return (
                 (rec["consumer_payload"] or {}).get("spans", []),
                 f"normalized_{source}",
@@ -501,6 +514,36 @@ def _retrieval_decision(
             for answer in grounded_answers
             if not _answer_is_grounded(answer, query_parts)
         )
+
+        # SPEC §14 BUG-4: name the bridge entity. Grounded answers only reach
+        # this query when QA produced one AND it survived the grounding check;
+        # when it does not, the follow-up never names the page it needs. Link
+        # corpus titles out of the hop-1 passages instead — deterministic, no
+        # model. Measured +15.4 points of both-gold recall@10 on hidden_bridge
+        # (0.517 -> 0.671; oracle 0.869). Linking the passages beats narrowing
+        # to Extractor-selected sentences first (0.619): the bridge entity is
+        # often in a sentence the Extractor did not choose.
+        hop1_titles = retriever.index.search_titles(anchor_query, retriever.k)
+        evidence = [
+            passage.text
+            for passage in retriever.passages(hop1_titles[:LINK_SOURCE_DOCS])
+        ]
+        evidence.extend(
+            span for prior in history for span in (prior.get("spans") or [])
+        )
+        consumed = " ".join(text for text in evidence if text)
+        linked_entities = (
+            retriever.index.link_titles(
+                consumed, exclude=set(hop1_titles[:1]) | {anchor_query}
+            )
+            if consumed else []
+        )
+        combined_norm = retrieval.norm(" ".join(query_parts))
+        query_parts.extend(
+            entity for entity in linked_entities
+            if retrieval.norm(entity) not in combined_norm
+        )
+
         task_query = " | ".join(query_parts)
         query = task_query
         query_source = "anchor_task_union"

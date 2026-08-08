@@ -1718,12 +1718,16 @@ def analyze_call_counts(
             "prompt_tokens": {question_id: 0.0 for question_id in run.answers},
             "output_tokens": {question_id: 0.0 for question_id in run.answers},
         }
-        per_stage: dict[str, dict[str, float]] = defaultdict(
-            lambda: {question_id: 0.0 for question_id in run.answers}
-        )
-        per_role: dict[str, dict[str, float]] = defaultdict(
-            lambda: {question_id: 0.0 for question_id in run.answers}
-        )
+        # Bind the cohort rather than closing over `run`: these factories only
+        # fire inside this iteration today, so the late binding is harmless —
+        # but moving either dict's consumption out of the loop would silently
+        # zero-fill against the WRONG run's question set rather than raising.
+        cohort_ids = tuple(run.answers)
+        def _zeroed(ids: tuple[str, ...] = cohort_ids) -> dict[str, float]:
+            return dict.fromkeys(ids, 0.0)
+
+        per_stage: dict[str, dict[str, float]] = defaultdict(_zeroed)
+        per_role: dict[str, dict[str, float]] = defaultdict(_zeroed)
         for record in run.calls:
             question_id = str(record["question_id"])
             if question_id not in run.answers:

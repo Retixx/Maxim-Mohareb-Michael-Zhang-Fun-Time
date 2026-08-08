@@ -112,7 +112,7 @@ def _validate_gold_sentence_coverage(
     """Assert every gold label resolves to the exact distractor sentence text."""
     total = 0
     mismatches: list[str] = []
-    equivalent = lambda value: re.sub(  # noqa: E731
+    equivalent = lambda value: re.sub(
         r"\s+", " ", unicodedata.normalize("NFKC", value or "")
     ).strip()
     for question in questions:
@@ -1073,7 +1073,7 @@ def _git_commit() -> str:
             text=True,
             stderr=subprocess.DEVNULL,
         ).strip()
-    except Exception:  # noqa: BLE001 - metadata only
+    except Exception:
         return "unknown"
 
 
@@ -1130,10 +1130,10 @@ def source_bundle_sha256() -> str:
             continue
         rel = path.relative_to(root).as_posix()
         include = (
-            rel.startswith("src/") and rel.endswith(".py")
-            or rel.startswith("scripts/") and rel.endswith(".py")
-            or rel.startswith("tests/") and rel.endswith(".py")
-            or rel.startswith("config/manifests/") and rel.endswith(".json")
+            (rel.startswith("src/") and rel.endswith(".py"))
+            or (rel.startswith("scripts/") and rel.endswith(".py"))
+            or (rel.startswith("tests/") and rel.endswith(".py"))
+            or (rel.startswith("config/manifests/") and rel.endswith(".json"))
             or rel in {
                 "analyze.py", "smoke_test.py", "SPEC.md", "README.md",
                 "ENVIRONMENT.md", "config/experiment.yaml",
@@ -2537,7 +2537,7 @@ def run(
             f"\n\n=== {run_id} timing benchmark complete: excluded cohort "
             f"n={artifact_n} wall {wall:.0f}s; no F1/EM records ==="
         )
-    fmt = lambda v: f"{v:.0f}" if v else "unavailable (incomplete metadata)"  # noqa: E731
+    fmt = lambda v: f"{v:.0f}" if v else "unavailable (incomplete metadata)"
     print(f"    deduplicated_distinct_weight_mib={fmt(deduped)}  (primary topology)")
     print(
         "    isolated_role_service_weight_mib="

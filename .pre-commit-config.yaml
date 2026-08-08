@@ -1,0 +1,44 @@
+# Catch the cheap failures before they reach CI.
+#   pip install pre-commit && pre-commit install
+#
+# Deliberately excludes the full test suite and the health check: both need
+# torch, and a multi-second import on every commit trains people to use
+# --no-verify. CI runs those.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+      - id: end-of-file-fixer
+        # Manifests and results are byte-pinned by SHA-256; "fixing" a trailing
+        # newline silently invalidates every pin that covers them.
+        exclude: ^(config/manifests/|results/|clean_room/.*\.json)
+      - id: trailing-whitespace
+        exclude: ^(config/manifests/|results/|.*\.md$)
+      - id: mixed-line-ending
+        args: [--fix=lf]        # SPEC §14 BUG-6
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=2048]
+      - id: check-case-conflict
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.2
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+
+  - repo: local
+    hooks:
+      # The one project-specific invariant cheap enough to run per commit: the
+      # config's arm matrix must still match src/contracts.py. This is the
+      # SPEC §14 BUG-9 class of failure, and it costs no heavy imports.
+      - id: arm-contract
+        name: config arm matrix matches src/contracts
+        entry: python scripts/check_arm_contract.py
+        language: system
+        pass_filenames: false
+        files: ^(config/experiment\.yaml|src/contracts\.py)$

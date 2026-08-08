@@ -115,7 +115,7 @@ def load_model(
     return model, tok
 
 
-def weight_footprint_mib(model, precision: str = None) -> float:
+def weight_footprint_mib(model, precision: str | None = None) -> float:
     """Actual parameter tensor bytes, in binary MiB (SPEC §7).
 
     Summed per tensor as numel x element_size, which is exact at every precision
@@ -139,7 +139,7 @@ def weight_footprint_mib(model, precision: str = None) -> float:
     return sum(p.numel() * p.element_size() for p in model.parameters()) / (1024 ** 2)
 
 
-def weight_footprint_mb(model, precision: str = None) -> float:
+def weight_footprint_mb(model, precision: str | None = None) -> float:
     """Deprecated compatibility alias; the returned binary unit is MiB."""
     return weight_footprint_mib(model, precision)
 

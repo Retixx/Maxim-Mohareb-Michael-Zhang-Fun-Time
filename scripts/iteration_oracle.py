@@ -122,7 +122,7 @@ def main() -> int:
               f"{a['naive']/n:>8.3f}{a['naive_both']/n:>9.3f} "
               f"{a['oracle']/n:>10.3f}{a['oracle_both']/n:>9.3f}")
 
-    print(f"\nHOP-2 gold found by the hop-2 query alone:")
+    print("\nHOP-2 gold found by the hop-2 query alone:")
     for k in ks:
         a = acc[k]
         print(f"  k={k:<3} naive {a['naive_hop2']/n:.3f}   oracle {a['oracle_hop2']/n:.3f}   "

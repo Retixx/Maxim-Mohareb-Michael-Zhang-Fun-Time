@@ -51,8 +51,15 @@ B = 0.75
 K = 10
 HOP1 = 7
 ANCHOR_K = 7
-QUERY_POLICY = "original_question_anchor_7_plus_anchored_step_task_3_v2"
+QUERY_POLICY = "original_question_anchor_7_plus_anchored_step_task_3_linked_v3"
 INITIAL_QUERY_SOURCE = "original_question"
+# BUG-4 entity linking. Measured, n=1000 hidden_bridge, both-gold recall@10:
+# 0.517 with no follow-up evidence, 0.615 appending raw hop-1 passage text
+# (it dilutes the query), 0.671 appending linked entities, 0.869 for the exact
+# gold title (the oracle, which requires already knowing the answer).
+MAX_LINKED_ENTITIES = 3
+MIN_LINKED_TITLE_CHARS = 6   # skip trivial unigrams ("the", "was")
+MAX_TITLE_NGRAM = 8
 GROUNDED_FOLLOWUP_REQUIRES_EVIDENCE = False
 
 
@@ -149,6 +156,17 @@ class BM25Index:
             )
         self.passages = passages
         self.title_to_index = {p.title: i for i, p in enumerate(passages)}
+        # Normalized-title lookup for BUG-4 entity linking. First occurrence
+        # wins, matching the corpus's own first-occurrence union rule.
+        self._title_by_norm: dict[str, str] = {}
+        self._max_title_words = 1
+        for p in passages:
+            key = norm(p.title)
+            if key and key not in self._title_by_norm:
+                self._title_by_norm[key] = p.title
+                self._max_title_words = max(
+                    self._max_title_words, min(len(key.split()), MAX_TITLE_NGRAM)
+                )
         self.k1, self.b = k1, b
 
         vocab: dict[str, int] = {}
@@ -212,6 +230,36 @@ class BM25Index:
 
     def search_titles(self, query: str, k: int = K) -> list[str]:
         return [self.passages[i].title for i in self.search(query, k)]
+
+    def link_titles(self, text: str, *, exclude: set[str] | None = None,
+                    cap: int = MAX_LINKED_ENTITIES) -> list[str]:
+        """Corpus titles named verbatim in `text`, longest match first.
+
+        SPEC §14 BUG-4. The follow-up query is built from the QA digest, so the
+        bridge entity must survive retrieval -> Extractor compression -> QA
+        answer -> a grounding check before it can reach a query. It usually does
+        not, and you cannot retrieve a page you cannot name.
+
+        Deterministic lexical linking against the corpus's own title set: no
+        model, and no learned bridge-query helper (SPEC §5 forbids one). Longest
+        n-gram wins so "Xawery Zulawski" beats a bare "Xawery".
+        """
+        exclude_norm = {norm(t) for t in (exclude or set())}
+        tokens = tokenize(text)
+        found: list[str] = []
+        width = min(self._max_title_words, len(tokens))
+        for size in range(width, 0, -1):
+            for start in range(len(tokens) - size + 1):
+                candidate = " ".join(tokens[start:start + size])
+                if len(candidate) < MIN_LINKED_TITLE_CHARS:
+                    continue
+                title = self._title_by_norm.get(candidate)
+                if title is None or candidate in exclude_norm or title in found:
+                    continue
+                found.append(title)
+                if len(found) >= cap:
+                    return found
+        return found
 
     def get(self, title: str) -> Passage | None:
         i = self.title_to_index.get(title)
@@ -383,7 +431,7 @@ def build_corpus(name: str = "hotpotqa/hotpot_qa", split: str = "validation",
     fullwiki. Reordering these silently shifts gold sentence indices.
     """
     if loader is None:
-        from datasets import load_dataset as loader  # noqa: N813
+        from datasets import load_dataset as loader
 
     seen: dict[str, list[str]] = {}
     for config in configs:

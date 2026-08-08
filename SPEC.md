@@ -246,7 +246,7 @@ denominator.
 The active retriever is a sparse, vectorized BM25 index with fixed tokenization,
 Lucene-style IDF, stable corpus-order tie-breaking, and unique passage titles.
 The configured multi-agent policy is
-`original_question_anchor_7_plus_anchored_step_task_3_v2`: the original question
+`original_question_anchor_7_plus_anchored_step_task_3_linked_v3`: the original question
 owns step 1's top 10; every later question-answering step searches both the
 original question and `original question | Step Definer task | novel grounded
 answers`; and a stable deduplicated fusion exposes seven anchor passages plus up

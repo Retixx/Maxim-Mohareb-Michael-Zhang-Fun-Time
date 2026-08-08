@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import random
@@ -34,7 +35,31 @@ def ids_sha256(values: list[str]) -> str:
     ).hexdigest()
 
 
+
+def _guard_existing_output(paths, force: bool) -> None:
+    """Refuse to silently re-freeze a committed, hash-pinned cohort.
+
+    These generators wrote unconditionally on ANY invocation — including
+    `--help`, which had no argparse to intercept it. Their outputs are SHA-256
+    pinned in config/experiment.yaml and define the experiment's question
+    identity, so an accidental run producing different bytes would invalidate
+    every artifact keyed to them.
+    """
+    existing = [path for path in paths if Path(path).exists()]
+    if existing and not force:
+        listing = "\n  ".join(str(path) for path in existing)
+        raise SystemExit(
+            "refusing to overwrite committed frozen manifest(s):\n  "
+            f"{listing}\nRe-run with --force only if you intend to re-freeze, "
+            "and re-pin every hash afterwards."
+        )
+
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--force", action="store_true",
+                        help="overwrite the committed frozen manifest")
+    args = parser.parse_args()
+    _guard_existing_output([OUTPUT], args.force)
     final = json.loads(FINAL.read_text(encoding="utf-8"))
     preflight = json.loads(PREFLIGHT.read_text(encoding="utf-8"))
     timing = json.loads(TIMING.read_text(encoding="utf-8"))

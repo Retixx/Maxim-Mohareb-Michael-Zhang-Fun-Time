@@ -1,0 +1,19 @@
+version: 2
+
+updates:
+  # GitHub Actions only. Python dependencies are deliberately NOT auto-updated:
+  # transformers, bitsandbytes and torch versions change generation numerics,
+  # and every finished run records the versions it was produced under. A bumped
+  # pin mid-campaign would silently make arms non-comparable, which is exactly
+  # the confound the environment lock exists to prevent. Upgrade those by hand,
+  # between campaigns, and re-run the pilot.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    labels:
+      - dependencies
+      - ci

@@ -39,7 +39,6 @@ rather than presented as directly comparable to systems that predict sentence
 labels themselves.
 """
 
-import re
 
 from .mechanism import _norm
 

@@ -330,15 +330,21 @@ def _validate_plan_summary(obj):
 
 
 _VALIDATORS = {
-    # SPEC §4a: the single-call baseline emits the same {"answer": "..."} shape
-    # as QA, so it reuses QA's validator. Identical contract, identical taxonomy
-    # — the comparison isolates decomposition, not output format.
-    "solo": _validate_qa,
     "planner": _validate_planner,
     "step_definer": _validate_step_definer,
     "extractor": _validate_extractor,
     "qa": _validate_qa,
     "plan_summary": _validate_plan_summary,
+    # SPEC §4a: solo gets its OWN validator and must keep it. It reused QA's
+    # back when both emitted a bare {"answer": ...}; QA has since grown to
+    # {analysis, answer, success, rating}. The solo prompt still asks for the
+    # bare shape, so validating it with _validate_qa would fail EVERY solo call
+    # for a missing analysis/success/rating, zero the single-call baseline, and
+    # hand the multi-agent arm a win it did not earn.
+    #
+    # This key was previously duplicated: a dead "solo": _validate_qa sat above
+    # with a comment asserting the reuse, silently overridden by this entry. Do
+    # not "de-duplicate" by keeping the other one.
     "solo": _validate_solo,
 }
 

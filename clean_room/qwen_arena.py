@@ -40,15 +40,14 @@ from __future__ import annotations
 import argparse
 import gc
 import json
-import os
 import random
 import re
 import string
 import sys
 import time
 from collections import Counter
-from dataclasses import dataclass, field, asdict
-from typing import Any, Callable, Iterable
+from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import torch

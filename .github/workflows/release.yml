@@ -1,0 +1,125 @@
+name: Campaign Readiness
+
+# CD for a research repo is not "deploy to prod" — it is "certify that this
+# commit is safe to spend A100 hours on". This workflow produces that
+# certificate, and refuses to produce one for a commit that would fail on the
+# GPU for a reason we could have caught on CPU.
+
+on:
+  push:
+    tags: ["campaign-*", "v*"]
+  workflow_dispatch:
+    inputs:
+      strict:
+        description: "Fail on health-check warnings too"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  certify:
+    name: certify campaign readiness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # provenance needs real history, not a shallow clone
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install pinned dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install pytest pyyaml numpy scipy transformers datasets ruff
+
+      - name: Working tree must be clean
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::working tree is dirty; a campaign must run from a committed tree"
+            git status --porcelain
+            exit 1
+          fi
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test suite
+        run: python -m pytest tests/ -q
+
+      # --strict here but not in ci.yml: a warning (e.g. off-lineage artifacts
+      # in results/) is tolerable on a feature branch and is not tolerable on a
+      # commit about to consume GPU budget.
+      - name: Health check (strict)
+        run: python scripts/healthcheck.py --strict
+
+      - name: Multi-hop regression guards
+        run: python -m pytest tests/test_retrieval.py::MultiHopRegressionGuards -v
+
+      - name: Build readiness certificate
+        run: |
+          mkdir -p dist
+          python - <<'PY'
+          import json, subprocess, sys, hashlib
+          from pathlib import Path
+
+          def sh(*cmd):
+              return subprocess.check_output(cmd, text=True).strip()
+
+          sys.path.insert(0, ".")
+          from src.contracts import (
+              STATIC_RUN_COUNT, CANDIDATE_ALLOCATION_COUNT, EXPERIMENT_SCHEMA,
+          )
+          from src import prompts, retrieval
+
+          manifests = {
+              p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+              for p in sorted(Path("config/manifests").glob("*.json"))
+          }
+          certificate = {
+              "commit": sh("git", "rev-parse", "HEAD"),
+              "ref": sh("git", "rev-parse", "--abbrev-ref", "HEAD"),
+              "experiment_schema": EXPERIMENT_SCHEMA,
+              "static_run_count": STATIC_RUN_COUNT,
+              "candidate_allocation_count": CANDIDATE_ALLOCATION_COUNT,
+              "prompt_bundle_version": prompts.PROMPT_BUNDLE_VERSION,
+              "prompt_template_sha256": prompts.prompt_template_hashes(),
+              "query_policy": retrieval.QUERY_POLICY,
+              "grounded_followup_requires_evidence":
+                  retrieval.GROUNDED_FOLLOWUP_REQUIRES_EVIDENCE,
+              "manifest_sha256": manifests,
+          }
+          Path("dist/readiness.json").write_text(
+              json.dumps(certificate, indent=2, sort_keys=True) + "\n"
+          )
+          print(json.dumps(certificate, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload readiness certificate
+        uses: actions/upload-artifact@v4
+        with:
+          name: readiness-certificate
+          path: dist/readiness.json
+          retention-days: 90
+
+      - name: Summary
+        run: |
+          {
+            echo "### Campaign readiness: PASS"
+            echo
+            echo "Commit \`$(git rev-parse --short HEAD)\` is certified for a GPU campaign."
+            echo
+            echo "- lint clean"
+            echo "- full test suite green"
+            echo "- health check passed with \`--strict\` (no warnings)"
+            echo "- multi-hop regression guards green (SPEC §14 BUG-1/2/3)"
+            echo
+            echo "Gates B and C still require the GPU itself. This certificate"
+            echo "says the run will not fail for a CPU-detectable reason; it does"
+            echo "not license any accuracy claim."
+          } >> "$GITHUB_STEP_SUMMARY"

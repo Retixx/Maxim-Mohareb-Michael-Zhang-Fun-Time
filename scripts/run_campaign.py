@@ -31,17 +31,17 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.check_pilot import verify_gate  # noqa: E402
-from src.contracts import (  # noqa: E402
+from scripts.check_pilot import verify_gate
+from src.contracts import (
     CAMPAIGN_PLAN_SCHEMA_VERSION,
     EXPERIMENT_SCHEMA,
     QWEN3_THINKING_MODE,
     model_policy_identity,
     validate_model_contract,
 )
-from src import prompts  # noqa: E402
-from src.pipeline import load_id_manifest  # noqa: E402
-from src.runner import resolve_treatments, validate_environment_lock  # noqa: E402
+from src import prompts
+from src.pipeline import load_id_manifest
+from src.runner import resolve_treatments, validate_environment_lock
 STATIC_RUNS = {
     "baseline",
     *(f"{role}_{tier}"

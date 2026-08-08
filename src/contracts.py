@@ -85,3 +85,45 @@ def validate_model_contract(
                     f"run {run_id!r} stage {stage!r} selects {model_name!r}; "
                     "only Qwen3 hybrid size aliases are allowed"
                 )
+
+# ---------------------------------------------------------------------------
+# Canonical arm/tier contract.
+#
+# SPEC §14 BUG-9: this was spelled out independently in analyze.py, in
+# scripts/run_campaign.py and again in the tests. The Qwen3 migration updated
+# some copies and not others, and `validate_matrix` — production code — ended up
+# rejecting the very config the repo ships. The copies still exist; the health
+# check now asserts they agree with these values, so drift fails CI instead of a
+# campaign.
+# ---------------------------------------------------------------------------
+ROLES = ("planner", "step_definer", "extractor", "qa")
+ROLE_PREFIX = {
+    "planner": "planner",
+    "step_definer": "stepdef",
+    "extractor": "extractor",
+    "qa": "qa",
+}
+ROLE_PREFIXES = tuple(ROLE_PREFIX[role] for role in ROLES)
+
+BASELINE_RUN = "baseline"
+SOLO_RUN = "single_fp16"
+OPTIMIZED_RUN = "ma_optimized_exploratory"
+
+PERTURBATION_TIERS = ("large", "8bit", "4bit", "mid", "small", "tiny")
+SELECTOR_CONFIGS = (
+    "large_fp16", "base_fp16", "base_8bit", "base_4bit",
+    "mid_fp16", "small_fp16", "tiny_fp16",
+)
+CANDIDATE_ALLOCATION_COUNT = len(SELECTOR_CONFIGS) ** len(ROLES)
+
+STATIC_RUNS = frozenset({
+    BASELINE_RUN,
+    SOLO_RUN,
+    *(f"{prefix}_{tier}" for prefix in ROLE_PREFIXES for tier in PERTURBATION_TIERS),
+    *(f"ma_uniform_{tier}" for tier in PERTURBATION_TIERS),
+})
+TINY_RUNS = frozenset({
+    *(f"{prefix}_tiny" for prefix in ROLE_PREFIXES),
+    "ma_uniform_tiny",
+})
+STATIC_RUN_COUNT = len(STATIC_RUNS)

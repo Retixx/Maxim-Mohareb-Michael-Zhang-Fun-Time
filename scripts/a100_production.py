@@ -23,6 +23,12 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 FROZEN_BASE_COMMIT = "d57b7c9"
+# The production branch. Was hardcoded to the since-deleted `no-bs`, so every
+# A100 phase aborted on its first call with the GPUs already rented. Overridable
+# so a branch rename is a config change, not a code change.
+PRODUCTION_BRANCH = os.environ.get(
+    "MARAG_PRODUCTION_BRANCH", "multihop-vs-single-hop-rag-bug-fix"
+)
 FROZEN_SEED = 20260805
 FROZEN_WORKERS = 6
 FROZEN_PLAN_PATH = (
@@ -78,19 +84,31 @@ def _git_output(*arguments: str) -> str:
 
 
 def validate_checkout() -> str:
-    """Require a clean local no-bs checkout at its fetched remote revision."""
+    """Require a clean SOURCE checkout at its fetched remote revision.
+
+    `results/` is deliberately NOT gitignored (run outputs are committed), so a
+    whole-worktree dirty check meant the first completed arm made every later
+    launch fail "worktree is dirty" — deadlocking the fleet after arm 1, and via
+    the shared results mount, every concurrent worker.
+    """
     head = _git_output("rev-parse", "HEAD")
     branch = _git_output("branch", "--show-current")
-    if branch != "no-bs":
-        raise RuntimeError(f"production branch must be no-bs; current={branch!r}")
+    if branch != PRODUCTION_BRANCH:
+        raise RuntimeError(
+            f"production branch must be {PRODUCTION_BRANCH}; current={branch!r}"
+        )
     try:
-        remote = _git_output("rev-parse", "--verify", "refs/remotes/origin/no-bs")
+        remote = _git_output(
+            "rev-parse", "--verify", f"refs/remotes/origin/{PRODUCTION_BRANCH}"
+        )
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(
-            "origin/no-bs is unavailable; fetch and fast-forward it before launch"
+            f"origin/{PRODUCTION_BRANCH} is unavailable; fetch and fast-forward it"
         ) from exc
     if remote != head:
-        raise RuntimeError(f"HEAD {head} differs from fetched origin/no-bs {remote}")
+        raise RuntimeError(
+            f"HEAD {head} differs from fetched origin/{PRODUCTION_BRANCH} {remote}"
+        )
     if subprocess.run(
         ["git", "merge-base", "--is-ancestor", FROZEN_BASE_COMMIT, head],
         cwd=ROOT,
@@ -99,8 +117,15 @@ def validate_checkout() -> str:
         raise RuntimeError(
             f"HEAD {head} is not descended from required base {FROZEN_BASE_COMMIT}"
         )
-    if _git_output("status", "--porcelain"):
-        raise RuntimeError("production worktree is dirty; commit exact source first")
+    dirty = [
+        line for line in _git_output("status", "--porcelain").splitlines()
+        if line.strip() and not line[3:].lstrip('"').startswith("results/")
+    ]
+    if dirty:
+        raise RuntimeError(
+            "production worktree is dirty outside results/; commit exact source "
+            f"first: {dirty[:5]}"
+        )
     return head
 
 
