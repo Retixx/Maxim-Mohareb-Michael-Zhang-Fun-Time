@@ -1,0 +1,23 @@
+{
+  "k": 10,
+  "n_requested": 600,
+  "skipped": 0,
+  "strata": {
+    "hidden_bridge": {
+      "n": 475,
+      "single_both_recall": 0.4716,
+      "oracle_both_recall": 0.8863,
+      "headroom": 0.4147,
+      "single_any_recall": 0.9684
+    },
+    "fully_named": {
+      "n": 125,
+      "single_both_recall": 0.832,
+      "oracle_both_recall": 0.888,
+      "headroom": 0.056,
+      "single_any_recall": 1.0
+    }
+  },
+  "headroom_hidden_bridge": 0.4147,
+  "verdict": "GO"
+}
