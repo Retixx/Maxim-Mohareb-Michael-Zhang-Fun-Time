@@ -31,7 +31,12 @@ from pathlib import Path
 
 import torch
 import yaml
-from .contracts import EXPERIMENT_SCHEMA
+from .contracts import (
+    EXPERIMENT_SCHEMA,
+    QWEN3_THINKING_MODE,
+    model_policy_identity,
+    validate_model_contract,
+)
 
 from . import agents, models, prompts, retrieval
 from .pipeline import (
@@ -147,17 +152,19 @@ def _validate_gold_sentence_coverage(
 def resolve_treatments(cfg: dict, run_id: str) -> dict:
     """Turn a run's stage table into {stage: {"model_id", "precision"}}.
 
-    SPEC §8. Two capacity axes, one config schema, backward compatible:
+    SPEC §8. Two capacity axes on one contracted Qwen3 hybrid family:
 
         planner: fp16                            -> base model at fp16
         step_definer: {model: small, precision: fp16}   -> the `small` alias
-        extractor: {model: Qwen/Qwen2.5-3B-Instruct, precision: 4bit}
+        extractor: {model: mid, precision: fp16}         -> the `mid` alias
 
-    A bare string is a precision on the run's base model, so every Phase Q run
-    definition written against the v1 schema still resolves unchanged. A `model`
-    is looked up in `cfg["models"]` and falls through to a literal HF repo id if
-    it contains a "/", so a one-off model needs no config entry.
+    A bare string is a precision on the run's base model. A `model` must be one
+    of the exact size aliases validated by `validate_model_contract`; literal
+    repositories and dedicated Instruct/Thinking variants are forbidden.
     """
+    validate_model_contract(
+        cfg, allow_local_smoke=bool(cfg.get("local_smoke"))
+    )
     if run_id not in cfg["runs"]:
         raise SystemExit(f"unknown run {run_id!r}; config defines {list(cfg['runs'])}")
 
@@ -181,12 +188,10 @@ def resolve_treatments(cfg: dict, run_id: str) -> dict:
                 model_id = aliases[name]
             elif name == "base":
                 model_id = base
-            elif "/" in name:
-                model_id = name  # literal repo id, no alias needed
             else:
                 raise SystemExit(
                     f"run {run_id!r} stage {stage!r}: unknown model alias {name!r}; "
-                    f"config defines {sorted(aliases)} (or use a literal 'org/repo')"
+                    f"config defines {sorted(aliases)}"
                 )
         else:
             raise SystemExit(
@@ -449,10 +454,8 @@ def _order_batches_largest_first(
         prompt_role = prompts.prompt_for(stage)
         for batch_no, chunk, missing in batches:
             texts = [
-                tok.apply_chat_template(
-                    prompts.build_messages(prompt_role, **call["fields"]),
-                    tokenize=False,
-                    add_generation_prompt=True,
+                models.render_chat(
+                    tok, prompts.build_messages(prompt_role, **call["fields"])
                 )
                 for call in chunk
             ]
@@ -833,9 +836,7 @@ def _preflight_stage(
 
     def rendered_tokens(call: dict) -> int:
         messages = prompts.build_messages(prompt_role, **call["fields"])
-        text = tok.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+        text = models.render_chat(tok, messages)
         encoded = tok(
             text, padding=False, truncation=False, add_special_tokens=False
         )["input_ids"]
@@ -1323,6 +1324,7 @@ def write_environment_lock(
     container_ref: str,
     container_digest: str,
 ) -> None:
+    validate_model_contract(cfg)
     repo_root = Path(__file__).resolve().parent.parent
     if subprocess.check_output(
         ["git", "status", "--porcelain"], cwd=repo_root, text=True
@@ -1354,6 +1356,7 @@ def write_environment_lock(
 
 
 def validate_environment_lock(cfg: dict, config_path: Path, lock_path: Path) -> dict:
+    validate_model_contract(cfg)
     if not lock_path.exists():
         raise RuntimeError(
             f"production environment lock is missing: {lock_path}. Generate and "
@@ -1474,6 +1477,9 @@ def run(
         raise ValueError("timing_mode and pilot_mode are mutually exclusive")
     if local_smoke_mode and not pilot_mode:
         raise ValueError("local_smoke_mode requires pilot_mode")
+    if bool(cfg.get("local_smoke")) != local_smoke_mode:
+        raise ValueError("local smoke config and execution mode must match")
+    validate_model_contract(cfg, allow_local_smoke=local_smoke_mode)
     _validate_architecture_contract(cfg)
     treatments = resolve_treatments(cfg, run_id)
     stage_precision = {s: t["precision"] for s, t in treatments.items()}
@@ -1831,6 +1837,8 @@ def run(
         raise ValueError("this experiment requires gold-sentence coverage == 1.0")
     experiment_fingerprint_payload = {
         "schema": EXPERIMENT_SCHEMA,
+        "thinking_mode": QWEN3_THINKING_MODE,
+        "model_family": model_policy_identity(),
         "architecture": architecture,
         "pipeline_stages": prompts.PIPELINE_STAGES,
         "stage_role": prompts.STAGE_ROLE,
@@ -1947,6 +1955,8 @@ def run(
         ),
         "allocation_claim_status": frozen_allocation.get("claim_status"),
         "prompt_template_sha256": prompts.prompt_template_hashes(),
+        "thinking_mode": QWEN3_THINKING_MODE,
+        "model_family": model_policy_identity(),
         "experiment_fingerprint": experiment_fingerprint,
         "experiment_fingerprint_payload": experiment_fingerprint_payload,
         "stage_config_fingerprints": {
@@ -2567,12 +2577,9 @@ def main():
         help="validate this worker against config/environment.lock.json and exit",
     )
     ap.add_argument("--model-id", default=None,
-                    help="override the base model (SPEC §3: a model is a config value, "
-                         "not a plugin — this is just so one config can drive both)")
+                    help="compatibility override; must equal the contracted Qwen3-8B base")
     ap.add_argument("--small-model-id", default=None,
-                    help="override the `small` alias. Pair this with --model-id when "
-                         "running a Phase S definition on model 2, or the small stage "
-                         "silently keeps model 1's sibling.")
+                    help="compatibility override; must equal contracted Qwen3-1.7B")
     args = ap.parse_args()
 
     config_path = Path(args.config).resolve()
@@ -2583,6 +2590,9 @@ def main():
         cfg["model_id"] = args.model_id
     if args.small_model_id:
         cfg.setdefault("models", {})["small"] = args.small_model_id
+    if bool(cfg.get("local_smoke")) != args.local_smoke_mode:
+        ap.error("--local-smoke-mode must match the config's local_smoke profile")
+    validate_model_contract(cfg, allow_local_smoke=args.local_smoke_mode)
     if args.write_environment_lock:
         if not args.container_ref or not args.container_digest:
             ap.error("--write-environment-lock requires --container-ref and --container-digest")

@@ -11,6 +11,11 @@ from unittest import mock
 import yaml
 
 from src import prompts
+from src.contracts import (
+    EXPERIMENT_SCHEMA,
+    QWEN3_HYBRID_FAMILY,
+    QWEN3_HYBRID_MODELS,
+)
 from src.runner import resolve_treatments
 
 from scripts.run_campaign import (
@@ -113,7 +118,12 @@ class CampaignPlanTests(unittest.TestCase):
                 ),
             }
             payload = {
-                "schema": "open_corpus_marag_v3",
+                "schema": EXPERIMENT_SCHEMA,
+                "thinking_mode": False,
+                "model_family": {
+                    "name": QWEN3_HYBRID_FAMILY,
+                    "models": dict(QWEN3_HYBRID_MODELS),
+                },
                 "architecture": config["architecture"],
                 "pipeline_stages": prompts.PIPELINE_STAGES,
                 "stage_role": prompts.STAGE_ROLE,
@@ -152,6 +162,11 @@ class CampaignPlanTests(unittest.TestCase):
                 "manifest_file_sha256": config["dataset"]["manifest_file_sha256"],
                 "environment_lock_sha256": "lock",
                 "git_commit": "abc123",
+                "thinking_mode": False,
+                "model_family": {
+                    "name": QWEN3_HYBRID_FAMILY,
+                    "models": dict(QWEN3_HYBRID_MODELS),
+                },
                 "prompt_bundle_version": prompts.PROMPT_BUNDLE_VERSION,
                 "prompt_template_sha256": prompts.prompt_template_hashes(),
                 "stage_config_fingerprints": {
@@ -166,6 +181,15 @@ class CampaignPlanTests(unittest.TestCase):
                 json.dumps(meta), encoding="utf-8"
             )
             self.assertEqual(completed_run_ids(config, kind="accuracy"), {"baseline"})
+            without_mode = copy.deepcopy(meta)
+            without_mode.pop("thinking_mode")
+            (Path(directory) / "baseline.meta.json").write_text(
+                json.dumps(without_mode), encoding="utf-8"
+            )
+            self.assertEqual(completed_run_ids(config, kind="accuracy"), set())
+            (Path(directory) / "baseline.meta.json").write_text(
+                json.dumps(meta), encoding="utf-8"
+            )
             with mock.patch.dict(
                 prompts.MAX_NEW_TOKENS, {"extractor": 999}, clear=False
             ):

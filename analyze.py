@@ -41,7 +41,13 @@ from typing import Any, Callable
 
 import numpy as np
 import yaml
-from src.contracts import ANALYSIS_SCHEMA_VERSION, EXPERIMENT_SCHEMA
+from src.contracts import (
+    ANALYSIS_SCHEMA_VERSION,
+    EXPERIMENT_SCHEMA,
+    QWEN3_THINKING_MODE,
+    model_policy_identity,
+    validate_model_contract,
+)
 
 from src import evidence as evidence_metrics, prompts, retrieval
 from src.mechanism import SELECTION_FIELD, selection_changed_set
@@ -408,8 +414,32 @@ def _configured_timing_manifest_hash(config: dict[str, Any]) -> str | None:
     )
 
 
+def _validate_timing_model_policy(
+    timing_meta: dict[str, Any],
+    *,
+    experiment_fingerprint: str,
+    experiment_payload: dict[str, Any],
+    run_id: str,
+) -> None:
+    timing_payload = timing_meta.get("experiment_fingerprint_payload")
+    if (
+        timing_meta.get("thinking_mode") is not QWEN3_THINKING_MODE
+        or timing_meta.get("model_family") != model_policy_identity()
+        or timing_meta.get("experiment_fingerprint") != experiment_fingerprint
+        or not isinstance(timing_payload, dict)
+        or content_hash(timing_payload) != experiment_fingerprint
+        or timing_payload != experiment_payload
+        or timing_payload.get("schema") != EXPERIMENT_SCHEMA
+        or timing_payload.get("thinking_mode") is not QWEN3_THINKING_MODE
+        or timing_payload.get("model_family") != model_policy_identity()
+    ):
+        raise AnalysisError(f"{run_id}: timing model/thinking policy is stale")
+
+
 def validate_final_cohort(config: dict[str, Any], runs: dict[str, RunData]) -> None:
     """Every scored arm must certify and contain the one frozen question cohort."""
+    validate_model_contract(config)
+    expected_model_family = model_policy_identity()
     configured_hash = (config.get("dataset") or {}).get("manifest_sha256")
     if configured_hash != EXPECTED_FINAL_MANIFEST_SHA256:
         raise AnalysisError(
@@ -515,12 +545,19 @@ def validate_final_cohort(config: dict[str, Any], runs: dict[str, RunData]) -> N
         experiment_fingerprint = run.meta.get("experiment_fingerprint")
         if not experiment_fingerprint:
             raise AnalysisError(f"{run.run_id}: missing experiment fingerprint")
+        if (
+            run.meta.get("thinking_mode") is not QWEN3_THINKING_MODE
+            or run.meta.get("model_family") != expected_model_family
+        ):
+            raise AnalysisError(f"{run.run_id}: model/thinking policy metadata is stale")
         experiment_fingerprints.add(str(experiment_fingerprint))
         fingerprint_payload = run.meta.get("experiment_fingerprint_payload")
         if (
             not isinstance(fingerprint_payload, dict)
             or content_hash(fingerprint_payload) != experiment_fingerprint
             or fingerprint_payload.get("schema") != EXPERIMENT_SCHEMA
+            or fingerprint_payload.get("thinking_mode") is not QWEN3_THINKING_MODE
+            or fingerprint_payload.get("model_family") != expected_model_family
             or fingerprint_payload.get("architecture") != config.get("architecture")
             or tuple(fingerprint_payload.get("pipeline_stages") or ())
             != tuple(prompts.PIPELINE_STAGES)
@@ -606,8 +643,12 @@ def validate_final_cohort(config: dict[str, Any], runs: dict[str, RunData]) -> N
             raise AnalysisError(f"{run.run_id}: missing stage configuration fingerprints")
         if run.timing_meta is not None:
             timing_meta = run.timing_meta
-            if timing_meta.get("experiment_fingerprint") != experiment_fingerprint:
-                raise AnalysisError(f"{run.run_id}: timing experiment fingerprint changed")
+            _validate_timing_model_policy(
+                timing_meta,
+                experiment_fingerprint=experiment_fingerprint,
+                experiment_payload=fingerprint_payload,
+                run_id=run.run_id,
+            )
             for record in (
                 *run.timing_calls, *run.batches, *run.timing_orchestration
             ):
@@ -2736,6 +2777,7 @@ def materialize_selection(
     n_resamples: int,
     bootstrap_seed: int,
 ) -> dict[str, Any]:
+    validate_model_contract(config)
     contract = validate_selector_contract(config)
     required_resamples = int(
         (config.get("analysis") or {}).get(

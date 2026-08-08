@@ -32,7 +32,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.check_pilot import verify_gate  # noqa: E402
-from src.contracts import CAMPAIGN_PLAN_SCHEMA_VERSION, EXPERIMENT_SCHEMA  # noqa: E402
+from src.contracts import (  # noqa: E402
+    CAMPAIGN_PLAN_SCHEMA_VERSION,
+    EXPERIMENT_SCHEMA,
+    QWEN3_THINKING_MODE,
+    model_policy_identity,
+    validate_model_contract,
+)
 from src import prompts  # noqa: E402
 from src.pipeline import load_id_manifest  # noqa: E402
 from src.runner import resolve_treatments, validate_environment_lock  # noqa: E402
@@ -87,6 +93,8 @@ def completed_run_ids(
     expected_environment_lock_sha256: str | None = None,
 ) -> set[str]:
     """Find finalized, hash-valid artifacts so campaign restarts skip them."""
+    validate_model_contract(config)
+    expected_model_family = model_policy_identity()
     results_dir = Path(config.get("results_dir", "results"))
     if not results_dir.is_absolute():
         results_dir = ROOT / results_dir
@@ -146,6 +154,8 @@ def completed_run_ids(
             or meta.get("git_commit") == "unknown"
             or meta.get("prompt_bundle_version") != prompts.PROMPT_BUNDLE_VERSION
             or meta.get("prompt_template_sha256") != prompts.prompt_template_hashes()
+            or meta.get("thinking_mode") is not QWEN3_THINKING_MODE
+            or meta.get("model_family") != expected_model_family
         ):
             continue
         expected_stage_fingerprints = {
@@ -163,6 +173,8 @@ def completed_run_ids(
             or not isinstance(payload, dict)
             or _content_hash(payload) != experiment_fingerprint
             or payload.get("schema") != EXPERIMENT_SCHEMA
+            or payload.get("thinking_mode") is not QWEN3_THINKING_MODE
+            or payload.get("model_family") != expected_model_family
             or payload.get("architecture") != config.get("architecture")
             or tuple(payload.get("pipeline_stages") or ())
             != tuple(prompts.PIPELINE_STAGES)
@@ -248,6 +260,7 @@ def completed_run_ids(
 
 
 def validate_matrix(config: dict) -> None:
+    validate_model_contract(config)
     runs = set(config.get("runs") or {})
     frozen = config.get("frozen_allocation") or {}
     allowed = {frozenset(STATIC_RUNS)}
@@ -351,6 +364,9 @@ def main() -> int:
     plan["config_path"] = str(config_path)
     plan["config_sha256"] = _sha256(config_path)
     plan["experiment_contract_sha256"] = _content_hash({
+        "thinking_mode": config.get("thinking_mode"),
+        "model_id": config.get("model_id"),
+        "models": config.get("models"),
         "architecture": config.get("architecture"),
         "pipeline_stages": prompts.PIPELINE_STAGES,
         "stage_role": prompts.STAGE_ROLE,
@@ -361,6 +377,7 @@ def main() -> int:
         "pilot": config.get("pilot"),
         "timing": config.get("timing"),
         "model_revisions": config.get("model_revisions"),
+        "tokenizer_revisions": config.get("tokenizer_revisions"),
         "runs": config.get("runs"),
     })
     default_plan = ROOT / "logs" / f"{args.kind}_seed{args.seed}_w{args.workers}.plan.json"

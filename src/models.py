@@ -320,6 +320,16 @@ def unload(model=None) -> None:
         torch.cuda.ipc_collect()
 
 
+def render_chat(tok, messages: list[dict]) -> str:
+    """Render every experiment prompt with Qwen3 thinking explicitly disabled."""
+    return tok.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+
+
 @torch.inference_mode()
 def sequence_confidence(model, tok, enc: dict, gen_ids, n_gen_per_item: list[int],
                         max_chunk: int = 8) -> list[dict]:
@@ -421,10 +431,7 @@ def generate_batch(
     results: list[dict] = []
     for start in range(0, len(messages_list), batch_size):
         chunk = messages_list[start : start + batch_size]
-        texts = [
-            tok.apply_chat_template(m, tokenize=False, add_generation_prompt=True)
-            for m in chunk
-        ]
+        texts = [render_chat(tok, messages) for messages in chunk]
         enc = tok(texts, return_tensors="pt", padding=True, add_special_tokens=False)
         enc = {k: v.to(model.device) for k, v in enc.items()}
         in_len = enc["input_ids"].shape[1]

@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src import retrieval  # noqa: E402
+from src.contracts import validate_model_contract  # noqa: E402
 
 
 def _sha256(path: Path) -> str:
@@ -48,6 +49,7 @@ def main() -> int:
     args = parser.parse_args()
     config_path = Path(args.config).resolve()
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    validate_model_contract(config)
     _verify_manifest_files(config)
     free_gib = shutil.disk_usage(ROOT).free / 1024**3
     if free_gib < args.minimum_free_gib:

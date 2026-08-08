@@ -13,6 +13,11 @@ import yaml
 
 from scripts import check_pilot as gate
 from src import prompts
+from src.contracts import (
+    EXPERIMENT_SCHEMA,
+    QWEN3_HYBRID_FAMILY,
+    QWEN3_HYBRID_MODELS,
+)
 from src.metrics import exact_match, f1_score
 from src.runner import resolve_treatments
 
@@ -111,13 +116,18 @@ class PilotGateFixture:
         }
 
     def _fingerprint_payload(
-        self, *, stale: bool, schema: str = "open_corpus_marag_v3"
+        self, *, stale: bool, schema: str = EXPERIMENT_SCHEMA
     ) -> dict:
         architecture = copy.deepcopy(self.config["architecture"])
         if stale:
             architecture["framework"] = "obsolete-fixed-hop-pipeline"
         return {
             "schema": schema,
+            "thinking_mode": False,
+            "model_family": {
+                "name": QWEN3_HYBRID_FAMILY,
+                "models": dict(QWEN3_HYBRID_MODELS),
+            },
             "architecture": architecture,
             "pipeline_stages": prompts.PIPELINE_STAGES,
             "stage_role": prompts.STAGE_ROLE,
@@ -204,7 +214,7 @@ class PilotGateFixture:
                 schema=(
                     "open_corpus_marag_v1"
                     if run_id == stale_schema_run_id
-                    else "open_corpus_marag_v3"
+                    else EXPERIMENT_SCHEMA
                 ),
             )
             fingerprint = gate.content_hash(payload)
@@ -249,6 +259,11 @@ class PilotGateFixture:
                 "jsonl_sha256": gate.sha256_file(jsonl_path),
                 "environment_lock_sha256": gate.sha256_file(self.lock_path),
                 "git_commit": "synthetic-pilot-commit",
+                "thinking_mode": False,
+                "model_family": {
+                    "name": QWEN3_HYBRID_FAMILY,
+                    "models": dict(QWEN3_HYBRID_MODELS),
+                },
                 "stage_config_fingerprints": {
                     stage: treatment["config_fingerprint"]
                     for stage, treatment in treatments.items()
@@ -457,6 +472,30 @@ class PilotGateTests(unittest.TestCase):
             single_correct=False,
             stale_run_id="baseline",
         )
+
+        with self.assertRaisesRegex(RuntimeError, "experiment fingerprint is stale"):
+            gate.check_pilot(self.fixture.config_path)
+
+    def test_self_consistent_thinking_on_fingerprint_is_rejected(self) -> None:
+        self.fixture.write_runs(baseline_correct=True, single_correct=False)
+        meta_path = self.root / "results" / "baseline.meta.json"
+        jsonl_path = self.root / "results" / "baseline.jsonl"
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        payload = meta["experiment_fingerprint_payload"]
+        payload["thinking_mode"] = True
+        fingerprint = gate.content_hash(payload)
+        records = [
+            json.loads(line) for line in jsonl_path.read_text(encoding="utf-8").splitlines()
+        ]
+        for record in records:
+            record["experiment_fingerprint"] = fingerprint
+        jsonl_path.write_text(
+            "".join(json.dumps(record) + "\n" for record in records),
+            encoding="utf-8",
+        )
+        meta["experiment_fingerprint"] = fingerprint
+        meta["jsonl_sha256"] = gate.sha256_file(jsonl_path)
+        meta_path.write_text(json.dumps(meta), encoding="utf-8")
 
         with self.assertRaisesRegex(RuntimeError, "experiment fingerprint is stale"):
             gate.check_pilot(self.fixture.config_path)

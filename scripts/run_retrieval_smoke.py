@@ -50,6 +50,9 @@ def derive_smoke_config(
     batch_size: int = MAX_BATCH_SIZE,
 ) -> dict:
     """Return an isolated local-smoke config without mutating ``source``."""
+    from src.contracts import validate_model_contract
+
+    validate_model_contract(source)
     if model_alias not in ALLOWED_MODEL_ALIASES:
         raise ValueError(
             f"smoke model must be one of {ALLOWED_MODEL_ALIASES}, got {model_alias!r}"
@@ -106,6 +109,9 @@ def derive_smoke_config(
 
 def validate_smoke_config(config: dict) -> dict:
     """Fail closed unless ``config`` is exactly the bounded smoke treatment."""
+    from src.contracts import validate_model_contract
+
+    validate_model_contract(config, allow_local_smoke=True)
     smoke = config.get("local_smoke") or {}
     if smoke.get("profile") != SMOKE_PROFILE:
         raise ValueError("local smoke profile is missing or stale")

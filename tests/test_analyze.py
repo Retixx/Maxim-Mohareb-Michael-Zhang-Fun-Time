@@ -1,3 +1,4 @@
+import inspect
 import unittest
 import json
 import tempfile
@@ -19,6 +20,7 @@ from analyze import (
     analyze_role_families,
     analyze_selection_churn,
     analyze_solo,
+    _validate_timing_model_policy,
     _complete_matching_accuracy_run,
     _validate_analysis_environment_lock,
     content_hash,
@@ -31,8 +33,10 @@ from analyze import (
     role_run,
     select_allocation,
     verify_selection_artifact,
+    validate_final_cohort,
     validate_campaign_completeness,
 )
+from src.contracts import EXPERIMENT_SCHEMA, model_policy_identity
 
 
 ROLES = ("planner", "step_definer", "extractor", "qa")
@@ -92,6 +96,52 @@ def make_run(
 
 
 class AnalyzeTests(unittest.TestCase):
+    def test_final_timing_rejects_missing_or_thinking_on_model_policy(self):
+        payload = {
+            "schema": EXPERIMENT_SCHEMA,
+            "thinking_mode": False,
+            "model_family": model_policy_identity(),
+        }
+        fingerprint = content_hash(payload)
+        valid = {
+            "thinking_mode": False,
+            "model_family": model_policy_identity(),
+            "experiment_fingerprint": fingerprint,
+            "experiment_fingerprint_payload": payload,
+        }
+        _validate_timing_model_policy(
+            valid,
+            experiment_fingerprint=fingerprint,
+            experiment_payload=payload,
+            run_id="baseline",
+        )
+
+        mutations = []
+        for key in ("thinking_mode", "model_family", "experiment_fingerprint_payload"):
+            missing = json.loads(json.dumps(valid))
+            missing.pop(key)
+            mutations.append(missing)
+        thinking_on = json.loads(json.dumps(valid))
+        thinking_on["experiment_fingerprint_payload"]["thinking_mode"] = True
+        thinking_on["experiment_fingerprint"] = content_hash(
+            thinking_on["experiment_fingerprint_payload"]
+        )
+        mutations.append(thinking_on)
+
+        for mutation in mutations:
+            with self.subTest(keys=sorted(mutation)):
+                with self.assertRaises(AnalysisError):
+                    _validate_timing_model_policy(
+                        mutation,
+                        experiment_fingerprint=fingerprint,
+                        experiment_payload=payload,
+                        run_id="baseline",
+                    )
+        self.assertIn(
+            "_validate_timing_model_policy(",
+            inspect.getsource(validate_final_cohort),
+        )
+
     def test_selector_reuses_complete_static_accuracy_without_timing(self):
         definition = {"planner": {"model": "tiny", "precision": "fp16"}}
         config = {"runs": {"planner_tiny": definition}}
@@ -648,7 +698,11 @@ class AnalyzeTests(unittest.TestCase):
             "timing_meta": {
                 **batched.timing_meta,
                 "experiment_fingerprint": experiment_fingerprint,
-                "experiment_fingerprint_payload": {"schema": "open_corpus_marag_v3"},
+                "experiment_fingerprint_payload": {
+                    "schema": EXPERIMENT_SCHEMA,
+                    "thinking_mode": False,
+                    "model_family": model_policy_identity(),
+                },
             },
         })
         service = analyze_latency_batches(

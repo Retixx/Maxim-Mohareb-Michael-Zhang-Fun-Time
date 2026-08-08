@@ -19,6 +19,11 @@ from scripts.run_retrieval_smoke import (
     validate_smoke_config,
 )
 from src import models, prompts
+from src.contracts import (
+    EXPERIMENT_SCHEMA,
+    QWEN3_HYBRID_FAMILY,
+    QWEN3_HYBRID_MODELS,
+)
 from src.metrics import exact_match, f1_score
 from src.runner import _validate_local_smoke_contract, resolve_treatments
 
@@ -224,7 +229,12 @@ class LocalSmokeConfigTests(unittest.TestCase):
                 "gold_sentence_text_nfkc_whitespace_equivalent": True,
             }
             payload = {
-                "schema": "open_corpus_marag_v3",
+                "schema": EXPERIMENT_SCHEMA,
+                "thinking_mode": False,
+                "model_family": {
+                    "name": QWEN3_HYBRID_FAMILY,
+                    "models": dict(QWEN3_HYBRID_MODELS),
+                },
                 "architecture": config["architecture"],
                 "pipeline_stages": prompts.PIPELINE_STAGES,
                 "stage_role": prompts.STAGE_ROLE,
@@ -326,6 +336,11 @@ class LocalSmokeConfigTests(unittest.TestCase):
                     "jsonl_sha256": gate.sha256_file(jsonl_path),
                     "environment_lock_sha256": None,
                     "git_commit": "synthetic-local-smoke-commit",
+                    "thinking_mode": False,
+                    "model_family": {
+                        "name": QWEN3_HYBRID_FAMILY,
+                        "models": dict(QWEN3_HYBRID_MODELS),
+                    },
                     "gpu_name": "NVIDIA GeForce RTX 3050",
                     "execution_sessions": [{"gpu_uuid": "GPU-synthetic-3050"}],
                     "deduplicated_concurrent_model_footprint_mib": 512.0,

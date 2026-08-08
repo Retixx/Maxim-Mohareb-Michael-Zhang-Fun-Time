@@ -24,7 +24,13 @@ from src.metrics import (  # noqa: E402
     f1_score,
     joint_paired_bootstrap,
 )
-from src.contracts import EXPERIMENT_SCHEMA, PILOT_GATE_SCHEMA_VERSION  # noqa: E402
+from src.contracts import (  # noqa: E402
+    EXPERIMENT_SCHEMA,
+    PILOT_GATE_SCHEMA_VERSION,
+    QWEN3_THINKING_MODE,
+    model_policy_identity,
+    validate_model_contract,
+)
 from src.runner import resolve_treatments  # noqa: E402
 
 
@@ -67,6 +73,7 @@ def _load_pilot_run(
         meta_path.name.removesuffix(".meta.json") + ".jsonl"
     )
     pilot = config["pilot"]
+    expected_model_family = model_policy_identity()
     if (
         meta.get("metadata_complete") is not True
         or int(meta.get("n", -1)) != int(pilot["n"])
@@ -76,6 +83,8 @@ def _load_pilot_run(
         or not jsonl_path.exists()
         or meta.get("jsonl_sha256") != sha256_file(jsonl_path)
         or bool(meta.get("local_smoke_mode")) != local_smoke
+        or meta.get("thinking_mode") is not QWEN3_THINKING_MODE
+        or meta.get("model_family") != expected_model_family
         or (
             local_smoke
             and meta.get("local_smoke") != config.get("local_smoke")
@@ -102,6 +111,8 @@ def _load_pilot_run(
         or not isinstance(payload, dict)
         or content_hash(payload) != fingerprint
         or payload.get("schema") != EXPERIMENT_SCHEMA
+        or payload.get("thinking_mode") is not QWEN3_THINKING_MODE
+        or payload.get("model_family") != expected_model_family
         or payload.get("architecture") != config.get("architecture")
         or tuple(payload.get("pipeline_stages") or ()) != tuple(prompts.PIPELINE_STAGES)
         or payload.get("stage_role") != prompts.STAGE_ROLE
@@ -173,6 +184,7 @@ def _load_pilot_run(
 def check_pilot(config_path: Path) -> dict:
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     local_smoke = bool(config.get("local_smoke"))
+    validate_model_contract(config, allow_local_smoke=local_smoke)
     if local_smoke:
         from scripts.run_retrieval_smoke import validate_smoke_config
 
@@ -595,6 +607,9 @@ def verify_gate(
     expected = artifact.get("artifact_sha256")
     semantic = {key: value for key, value in artifact.items() if key != "artifact_sha256"}
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    if config.get("local_smoke"):
+        raise RuntimeError("local smoke cannot satisfy the production pilot gate")
+    validate_model_contract(config)
     pilot = config.get("pilot") or {}
     lock_path = repo_path(config.get("environment_lock_path", "config/environment.lock.json"))
     lock = json.loads(lock_path.read_text(encoding="utf-8")) if lock_path.exists() else {}
