@@ -492,10 +492,8 @@ def _retrieval_decision(
     grounded_answers = _grounded_prior_answers(history)
 
     anchor_query = q["question"]
-    anchor_titles = retriever.index.search_titles(anchor_query, retriever.k)
     task_attempted = bool(step_index > 0 and retriever.task_k > 0)
     task_query = None
-    task_titles: list[str] = []
     if task_attempted:
         query_parts = [anchor_query, task["task"]]
         query_parts.extend(
@@ -504,19 +502,21 @@ def _retrieval_decision(
             if not _answer_is_grounded(answer, query_parts)
         )
         task_query = " | ".join(query_parts)
-        task_titles = retriever.index.search_titles(task_query, retriever.k)
         query = task_query
-        titles = retrieval.fuse_rankings(
-            anchor_titles,
-            task_titles,
-            k=retriever.k,
-            anchor_k=retriever.anchor_k,
-        )
         query_source = "anchor_task_union"
     else:
         query = anchor_query
-        titles = list(anchor_titles[:retriever.k])
         query_source = "original_question_anchor"
+    rankings = retrieval.search_anchored_union(
+        retriever.index,
+        anchor_query,
+        task_query,
+        k=retriever.k,
+        anchor_k=retriever.anchor_k,
+    )
+    anchor_titles = rankings["anchor_titles"]
+    task_titles = rankings["task_titles"]
+    titles = rankings["titles"]
 
     components = [{
         "name": "original_question_anchor",

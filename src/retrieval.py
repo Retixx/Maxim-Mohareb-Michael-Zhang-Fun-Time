@@ -218,6 +218,28 @@ class BM25Index:
         return self.passages[i] if i is not None else None
 
 
+def search_anchored_union(
+    index: BM25Index,
+    anchor_query: str,
+    task_query: str | None,
+    *,
+    k: int = K,
+    anchor_k: int = ANCHOR_K,
+) -> dict:
+    """Run the active anchor/task rankings and return one capped exposure set."""
+    anchor_titles = index.search_titles(anchor_query, k)
+    task_titles = index.search_titles(task_query, k) if task_query else []
+    titles = (
+        fuse_rankings(anchor_titles, task_titles, k=k, anchor_k=anchor_k)
+        if task_query else list(anchor_titles[:k])
+    )
+    return {
+        "anchor_titles": anchor_titles,
+        "task_titles": task_titles,
+        "titles": titles,
+    }
+
+
 # --------------------------------------------------------------------------
 # Follow-up query construction
 # --------------------------------------------------------------------------
