@@ -246,12 +246,12 @@ denominator.
 The active retriever is a sparse, vectorized BM25 index with fixed tokenization,
 Lucene-style IDF, stable corpus-order tie-breaking, and unique passage titles.
 The configured multi-agent policy is
-`original_question_first_then_full_grounded_task_v1`: the original question owns
-the first top 10; a later evidence-grounded Step Definer task plus grounded
-answers owns that step's full top 10; and an ungrounded later step falls back to
-the original question. There is exactly one query per question-answering step
-and no learned bridge-query helper. This policy was frozen before the pilot and
-was not chosen from pilot/final answer F1.
+`original_question_anchor_7_plus_anchored_step_task_3_v2`: the original question
+owns step 1's top 10; every later question-answering step searches both the
+original question and `original question | Step Definer task | novel grounded
+answers`; and a stable deduplicated fusion exposes seven anchor passages plus up
+to three unique task passages. Literal answer grounding remains telemetry and no
+longer gates query issuance. Each step still exposes at most 10 passages.
 
 ### 5.1 Measured retrieval headroom (2026-08-07)
 
@@ -277,14 +277,14 @@ real pipeline must resolve by reading. The gap between a live pipeline and
 0.8863 is the cost of bridge-entity resolution, and it is a reportable result of
 this experiment rather than an error term.
 
-### 5.2 Known deviation of the implementation from this contract
+### 5.2 Repaired implementation and fingerprint
 
-The implementation does not currently satisfy §5. `_retrieval_decision`
-(`src/pipeline.py`) builds the grounded follow-up query as
-`[task["task"], *grounded_answers]` and **omits the original question**. The
-contract text above ("a later evidence-grounded Step Definer task plus grounded
-answers owns that step's full top 10") describes intended behaviour that the
-code does not implement in the form that preserves anchor signal.
+The pre-repair implementation did not satisfy §5. `_retrieval_decision`
+(`src/pipeline.py`) built the grounded follow-up query as
+`[task["task"], *grounded_answers]` and **omitted the original question**. The
+same function gated that query on a verbatim grounding test and replaced rather
+than unioned the original-question ranking. Those coupled defects are the
+independently reproduced cause described in §15.2.
 
 Measured consequence, using the real planner sub-questions from
 `baseline_qwen2.5-1.5b_n750_seed7` (n=730, unstratified, k=10):
@@ -295,17 +295,17 @@ Measured consequence, using the real planner sub-questions from
 | decomposed, equal read budget | **0.296** |
 | decomposed, double read budget | 0.410 |
 
-Decomposition moves retrieval backwards. Combined with the follow-up firing gate
-(§14, BUG-2), this is the mechanism by which the multi-agent system loses to the
-one-call control on multi-hop questions, and why that loss did not shrink across
-a 0.5B→7B sweep: the deficit is created upstream of the reader, so reader
-capacity cannot recover it.
+Decomposition moved retrieval backwards. The repaired path always retains the
+original question in both the query and ranking, fires on every eligible later
+QA step, and calls the same `search_anchored_union` primitive used by the
+deterministic acceptance gate. On all 1,097 frozen hidden_bridge questions,
+Gate A now gives 0.5077 single-query versus 0.9271 repaired oracle-state
+both-gold recall@10. Fully-named retrieval is unchanged at 0.8412.
 
-No accuracy claim comparing multi-agent to `single_fp16` may be published from
-any artifact produced before BUG-1 and BUG-2 are fixed and the query-policy
-fingerprint is re-frozen. All existing `results/` artifacts predate the fix and
-originate from commit `fa661f5`, which is not an ancestor of the current
-lineage; they are diagnostic only.
+No accuracy claim comparing multi-agent to `single_fp16` may be published until
+Gates C and D pass on post-fix artifacts. All existing `results/` artifacts
+predate the fix and originate from commit `fa661f5`, which is not an ancestor of
+the current lineage; they are diagnostic only.
 
 The one-call control, single_fp16:
 
@@ -324,15 +324,17 @@ passage exposures, unique titles, model calls, prompt/output tokens, F1, EM,
 memory, and timing whenever that contrast appears.
 
 Answer records include retrieval events, retrieved and gold titles, gold-title
-recall, initial-query and grounded-follow-up recall, grounded-follow-up firing
-rate, incremental task gold recall, grounding rate, Extractor normalization, QA
-evidence filtering, plan depth, executed steps, stop reason, summary status, and
-final-answer provenance. Gold fields are attached only after generation.
+recall, initial-query and task-component recall, eligible/fired follow-up counts,
+follow-up firing rate, incremental task gold recall, grounding rate, Extractor
+normalization, QA evidence filtering, plan depth, executed steps, stop reason,
+summary status, and final-answer provenance. Gold fields are attached only after
+generation.
 
 Repaired artifacts use experiment schema `open_corpus_marag_v3`. Resume,
 pilot-gate, and analysis paths reject v1/v2 artifacts, stale prompt hashes, a
 stale query-policy fingerprint, a non-original initial query, a grounded
-follow-up budget other than k=10, or removal of the evidence-grounding guard.
+follow-up search depth other than k=10, a fusion quota other than 7+3, or a
+verbatim-grounding fire gate.
 
 Questions are prespecified as hidden_bridge or fully_named from question text
 and gold titles. The frozen final cohort contains exactly 1,097 hidden_bridge
@@ -507,6 +509,9 @@ campaign launch):
 | 0.6B FP16 | ~1,200 |
 
 The 8B 8-bit and 4B FP16 treatments are near-memory-matched, not equal.
+Analysis schema v4 names that contrast directly, reports all six configured
+treatment axes, and preserves measured gaps rather than describing the two
+footprints as exactly matched.
 
 The primary memory quantity is deduplicated concurrent model-footprint MiB:
 charge parameters plus buffers once for each distinct model/revision/precision
@@ -570,10 +575,14 @@ The pilot:
 4. reports paired F1/EM, parse/protocol success, retrieval recall, query/exposure
    counts, plan depth, stop reasons, and both retrieval strata.
 
-GO requires both:
+GO requires all six:
 
-    F1_baseline - F1_single_fp16 >= 0 overall
-    F1_baseline - F1_single_fp16 >= 0 on hidden_bridge
+    F1_baseline - F1_single_fp16 >= +5.0 points overall
+    paired bootstrap 95% CI lower bound > +2.0 points
+    exact two-sided McNemar p < 0.01
+    F1_baseline - F1_single_fp16 >= +8.0 points on hidden_bridge
+    abs(F1_baseline - F1_single_fp16) <= 2.0 points on fully_named
+    hidden_bridge follow-up firing rate >= 0.80 beyond step 1
 
 The committed pilot manifest has file SHA-256
 975210805c382788bb39c800266ae22a88cc526e0626bd8a0106c35d316a8bb1 and
@@ -595,10 +604,11 @@ pilot.
 The pilot path is implemented: scripts/run_campaign.py --kind pilot enforces
 one-worker baseline-then-single order and invokes scripts/check_pilot.py after
 execution. The checker recomputes metrics, validates artifact, cohort,
-environment, retrieval, prompt, stratum, and content hashes, and writes the
-content-addressed decision. Timing and accuracy execute modes require the GO
-artifact to be committed and unchanged. No target-A100 pilot or GO result is
-asserted yet; pilot execution and all downstream GPU runs remain pending.
+environment, retrieval, prompt, stratum, and content hashes, computes the paired
+bootstrap and exact McNemar test, aggregates fired/eligible follow-up counts, and
+writes the content-addressed decision. Timing and accuracy execute modes require
+the GO artifact to be committed and unchanged. No target-GPU pilot or GO result
+is asserted yet; pilot execution and all downstream GPU runs remain pending.
 
 Before any A100 phase, scripts/prefetch_assets.py downloads the pinned dataset
 configurations and model snapshots, validates all manifest bytes plus the corpus
@@ -630,6 +640,14 @@ preflight before scoring. The sole exception is a selected tiny allocation:
 after the selector and derived config are committed, it requires one separately
 labelled post-selection timing artifact before an exploratory throughput number
 is reported.
+
+The committed six-worker accuracy plan remains the byte-pinned 22-arm prefix.
+Production validates that file and its SHA first, then deterministically appends
+the ten already-configured mid/large arms in memory to execute all 32 static
+arms. The frozen manifest is not rewritten; every original worker assignment is
+a prefix of its expanded assignment. The timing contract covers exactly the 27
+non-tiny static arms. This propagation closes §14 BUG-9 and does not add any §16
+arm.
 
 The primary systems metric is steady-state end-to-end service inverse
 throughput: seconds per excluded A100 timing question, relative to uniform
@@ -850,78 +868,54 @@ across all arms); schema collapse (parse-OK 0.969/0.995/0.947/0.997 for
 planner/step_definer/extractor/qa); model family (Qwen3 vs Qwen2.5 ΔF1 +0.0485,
 n.s.).
 
-### 15.2 Working hypothesis — unverified, probably incomplete
+### 15.2 Independent diagnosis (2026-08-07)
 
-**This section is a lead, not a diagnosis.** It was produced by static reading
-plus retrieval-level probes, and no fix derived from it has been executed
-end-to-end. Treat it as one plausible account among several. It may be partly
-wrong, it is very likely incomplete, and the true cause may lie somewhere not
-named here — in the Extractor contract, the QA evidence filter, prompt/schema
-handling, plan-depth routing, the stop condition, or the aggregate route.
+The symptom was reproduced before consulting the former hypothesis: on the 731
+paired n750 IDs, MA F1 is 0.41246, single-hop F1 is 0.54196, Δ is −0.12949, and
+the win/loss/tie counts are exactly 89/202/440. Instrumented step-2 traces then
+identified three coupled causes in `_retrieval_decision`:
 
-Diagnose independently before acting on it. If the evidence contradicts this
-section, the evidence wins and this section should be rewritten. What is *not*
-hypothesis is §15.1 (the measured symptom) and §15.3 (the measured headroom):
-those are reproducible from the artifacts and scripts named.
+1. the task query omitted the original question;
+2. no task query fired without a prior answer passing the literal grounding
+   test, so the original query and identical top 10 were repeated; and
+3. task retrieval replaced rather than unioned the original-question ranking.
 
-The four candidate defects below are all in `_retrieval_decision`,
-`src/pipeline.py`.
+The first three leads were therefore correct as a cluster, but incomplete.
+Two adjacent defects were also confirmed. A parsed `aggregate` task with no
+grounded prior state skipped retrieval and sent QA empty evidence; it is now
+downgraded to question-answering. Follow-up firing divided task queries by all
+retrieval steps, including step 1, so perfect two-step behavior reported 0.5;
+answer records now expose later-step eligible and fired counts and aggregate the
+ratio over the correct denominator.
 
-**BUG-1 — the follow-up query discards the original question.**
+Extractor normalization and the QA evidence filter behave consistently with
+their contracts and are not the primary cause: neither can recover passages
+discarded upstream. Historical planner outputs also rule out the plan ceiling as
+the main mechanism because 726/750 plans had depth greater than one.
 
-```python
-query_parts = [task["task"]]
-```
+The former BUG-4 passage-expansion theory did not survive a leakage-free frozen-
+cohort benchmark. Production BM25 results were:
 
-The grounded follow-up query is `task | grounded_answers`; `q["question"]` is
-omitted. Measured on real planner sub-questions from
-`baseline_qwen2.5-1.5b_n750_seed7` (n=730, k=10):
+| Runtime-safe policy, 7/3 | hidden_bridge | fully_named |
+|---|---:|---:|
+| single original-question top 10 | 0.5077 | 0.8412 |
+| raw passage names | 0.5542 | 0.7692 |
+| exact-title + novelty guard | 0.6044 | 0.8065 |
+| named-anchor guarded hybrid | 0.5916 | 0.8437 |
 
-| Arm | both-gold recall@10 |
-|---|---:|
-| single query | 0.495 |
-| decomposed, equal read budget | 0.296 |
-| decomposed, double read budget | 0.410 |
+No passage-derived policy approached Gate A, and the strongest hidden result
+damaged fully_named by 3.47 points. Candidate-only variants were worse. The
+positive archived NER probe used gold supporting sentences and is not a live
+query policy. Passage-name expansion is therefore rejected in this pass rather
+than promoted as a fix.
 
-Decomposition moves retrieval backwards by 19.9 points at equal budget. The
-ORACLE arm reaching 0.8863 (§5.1) does so by *retaining* the question.
-
-**BUG-2 — the second hop is gated behind a verbatim substring test.**
-
-```python
-grounded_followup_fired = bool(step_index > 0 and grounded_answers)
-```
-
-`_grounded_prior_answers` admits only answers where `answer_grounded is True`,
-which requires `_answer_is_grounded` to find the QA answer as a literal token
-phrase inside Extractor spans. The Extractor emits a median of 22 words, so this
-check fails often. When it fails, control reaches the anchor branch and
-**re-issues step 1's identical query** — same top-10, zero new evidence.
-
-The pipeline then degenerates to single-hop retrieval plus ~4× the model calls.
-This is the primary suspect for the scale-invariant gap: the deficit is created
-upstream of the reader, so reader capacity cannot recover it. The firing rate has
-never been logged and must be instrumented as part of the fix.
-
-**BUG-3 — retrieval replaces instead of unioning.**
-
-Each branch performs exactly one `search_titles(...)`. The `components` list
-declares both `original_question_anchor` and `grounded_step_task`, but exactly
-one is ever `attempted` — the structure anticipates a union never implemented.
-ORACLE reaches 0.8863 by unioning anchor top-k/2 with follow-up top-k/2.
-
-**BUG-4 — the follow-up query is built from the digest, not the passages.**
-
-The bridge entity must survive retrieval → Extractor compression → QA answer →
-verbatim grounding check → query string. Four lossy stages. Measured
-compression: Extractor sees 1,588 prompt tokens and hands QA 376 (median 22
-words retained, p10 = 3). Gold answer present in Extractor output on 30.7% of MA
-losses versus 68.5% of wins.
-
-Meanwhile `single_any_recall` on hidden_bridge is 0.9684 — the passage naming
-the bridge entity is already retrieved at hop 1 in 97% of cases, and
-`retriever.passages(titles)` is available at the call site but never consulted
-for query construction.
+The selected 7/3 union follows the production-aligned oracle comparison: 5/5,
+6/4, and 7/3 reach hidden_bridge both-gold recall 0.9380, 0.9362, and 0.9298,
+respectively, while all preserve the 0.8412 fully_named ranking. Seven anchor
+slots were chosen to reduce live task-query drift for only 0.8 points of oracle
+recall relative to 5/5. Query construction whitelists the question, Step Definer
+task, and prior runtime state; analysis-only gold/stratum fields never enter
+production retrieval.
 
 ### 15.3 Proof the defect is fixable
 
@@ -937,18 +931,17 @@ unreachable by the first, on the stratum that is 1,097 of the frozen 1,500.
 fully_named has effectively no headroom — decomposition can only lose there,
 which is a required sanity check on any fix.
 
-### 15.4 Candidate fix, in order (verify before applying)
+### 15.4 Implemented repair and remaining validation
 
-1. **BUG-1** — include `q["question"]` in `query_parts`.
-2. **BUG-2** — when no grounded answer exists, still issue `anchor + task`
-   rather than bare `anchor`, so the second hop always contributes a distinct
-   query. Demote `answer_grounded` to telemetry. Log follow-up firing rate per
-   stratum.
-3. **BUG-3** — retrieve both components, dedupe, cap at k; populate both
-   `components` entries.
-4. **BUG-4** (phase 2) — derive follow-up candidates from hop-1 retrieved titles
-   and passage text.
-5. Bump `retrieval.QUERY_POLICY` and re-freeze the retrieval fingerprint.
+1. Include `q["question"]` in every later task query.
+2. Fire the task component on every later QA step, independent of verbatim
+   grounding; keep grounding as telemetry.
+3. Search both components and expose a stable deduplicated 7/3 union capped at
+   k=10.
+4. Downgrade evidence-free aggregate routes and correct the firing denominator.
+5. Pin policy v2, 7+3 quotas, and `grounded_followup_requires_evidence=false` in
+   every resume, pilot, prefetch, runner, and analysis validation path.
+6. Do not add passage-name expansion without a new untouched validation cohort.
 
 ### 15.5 Acceptance criteria
 
@@ -987,6 +980,14 @@ comparator (RankRAG 8B), a ~5-point margin.
 
 Artifacts predating the fix must not be used for any multi-agent versus
 single-hop claim (§14 BUG-7).
+
+Status on this branch: Gate A passes at 0.9271 hidden_bridge both-gold recall@10
+(n=1,097; single 0.5077), with fully_named retrieval unchanged at 0.8412. The
+CPU Gate B replay passes 1,097/1,097 = 1.0000 with no verbatim grounding. Gates C
+and D are **not run**: this workspace exposes no NVIDIA device, uses a CPU-only
+PyTorch build, has no cached Qwen3 snapshots, and all model revisions remain
+`TBD` by explicit scope. The repair is therefore not accepted for publication
+until a target-GPU n≥200 pilot independently passes both accuracy gates.
 
 ### 15.6 Merge hygiene, regression guards, post-merge integrity
 
@@ -1042,11 +1043,11 @@ requires for prompt hashes.
 
 | Check | Expectation |
 |---|---|
-| Full test suite | Currently **13 failed, 123 passed** — 11 from the un-propagated 32-arm matrix (§14 BUG-9), 2 from CRLF (§14 BUG-6). Must reach zero failures. |
+| Full test suite | **149 passed, 14 subtests passed, zero failures** on the offline CPU suite. |
 | Manifest hash pins | Every `*_sha256` in `config/experiment.yaml` matches the committed blob. |
-| Arm definitions | No duplicate or orphaned arm keys; every arm in `arms:` appears in exactly one family and in the campaign plan. |
-| `timing.run_ids` | Covers every arm intended for a latency claim, including the seven new single-hop arms (§16.5). |
-| `model_revisions` | No `TBD` (§14 BUG-5). |
+| Arm definitions | 32 unique static arms; the immutable 22-arm prefix expands deterministically to all 32 with no duplicate or orphan. |
+| `timing.run_ids` | Exactly the 27 current non-tiny static arms; §16 single-hop additions were not started. |
+| `model_revisions` | All five remain `TBD` by explicit scope; target-GPU launch remains blocked (§14 BUG-5). |
 | Dataset block | Unchanged from `f92391b`; `git diff f92391b..HEAD -- config/manifests/` must be empty. |
 | Orphaned artifacts | Everything in `results/` predates the current lineage (§14 BUG-7) and must be excluded from analysis inputs. |
 ## 16. Additive work — sequential deployment frontier
