@@ -55,9 +55,10 @@ change the multi-agent, stateful, variable-depth reasoning topology.
 
 ## 2. Research questions
 
-Across a 23× parameter range (0.6B to 14B, Qwen3 family), can role-specific
-model capacity and quantization reduce resident memory and accelerator work
-while retaining answer quality in a fully executed multi-agent RAG workflow?
+Across a 19.6× parameter range (0.752B to 14.768B measured, Qwen3 family), can
+role-specific model capacity and quantization reduce resident memory and
+accelerator work while retaining answer quality in a fully executed multi-agent
+RAG workflow?
 
 The prespecified questions are:
 
@@ -355,10 +356,13 @@ Immutable model revisions (to be pinned before campaign launch):
 | small | Qwen3-1.7B | 1.7B | TBD |
 | tiny | Qwen3-0.6B | 0.6B | TBD |
 
-The five sizes span a 23× parameter range within one architecture and training
-recipe, isolating capacity from training-data or architecture confounds.
+The five sizes span a 19.6× parameter range within one architecture and training
+recipe, isolating capacity from training-data or architecture confounds. The
+ratio uses measured parameter counts (Qwen3-0.6B = 0.752B, Qwen3-14B = 14.768B),
+not the nominal names; nominal 14/0.6 would overstate it as 23×.
 
-The static matrix contains 32 run IDs:
+The static matrix contains 32 run IDs. §15.4 extends this to 44; that section is
+additive and supersedes the count below once adopted:
 
 | Family | Count |
 |---|---:|
