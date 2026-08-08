@@ -83,6 +83,8 @@ class CampaignPlanTests(unittest.TestCase):
                 "gold_sentence_coverage": 1.0,
                 "initial_query_source": retrieval["initial_query_source"],
                 "grounded_followup_k": retrieval["grounded_followup_k"],
+                "anchor_k": retrieval["anchor_k"],
+                "task_k": retrieval["task_k"],
                 "grounded_followup_requires_evidence": (
                     retrieval["grounded_followup_requires_evidence"]
                 ),

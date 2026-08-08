@@ -93,7 +93,11 @@ def main() -> int:
             revision=dataset["revision"],
             configs=tuple(retrieval_config["corpus_configs"]),
         )
-        context = retrieval.RetrievalContext(corpus, k=int(retrieval_config["k"]))
+        context = retrieval.RetrievalContext(
+            corpus,
+            k=int(retrieval_config["k"]),
+            anchor_k=int(retrieval_config["anchor_k"]),
+        )
         fingerprint = context.fingerprint()
         if (
             fingerprint["corpus_passages"]
@@ -106,8 +110,12 @@ def main() -> int:
             != retrieval_config["initial_query_source"]
             or int(fingerprint["grounded_followup_k"])
             != int(retrieval_config["grounded_followup_k"])
-            or fingerprint["grounded_followup_requires_evidence"] is not True
-            or retrieval_config["grounded_followup_requires_evidence"] is not True
+            or int(fingerprint["anchor_k"])
+            != int(retrieval_config["anchor_k"])
+            or int(fingerprint["task_k"])
+            != int(retrieval_config["task_k"])
+            or fingerprint["grounded_followup_requires_evidence"] is not False
+            or retrieval_config["grounded_followup_requires_evidence"] is not False
         ):
             raise RuntimeError(f"cached corpus fingerprint changed: {fingerprint}")
     finally:

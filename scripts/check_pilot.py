@@ -18,7 +18,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src import prompts  # noqa: E402
-from src.metrics import exact_match, f1_score  # noqa: E402
+from src.metrics import (  # noqa: E402
+    exact_match,
+    exact_mcnemar,
+    f1_score,
+    joint_paired_bootstrap,
+)
 from src.contracts import EXPERIMENT_SCHEMA, PILOT_GATE_SCHEMA_VERSION  # noqa: E402
 from src.runner import resolve_treatments  # noqa: E402
 
@@ -108,8 +113,15 @@ def _load_pilot_run(
         != int(retrieval_config.get("grounded_followup_k", -2))
         or int(retrieval_meta.get("grounded_followup_k", -1))
         != int(retrieval_meta.get("k_per_step", -2))
-        or retrieval_meta.get("grounded_followup_requires_evidence") is not True
-        or retrieval_config.get("grounded_followup_requires_evidence") is not True
+        or int(retrieval_meta.get("anchor_k", -1))
+        != int(retrieval_config.get("anchor_k", -2))
+        or int(retrieval_meta.get("task_k", -1))
+        != int(retrieval_config.get("task_k", -2))
+        or int(retrieval_meta.get("anchor_k", -1))
+        + int(retrieval_meta.get("task_k", -1))
+        != int(retrieval_meta.get("k_per_step", -2))
+        or retrieval_meta.get("grounded_followup_requires_evidence") is not False
+        or retrieval_config.get("grounded_followup_requires_evidence") is not False
         or float(retrieval_meta.get("gold_sentence_coverage", -1)) != 1.0
     ):
         raise RuntimeError(f"{run_id}: pilot experiment fingerprint is stale")
@@ -138,6 +150,8 @@ def _load_pilot_run(
         "retrieval_query_count",
         "retrieval_step_count",
         "retrieval_anchor_gold_title_recall",
+        "retrieval_followup_eligible_step_count",
+        "retrieval_followup_fired_step_count",
         "retrieval_grounded_followup_firing_rate",
         "retrieval_incremental_task_gold_title_recall",
     }
@@ -246,14 +260,100 @@ def check_pilot(config_path: Path) -> dict:
         mean("baseline", "f1", "hidden_bridge")
         - mean("single_fp16", "f1", "hidden_bridge")
     )
+    fully_named_delta = 100 * (
+        mean("baseline", "f1", "fully_named")
+        - mean("single_fp16", "f1", "fully_named")
+    )
     decision = pilot["decision"]
+    paired_f1_differences = {
+        question_id: 100 * (
+            float(answers["baseline"][question_id]["f1"])
+            - float(answers["single_fp16"][question_id]["f1"])
+        )
+        for question_id in expected_ids
+    }
+    bootstrap = joint_paired_bootstrap(
+        {"overall_f1_points": paired_f1_differences},
+        n_resamples=int(decision["paired_bootstrap_resamples"]),
+        seed=int(decision["paired_bootstrap_seed"]),
+    )["overall_f1_points"]
+    mcnemar = exact_mcnemar(
+        [int(float(answers["baseline"][question_id]["em"])) for question_id in expected_ids],
+        [
+            int(float(answers["single_fp16"][question_id]["em"]))
+            for question_id in expected_ids
+        ],
+    )
+
+    hidden_baseline = [
+        row for row in answers["baseline"].values()
+        if row["retrieval_stratum"] == "hidden_bridge"
+    ]
+    followup_counts = []
+    for row in hidden_baseline:
+        values = []
+        for field in (
+            "retrieval_followup_fired_step_count",
+            "retrieval_followup_eligible_step_count",
+        ):
+            raw = row[field]
+            try:
+                numeric = float(raw)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError("pilot follow-up firing counts are malformed") from exc
+            if (
+                isinstance(raw, bool)
+                or not math.isfinite(numeric)
+                or numeric < 0
+                or not numeric.is_integer()
+            ):
+                raise RuntimeError("pilot follow-up firing counts are malformed")
+            values.append(int(numeric))
+        fired, eligible = values
+        if fired > eligible:
+            raise RuntimeError("pilot follow-up firing counts are malformed")
+        followup_counts.append((fired, eligible))
+    followup_fired = sum(fired for fired, _eligible in followup_counts)
+    followup_eligible = sum(eligible for _fired, eligible in followup_counts)
+    hidden_followup_firing_rate = (
+        followup_fired / followup_eligible if followup_eligible else 0.0
+    )
+
     overall_threshold = float(
         decision["pass_if_multiagent_minus_single_overall_at_least"]
     )
     hidden_threshold = float(
         decision["pass_if_multiagent_minus_single_hidden_bridge_at_least"]
     )
-    passed = overall_delta >= overall_threshold and hidden_delta >= hidden_threshold
+    bootstrap_lower_threshold = float(
+        decision["pass_if_paired_bootstrap_95pct_lower_bound_above"]
+    )
+    mcnemar_threshold = float(
+        decision["pass_if_mcnemar_exact_two_sided_p_below"]
+    )
+    fully_named_threshold = float(
+        decision["pass_if_absolute_multiagent_minus_single_fully_named_at_most"]
+    )
+    firing_threshold = float(
+        decision["pass_if_hidden_bridge_followup_firing_rate_at_least"]
+    )
+    decision_checks = {
+        "overall_f1_delta": overall_delta >= overall_threshold,
+        "paired_bootstrap_lower_bound": (
+            float(bootstrap["ci_lower"]) > bootstrap_lower_threshold
+        ),
+        "mcnemar_exact_two_sided": (
+            float(mcnemar["p_value"]) < mcnemar_threshold
+        ),
+        "hidden_bridge_f1_delta": hidden_delta >= hidden_threshold,
+        "fully_named_f1_delta_sanity": (
+            abs(fully_named_delta) <= fully_named_threshold
+        ),
+        "hidden_bridge_followup_firing": (
+            hidden_followup_firing_rate >= firing_threshold
+        ),
+    }
+    passed = all(decision_checks.values())
 
     strata = (None, "hidden_bridge", "fully_named")
     accuracy = {
@@ -360,9 +460,18 @@ def check_pilot(config_path: Path) -> dict:
             run_id: sha256_file(loaded[run_id][2]) for run_id in run_ids
         },
         "decision_rule": decision,
+        "decision_checks": decision_checks,
         "metrics": {
             "multiagent_minus_single_f1_points_overall": overall_delta,
             "multiagent_minus_single_f1_points_hidden_bridge": hidden_delta,
+            "multiagent_minus_single_f1_points_fully_named": fully_named_delta,
+            "paired_bootstrap_f1_points_overall": bootstrap,
+            "mcnemar_exact_two_sided_em": mcnemar,
+            "hidden_bridge_followup_firing": {
+                "eligible_steps": followup_eligible,
+                "fired_steps": followup_fired,
+                "rate": hidden_followup_firing_rate,
+            },
             "multiagent_minus_single_em_points_overall": (
                 accuracy["baseline"]["all"]["em"]
                 - accuracy["single_fp16"]["all"]["em"]
@@ -427,7 +536,7 @@ def verify_gate(
             "pilot_manifest_sha256", "experiment_fingerprint",
             "environment_lock_sha256", "git_commit", "n",
             "retrieval_strata_counts", "run_jsonl_sha256", "decision_rule",
-            "metrics", "accuracy_points", "retrieval_diagnostics",
+            "decision_checks", "metrics", "accuracy_points", "retrieval_diagnostics",
             "mechanism_diagnostics", "baseline_stop_reasons",
         ):
             if artifact.get(key) != fresh.get(key):

@@ -566,8 +566,15 @@ def validate_final_cohort(config: dict[str, Any], runs: dict[str, RunData]) -> N
             != int(retrieval_config.get("grounded_followup_k", -2))
             or int(retrieval_meta.get("grounded_followup_k", -1))
             != int(retrieval_meta.get("k_per_step", -2))
-            or retrieval_meta.get("grounded_followup_requires_evidence") is not True
-            or retrieval_config.get("grounded_followup_requires_evidence") is not True
+            or int(retrieval_meta.get("anchor_k", -1))
+            != int(retrieval_config.get("anchor_k", -2))
+            or int(retrieval_meta.get("task_k", -1))
+            != int(retrieval_config.get("task_k", -2))
+            or int(retrieval_meta.get("anchor_k", -1))
+            + int(retrieval_meta.get("task_k", -1))
+            != int(retrieval_meta.get("k_per_step", -2))
+            or retrieval_meta.get("grounded_followup_requires_evidence") is not False
+            or retrieval_config.get("grounded_followup_requires_evidence") is not False
             or float(retrieval_meta.get("gold_sentence_coverage", -1))
             != float(retrieval_config.get("required_gold_sentence_coverage", -2))
             or retrieval_meta.get(
@@ -1080,10 +1087,13 @@ def analyze_retrieval(
             summaries[group_name] = group
         output[run_id] = summaries
     return {
-        "retrieval_unit": "one_top_k_query_per_question_answering_step",
+        "retrieval_unit": "top_k_passage_exposure_per_question_answering_step",
         "query_policy": {
+            "policy": retrieval.QUERY_POLICY,
             "initial_query_source": retrieval.INITIAL_QUERY_SOURCE,
             "grounded_followup_k": retrieval.K,
+            "anchor_k": retrieval.ANCHOR_K,
+            "task_k": retrieval.K - retrieval.ANCHOR_K,
             "grounded_followup_requires_evidence": (
                 retrieval.GROUNDED_FOLLOWUP_REQUIRES_EVIDENCE
             ),

@@ -4,12 +4,50 @@ import unittest
 from src.metrics import (
     bootstrap_ci,
     clustered_ratio_bootstrap,
+    exact_mcnemar,
     holm_adjust,
     joint_paired_bootstrap,
 )
 
 
 class MetricsTests(unittest.TestCase):
+    def test_exact_mcnemar_counts_discordance_and_computes_two_sided_p(self):
+        result = exact_mcnemar(
+            [1, 1, 1, 1, 1, 0, 0],
+            [0, 0, 0, 0, 1, 1, 0],
+        )
+
+        self.assertEqual(result["n_pairs"], 7)
+        self.assertEqual(result["a_only_wins"], 4)
+        self.assertEqual(result["b_only_wins"], 1)
+        self.assertEqual(result["n_discordant"], 5)
+        self.assertAlmostEqual(result["p_value"], 0.375)
+
+    def test_exact_mcnemar_is_symmetric_and_handles_no_discordance(self):
+        forward = exact_mcnemar([1, 1, 1, 0], [0, 0, 1, 1])
+        reverse = exact_mcnemar([0, 0, 1, 1], [1, 1, 1, 0])
+
+        self.assertEqual(forward["p_value"], reverse["p_value"])
+        self.assertEqual(forward["a_only_wins"], reverse["b_only_wins"])
+        self.assertEqual(forward["b_only_wins"], reverse["a_only_wins"])
+        self.assertEqual(exact_mcnemar([0, 1], [0, 1])["p_value"], 1.0)
+
+    def test_exact_mcnemar_rejects_invalid_pairs(self):
+        with self.assertRaisesRegex(ValueError, "same length"):
+            exact_mcnemar([0], [0, 1])
+        with self.assertRaisesRegex(ValueError, "must not be empty"):
+            exact_mcnemar([], [])
+
+        invalid_cases = [
+            ([0, 2], [0, 1], "outcomes_a\\[1\\]"),
+            ([0, 1], [0, -1], "outcomes_b\\[1\\]"),
+            ([0, "1"], [0, 1], "outcomes_a\\[1\\]"),
+        ]
+        for outcomes_a, outcomes_b, message in invalid_cases:
+            with self.subTest(outcomes_a=outcomes_a, outcomes_b=outcomes_b):
+                with self.assertRaisesRegex(ValueError, message):
+                    exact_mcnemar(outcomes_a, outcomes_b)
+
     def test_bootstrap_ci_is_order_invariant(self):
         forward = bootstrap_ci([0.0, 1.0, 3.0, 8.0], n_resamples=500, seed=9)
         reverse = bootstrap_ci([8.0, 3.0, 1.0, 0.0], n_resamples=500, seed=9)

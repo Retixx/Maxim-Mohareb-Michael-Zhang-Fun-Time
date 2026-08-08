@@ -51,8 +51,14 @@ class PilotGateFixture:
             "gate_artifact": "analysis/pilot_gate.json",
             "decision": {
                 "primary_metric": "f1",
+                "paired_bootstrap_resamples": 200,
+                "paired_bootstrap_seed": 7,
                 "pass_if_multiagent_minus_single_overall_at_least": 0.0,
+                "pass_if_paired_bootstrap_95pct_lower_bound_above": -1.0,
+                "pass_if_mcnemar_exact_two_sided_p_below": 1.1,
                 "pass_if_multiagent_minus_single_hidden_bridge_at_least": 0.0,
+                "pass_if_absolute_multiagent_minus_single_fully_named_at_most": 100.0,
+                "pass_if_hidden_bridge_followup_firing_rate_at_least": 0.0,
                 "failure_action": "stop_before_final_accuracy_or_timing",
             },
         }
@@ -96,6 +102,8 @@ class PilotGateFixture:
             "gold_sentence_coverage": 1.0,
             "initial_query_source": retrieval["initial_query_source"],
             "grounded_followup_k": retrieval["grounded_followup_k"],
+            "anchor_k": retrieval["anchor_k"],
+            "task_k": retrieval["task_k"],
             "grounded_followup_requires_evidence": (
                 retrieval["grounded_followup_requires_evidence"]
             ),
@@ -150,9 +158,16 @@ class PilotGateFixture:
             "retrieval_all_gold": 1.0,
             "retrieval_step_count": 2.0 if run_id == "baseline" else 1.0,
             "retrieval_anchor_gold_title_recall": 1.0,
-            "retrieval_query_count": 2.0 if run_id == "baseline" else 1.0,
+            "retrieval_query_count": 3.0 if run_id == "baseline" else 1.0,
+            "retrieval_task_query_count": 1.0 if run_id == "baseline" else 0.0,
+            "retrieval_followup_eligible_step_count": (
+                1.0 if run_id == "baseline" else 0.0
+            ),
+            "retrieval_followup_fired_step_count": (
+                1.0 if run_id == "baseline" else 0.0
+            ),
             "retrieval_grounded_followup_firing_rate": (
-                0.5 if run_id == "baseline" else 0.0
+                1.0 if run_id == "baseline" else 0.0
             ),
             "retrieval_incremental_task_gold_title_recall": (
                 0.5 if run_id == "baseline" else 0.0
@@ -273,6 +288,8 @@ class PilotGateTests(unittest.TestCase):
 
         self.assertEqual(artifact["status"], "GO")
         self.assertTrue(artifact["passed"])
+        self.assertEqual(artifact["schema_version"], 4)
+        self.assertTrue(all(artifact["decision_checks"].values()))
         self.assertEqual(
             gate.verify_gate(
                 self.fixture.config_path,
@@ -336,10 +353,55 @@ class PilotGateTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "STOP"):
             gate.verify_gate(self.fixture.config_path, self.fixture.gate_path)
 
-    def test_grounded_followup_guard_requires_a_literal_boolean(self) -> None:
+    def test_all_spec15_decision_checks_fail_closed(self) -> None:
+        self.fixture.write_runs(baseline_correct=True, single_correct=False)
+        original = copy.deepcopy(self.fixture.config["pilot"]["decision"])
+        cases = (
+            (
+                "pass_if_multiagent_minus_single_overall_at_least",
+                101.0,
+                "overall_f1_delta",
+            ),
+            (
+                "pass_if_paired_bootstrap_95pct_lower_bound_above",
+                100.0,
+                "paired_bootstrap_lower_bound",
+            ),
+            (
+                "pass_if_mcnemar_exact_two_sided_p_below",
+                0.5,
+                "mcnemar_exact_two_sided",
+            ),
+            (
+                "pass_if_multiagent_minus_single_hidden_bridge_at_least",
+                101.0,
+                "hidden_bridge_f1_delta",
+            ),
+            (
+                "pass_if_absolute_multiagent_minus_single_fully_named_at_most",
+                99.0,
+                "fully_named_f1_delta_sanity",
+            ),
+            (
+                "pass_if_hidden_bridge_followup_firing_rate_at_least",
+                1.01,
+                "hidden_bridge_followup_firing",
+            ),
+        )
+        for decision_key, threshold, check_key in cases:
+            with self.subTest(check=check_key):
+                self.fixture.config["pilot"]["decision"] = copy.deepcopy(original)
+                self.fixture.config["pilot"]["decision"][decision_key] = threshold
+                self.fixture.write_config()
+                artifact = gate.check_pilot(self.fixture.config_path)
+                self.assertEqual(artifact["status"], "STOP")
+                self.assertFalse(artifact["passed"])
+                self.assertFalse(artifact["decision_checks"][check_key])
+
+    def test_followup_without_grounding_guard_requires_a_literal_boolean(self) -> None:
         self.fixture.config["retrieval"][
             "grounded_followup_requires_evidence"
-        ] = "true"
+        ] = "false"
         self.fixture.write_config()
         self.fixture.write_runs(baseline_correct=True, single_correct=False)
         with self.assertRaisesRegex(RuntimeError, "fingerprint is stale"):

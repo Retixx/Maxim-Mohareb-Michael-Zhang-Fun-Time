@@ -1696,6 +1696,7 @@ def run(
     retriever = retrieval.RetrievalContext(
         corpus,
         k=int(retr_cfg.get("k", retrieval.K)),
+        anchor_k=int(retr_cfg.get("anchor_k", retrieval.ANCHOR_K)),
     )
     expected_corpus_passages = int(retr_cfg.get("expected_corpus_passages", -1))
     if len(corpus) != expected_corpus_passages:
@@ -1721,16 +1722,23 @@ def run(
     ):
         raise AssertionError("configured grounded follow-up k does not match implementation")
     if fingerprint["grounded_followup_k"] != fingerprint["k_per_step"]:
-        raise AssertionError("grounded follow-up must own the full per-step passage budget")
+        raise AssertionError("follow-up search depth must match the per-step retrieval k")
     if (
-        fingerprint["grounded_followup_requires_evidence"] is not True
-        or retr_cfg.get("grounded_followup_requires_evidence") is not True
+        fingerprint["anchor_k"] != int(retr_cfg.get("anchor_k", -1))
+        or fingerprint["task_k"] != int(retr_cfg.get("task_k", -1))
+        or fingerprint["anchor_k"] + fingerprint["task_k"]
+        != fingerprint["k_per_step"]
     ):
-        raise AssertionError("configured grounded-state guard does not match implementation")
+        raise AssertionError("configured anchor/task fusion quota does not match implementation")
+    if (
+        fingerprint["grounded_followup_requires_evidence"] is not False
+        or retr_cfg.get("grounded_followup_requires_evidence") is not False
+    ):
+        raise AssertionError("follow-up must not be gated on verbatim grounding")
     print(
         f"  {len(corpus):,} passages, k={retriever.k} per question-answering step, "
         f"initial={fingerprint['initial_query_source']}, "
-        f"grounded-followup-k={fingerprint['grounded_followup_k']}, "
+        f"fusion={fingerprint['anchor_k']}+{fingerprint['task_k']}, "
         f"policy={fingerprint['query_policy']}"
     )
     coverage_questions = [*questions, *auxiliary_questions]

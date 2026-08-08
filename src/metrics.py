@@ -59,6 +59,61 @@ def f1_score(pred: str, gold: str) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
+def exact_mcnemar(
+    outcomes_a: Sequence[int | float | bool],
+    outcomes_b: Sequence[int | float | bool],
+) -> dict[str, float | int]:
+    """Return the exact two-sided McNemar test for paired binary outcomes.
+
+    ``a_only_wins`` counts pairs where A is one and B is zero;
+    ``b_only_wins`` counts the reverse.  Conditional on the number of
+    discordant pairs, the null distribution is Binomial(n, 0.5).  The exact
+    two-sided p-value is twice the lower tail at the smaller discordance count,
+    capped at one.  With no discordant pairs, the p-value is one.
+    """
+    try:
+        a_values = tuple(outcomes_a)
+        b_values = tuple(outcomes_b)
+    except TypeError as exc:
+        raise ValueError("paired outcomes must be finite sequences") from exc
+
+    if len(a_values) != len(b_values):
+        raise ValueError("paired outcomes must have the same length")
+    if not a_values:
+        raise ValueError("paired outcomes must not be empty")
+
+    for name, values in (("outcomes_a", a_values), ("outcomes_b", b_values)):
+        for index, value in enumerate(values):
+            if isinstance(value, (str, bytes)) or value not in (0, 1):
+                raise ValueError(f"{name}[{index}] is not binary: {value!r}")
+
+    a_only_wins = sum(
+        value_a == 1 and value_b == 0
+        for value_a, value_b in zip(a_values, b_values)
+    )
+    b_only_wins = sum(
+        value_a == 0 and value_b == 1
+        for value_a, value_b in zip(a_values, b_values)
+    )
+    n_discordant = a_only_wins + b_only_wins
+    if n_discordant == 0:
+        p_value = 1.0
+    else:
+        lower_tail = sum(
+            math.comb(n_discordant, successes)
+            for successes in range(min(a_only_wins, b_only_wins) + 1)
+        )
+        p_value = min(1.0, (2 * lower_tail) / (1 << n_discordant))
+
+    return {
+        "n_pairs": len(a_values),
+        "a_only_wins": a_only_wins,
+        "b_only_wins": b_only_wins,
+        "n_discordant": n_discordant,
+        "p_value": p_value,
+    }
+
+
 def auroc(scores: list[float], labels: list[float]) -> float:
     """AUROC via average ranks (the Mann-Whitney form)."""
     pairs = [(float(s), float(label)) for s, label in zip(scores, labels)

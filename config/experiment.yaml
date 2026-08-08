@@ -151,8 +151,14 @@ pilot:
   gate_artifact: analysis/pilot_gate.json
   decision:
     primary_metric: f1
-    pass_if_multiagent_minus_single_overall_at_least: 0.0
-    pass_if_multiagent_minus_single_hidden_bridge_at_least: 0.0
+    paired_bootstrap_resamples: 10000
+    paired_bootstrap_seed: 20260807
+    pass_if_multiagent_minus_single_overall_at_least: 5.0
+    pass_if_paired_bootstrap_95pct_lower_bound_above: 2.0
+    pass_if_mcnemar_exact_two_sided_p_below: 0.01
+    pass_if_multiagent_minus_single_hidden_bridge_at_least: 8.0
+    pass_if_absolute_multiagent_minus_single_fully_named_at_most: 2.0
+    pass_if_hidden_bridge_followup_firing_rate_at_least: 0.80
     failure_action: stop_before_final_accuracy_or_timing
 
 timing:
