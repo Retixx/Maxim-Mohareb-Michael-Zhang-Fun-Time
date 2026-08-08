@@ -299,6 +299,19 @@ class PilotGateTests(unittest.TestCase):
             artifact,
         )
 
+    def test_local_smoke_metadata_cannot_poison_production_discovery(self) -> None:
+        self.fixture.write_runs(baseline_correct=True, single_correct=False)
+        source = self.root / "results" / "baseline.meta.json"
+        poisoned = json.loads(source.read_text(encoding="utf-8"))
+        poisoned["local_smoke_mode"] = True
+        (self.root / "results" / "local-smoke.meta.json").write_text(
+            json.dumps(poisoned), encoding="utf-8"
+        )
+
+        artifact = self.fixture.write_gate()
+        self.assertEqual(artifact["status"], "GO")
+        self.assertTrue(artifact["production_eligible"])
+
     def test_logged_qa_fallback_is_valid_baseline_output(self) -> None:
         self.fixture.write_runs(baseline_correct=True, single_correct=False)
         jsonl_path = self.root / "results" / "baseline.jsonl"

@@ -327,6 +327,7 @@ class LocalSmokeConfigTests(unittest.TestCase):
                     "environment_lock_sha256": None,
                     "git_commit": "synthetic-local-smoke-commit",
                     "gpu_name": "NVIDIA GeForce RTX 3050",
+                    "execution_sessions": [{"gpu_uuid": "GPU-synthetic-3050"}],
                     "deduplicated_concurrent_model_footprint_mib": 512.0,
                     "stage_config_fingerprints": {
                         stage: treatment["config_fingerprint"]

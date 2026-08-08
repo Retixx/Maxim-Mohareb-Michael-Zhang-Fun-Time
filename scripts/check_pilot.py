@@ -230,6 +230,13 @@ def check_pilot(config_path: Path) -> dict:
         gpu_names = {meta.get("gpu_name") for meta in metas}
         if len(gpu_names) != 1 or None in gpu_names:
             raise RuntimeError("local smoke arms use different or missing GPUs")
+        gpu_uuids = {
+            session.get("gpu_uuid")
+            for meta in metas
+            for session in (meta.get("execution_sessions") or ())
+        }
+        if len(gpu_uuids) != 1 or None in gpu_uuids:
+            raise RuntimeError("local smoke arms use different or missing GPU UUIDs")
         fingerprint_sets = [
             set((meta.get("stage_config_fingerprints") or {}).values())
             for meta in metas
