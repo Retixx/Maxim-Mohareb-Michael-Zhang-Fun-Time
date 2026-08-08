@@ -1150,3 +1150,65 @@ comparator (RankRAG 8B), a ~5-point margin.
 
 Artifacts predating the fix must not be used for any multi-agent versus
 single-hop claim (§14 BUG-7).
+
+### 16.6 Merge hygiene, regression guards, post-merge integrity
+
+**Merge hygiene — the branch must fast-forward into `main`.**
+
+`multihop-vs-single-hop-rag-bug-fix` is cut from `main` at `3d6794f`. It must
+merge back without conflicts. Requirements:
+
+- Rebase onto `origin/main` before requesting a merge; never merge `main` into
+  the branch and back.
+- Verify with a dry run before pushing:
+  `git merge --no-commit --no-ff multihop-vs-single-hop-rag-bug-fix`, inspect,
+  then `git merge --abort`.
+- Confirm `git merge-base --is-ancestor origin/main <branch>` returns true so
+  the merge is a fast-forward.
+- Append to `SPEC.md` rather than rewriting existing sections; edit §5, §9, §12
+  surgically and leave §1–§4 untouched.
+- Do not reformat, reflow, or re-indent files you are not functionally
+  changing. Whitespace churn is the main source of avoidable conflicts here.
+- Add `.gitattributes` with `*.json text eol=lf` (§14 BUG-6) as the **first**
+  commit on the branch, before touching any manifest-adjacent file. Without it,
+  a CRLF checkout will produce spurious conflicts and hash-pin failures.
+
+**Regression guards — this defect must not return.**
+
+Fixing the code is insufficient; the fix must be enforced by tests that fail
+loudly if reverted. Add to `tests/`:
+
+1. `test_followup_query_contains_anchor` — assert the grounded follow-up query
+   string contains the original question. Fails if BUG-1 returns.
+2. `test_followup_fires_without_verbatim_grounding` — construct a state where no
+   prior answer passes `_answer_is_grounded` and assert step 2 still issues a
+   query distinct from step 1. Fails if BUG-2 returns.
+3. `test_retrieval_unions_both_components` — assert both `components` entries are
+   `attempted` on a grounded follow-up step and that returned titles are the
+   deduplicated union capped at k. Fails if BUG-3 returns.
+4. `test_retrieval_headroom_floor` — a fast, CPU-only, fixture-backed check that
+   hidden_bridge both-gold recall@10 on a frozen mini-corpus stays above the
+   accepted floor. This is the end-to-end canary.
+5. `test_query_policy_fingerprint_is_pinned` — assert
+   `retrieval.QUERY_POLICY` matches `config/experiment.yaml`, so a silent policy
+   change cannot ship.
+
+Any artifact whose recorded query-policy fingerprint does not match the current
+policy must be rejected by resume, pilot-gate, and analysis paths, as §5 already
+requires for prompt hashes.
+
+**Post-merge integrity audit.**
+
+`main` absorbed 142 commits from five deleted branches (`no-bs`,
+`results-n3000`, `smoke-handoff-20260807`, `final-3b-reference`,
+`spec-v3-13b-fixes`). Before any campaign, verify:
+
+| Check | Expectation |
+|---|---|
+| Full test suite | Currently **13 failed, 123 passed** — 11 from the un-propagated 32-arm matrix (§14 BUG-9), 2 from CRLF (§14 BUG-6). Must reach zero failures. |
+| Manifest hash pins | Every `*_sha256` in `config/experiment.yaml` matches the committed blob. |
+| Arm definitions | No duplicate or orphaned arm keys; every arm in `arms:` appears in exactly one family and in the campaign plan. |
+| `timing.run_ids` | Covers every arm intended for a latency claim, including the seven new single-hop arms (§15.5). |
+| `model_revisions` | No `TBD` (§14 BUG-5). |
+| Dataset block | Unchanged from `f92391b`; `git diff f92391b..HEAD -- config/manifests/` must be empty. |
+| Orphaned artifacts | Everything in `results/` predates the current lineage (§14 BUG-7) and must be excluded from analysis inputs. |
