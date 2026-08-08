@@ -184,7 +184,12 @@ def config_fingerprint(
 
 
 def resolved_revision_metadata(
-    model, tok, expected_model_revision: str, expected_tokenizer_revision: str
+    model,
+    tok,
+    expected_model_revision: str,
+    expected_tokenizer_revision: str,
+    *,
+    allow_unpinned_tbd: bool = False,
 ) -> dict:
     """Verify HF resolved commits when the installed library exposes them."""
     resolved_model = getattr(getattr(model, "config", None), "_commit_hash", None)
@@ -192,17 +197,28 @@ def resolved_revision_metadata(
         getattr(tok, "init_kwargs", {}).get("_commit_hash")
         or getattr(tok, "_commit_hash", None)
     )
-    if resolved_model and resolved_model != expected_model_revision:
+    if (
+        resolved_model
+        and resolved_model != expected_model_revision
+        and not (allow_unpinned_tbd and expected_model_revision == "TBD")
+    ):
         raise RuntimeError(
             f"model resolved to {resolved_model}, expected {expected_model_revision}"
         )
-    if resolved_tokenizer and resolved_tokenizer != expected_tokenizer_revision:
+    if (
+        resolved_tokenizer
+        and resolved_tokenizer != expected_tokenizer_revision
+        and not (allow_unpinned_tbd and expected_tokenizer_revision == "TBD")
+    ):
         raise RuntimeError(
             f"tokenizer resolved to {resolved_tokenizer}, expected {expected_tokenizer_revision}"
         )
     return {
         "resolved_model_revision": resolved_model or expected_model_revision,
         "resolved_tokenizer_revision": resolved_tokenizer or expected_tokenizer_revision,
+        "revision_pin_status": (
+            "unpinned_smoke_TBD" if allow_unpinned_tbd else "pinned"
+        ),
     }
 
 

@@ -44,6 +44,8 @@ from .pipeline import (
 )
 
 FLUSH_EVERY = 50  # SPEC §6
+LOCAL_SMOKE_PROFILE = "local_gpu_memory_matched_4bit_v1"
+LOCAL_SMOKE_MAX_BATCH_SIZE = 4
 
 
 def _validate_architecture_contract(cfg: dict) -> None:
@@ -1418,6 +1420,44 @@ def validate_environment_lock(cfg: dict, config_path: Path, lock_path: Path) -> 
     return lock
 
 
+def _validate_local_smoke_contract(
+    cfg: dict,
+    treatments: dict,
+    *,
+    pilot_mode: bool,
+    batch_size: int,
+    min_batch_size: int,
+) -> None:
+    """Keep the small-GPU acceptance replay isolated from production controls."""
+    smoke = cfg.get("local_smoke") or {}
+    pilot = cfg.get("pilot") or {}
+    if not pilot_mode or smoke.get("profile") != LOCAL_SMOKE_PROFILE:
+        raise ValueError("local smoke mode requires the explicit frozen pilot profile")
+    if int(pilot.get("n", -1)) < 200:
+        raise ValueError("local smoke mode requires at least 200 excluded questions")
+    if pilot.get("run_ids") != ["baseline", "single_fp16"]:
+        raise ValueError("local smoke mode requires the paired MA/single pilot arms")
+    if (
+        isinstance(batch_size, bool)
+        or not 1 <= int(batch_size) <= LOCAL_SMOKE_MAX_BATCH_SIZE
+        or min_batch_size != batch_size
+        or smoke.get("batch_size") != batch_size
+        or smoke.get("max_batch_size") != LOCAL_SMOKE_MAX_BATCH_SIZE
+    ):
+        raise ValueError("local smoke batch size must be fixed in [1, 4]")
+    if smoke.get("precision") != "4bit" or smoke.get("production_gate_authority") is not False:
+        raise ValueError("local smoke must be non-authoritative uniform 4bit")
+    model_id = smoke.get("model_id")
+    fingerprints = {row["config_fingerprint"] for row in treatments.values()}
+    if (
+        not treatments
+        or {row["model_id"] for row in treatments.values()} != {model_id}
+        or {row["precision"] for row in treatments.values()} != {"4bit"}
+        or len(fingerprints) != 1
+    ):
+        raise ValueError("local smoke treatment is not one memory-matched 4bit model")
+
+
 def run(
     cfg: dict,
     run_id: str,
@@ -1428,9 +1468,12 @@ def run(
     use_manifest: bool | None = None,
     timing_mode: bool = False,
     pilot_mode: bool = False,
+    local_smoke_mode: bool = False,
 ):
     if timing_mode and pilot_mode:
         raise ValueError("timing_mode and pilot_mode are mutually exclusive")
+    if local_smoke_mode and not pilot_mode:
+        raise ValueError("local_smoke_mode requires pilot_mode")
     _validate_architecture_contract(cfg)
     treatments = resolve_treatments(cfg, run_id)
     stage_precision = {s: t["precision"] for s, t in treatments.items()}
@@ -1448,6 +1491,16 @@ def run(
     )
     batch_size = batch_size if batch_size is not None else cfg["generation"]["batch_size"]
     min_batch_size = cfg["generation"].get("min_batch_size", batch_size)
+    if local_smoke_mode:
+        _validate_local_smoke_contract(
+            cfg,
+            treatments,
+            pilot_mode=pilot_mode,
+            batch_size=batch_size,
+            min_batch_size=min_batch_size,
+        )
+        if not torch.cuda.is_available():
+            raise RuntimeError("local retrieval smoke requires an NVIDIA CUDA device")
     # SPEC §5b prediction 4. Off by default: costs an extra prefill per batch, and
     # enabling it mid-project would make runs non-comparable in cost accounting.
     log_confidence = bool(cfg["generation"].get("log_confidence", False))
@@ -1464,7 +1517,7 @@ def run(
                 "--n/--seed cannot override a frozen final manifest; use the "
                 "explicit development-sample mode for prompt smoke tests"
             )
-        if batch_size != 32 or min_batch_size != 32:
+        if not local_smoke_mode and (batch_size != 32 or min_batch_size != 32):
             raise ValueError(
                 "final scored execution is pinned fail-closed to batch_size == "
                 "min_batch_size == 32"
@@ -1473,7 +1526,11 @@ def run(
         lock_path = _resolve_repo_path(
             cfg, cfg.get("environment_lock_path", "config/environment.lock.json")
         )
-        environment_lock = validate_environment_lock(cfg, config_path, lock_path)
+        environment_lock = (
+            None
+            if local_smoke_mode
+            else validate_environment_lock(cfg, config_path, lock_path)
+        )
         if (
             not pilot_mode
             and (cfg.get("pilot") or {}).get("required_before_final_campaign")
@@ -1523,6 +1580,8 @@ def run(
             ),
         )
         warmup_ids, preflight_meta = load_id_manifest(preflight_path)
+        if local_smoke_mode:
+            warmup_ids = warmup_ids[:batch_size]
         if len(warmup_ids) != batch_size or not set(warmup_ids) <= exclusions:
             raise ValueError(
                 "preflight manifest must contain exactly batch_size unique IDs, "
@@ -1781,6 +1840,10 @@ def run(
         "retrieval": fingerprint,
         "dataset_revision": ds_cfg.get("revision"),
     }
+    if local_smoke_mode:
+        experiment_fingerprint_payload["local_smoke_profile_sha256"] = (
+            _content_hash(cfg["local_smoke"])
+        )
     experiment_fingerprint = _content_hash(experiment_fingerprint_payload)
     if manifest_ids is not None and [q["question_id"] for q in questions] != manifest_ids:
         raise AssertionError("loaded questions do not exactly match frozen manifest order")
@@ -1796,7 +1859,11 @@ def run(
         questions = pilot_questions
         active_question_manifest_sha256 = pilot_meta["question_ids_sha256"]
         artifact_n = len(questions)
-        cohort_kind = "excluded_scored_pilot_gate"
+        cohort_kind = (
+            "excluded_local_smoke_gate"
+            if local_smoke_mode
+            else "excluded_scored_pilot_gate"
+        )
     else:
         active_question_manifest_sha256 = final_eval_question_ids_sha256
         artifact_n = n
@@ -1867,6 +1934,7 @@ def run(
         "batch_size": batch_size,
         "timing_mode": timing_mode,
         "pilot_mode": pilot_mode,
+        "local_smoke_mode": local_smoke_mode,
         "environment_lock_sha256": (
             _sha256_file(lock_path) if environment_lock is not None else None
         ),
@@ -1915,6 +1983,7 @@ def run(
         "experiment_fingerprint": experiment_fingerprint,
         "experiment_fingerprint_payload": experiment_fingerprint_payload,
         "cohort_kind": cohort_kind,
+        "local_smoke": copy.deepcopy(cfg.get("local_smoke")) if local_smoke_mode else None,
         "final_eval_question_ids_sha256": final_eval_question_ids_sha256,
         "timing_manifest_path": (
             str(timing_path) if timing_mode else None
@@ -2118,9 +2187,18 @@ def run(
                     torch.cuda.reset_peak_memory_stats()
                     torch.cuda.synchronize()
                 t_load = time.perf_counter()
+                unpinned_smoke_revision = bool(
+                    local_smoke_mode
+                    and revision == "TBD"
+                    and tokenizer_revision == "TBD"
+                )
                 model, tok = models.load_model(
-                    stage_model_id, precision, revision=revision,
-                    tokenizer_revision=tokenizer_revision,
+                    stage_model_id,
+                    precision,
+                    revision=None if unpinned_smoke_revision else revision,
+                    tokenizer_revision=(
+                        None if unpinned_smoke_revision else tokenizer_revision
+                    ),
                 )
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
@@ -2152,7 +2230,15 @@ def run(
                 torch.cuda.synchronize()
                 torch.cuda.reset_peak_memory_stats()
             resolved_revisions = models.resolved_revision_metadata(
-                model, tok, revision, tokenizer_revision
+                model,
+                tok,
+                revision,
+                tokenizer_revision,
+                allow_unpinned_tbd=bool(
+                    local_smoke_mode
+                    and revision == "TBD"
+                    and tokenizer_revision == "TBD"
+                ),
             )
             load_delta = (
                 (post_load_allocated - pre_load_allocated) / 1024**2
@@ -2467,6 +2553,10 @@ def main():
         help="score only the frozen excluded n=200 stop/go pilot cohort",
     )
     ap.add_argument(
+        "--local-smoke-mode", action="store_true",
+        help="run the bounded <=4 batch local-GPU pilot profile (never production GO)",
+    )
+    ap.add_argument(
         "--write-environment-lock", nargs="?", const="config/environment.lock.json",
         help="capture the selected A100 software/container/GPU lock and exit",
     )
@@ -2522,11 +2612,14 @@ def main():
         ap.error("timing/pilot modes are frozen production cohorts, not dev smoke tests")
     if args.timing_mode and args.pilot_mode:
         ap.error("--timing-mode and --pilot-mode are mutually exclusive")
+    if args.local_smoke_mode and not args.pilot_mode:
+        ap.error("--local-smoke-mode requires --pilot-mode")
     run(
         cfg, args.run, args.n, args.seed, args.batch_size,
         use_manifest=not args.dev_sample,
         timing_mode=args.timing_mode,
         pilot_mode=args.pilot_mode,
+        local_smoke_mode=args.local_smoke_mode,
     )
 
 

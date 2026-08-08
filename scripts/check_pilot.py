@@ -48,10 +48,15 @@ def _load_pilot_run(
     config: dict, run_id: str
 ) -> tuple[dict, list[dict], Path, list[dict]]:
     results_dir = repo_path(config.get("results_dir", "results"))
+    local_smoke = bool(config.get("local_smoke"))
     matches = []
     for meta_path in results_dir.glob("*.meta.json"):
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        if meta.get("run_id") == run_id and meta.get("pilot_mode") is True:
+        if (
+            meta.get("run_id") == run_id
+            and meta.get("pilot_mode") is True
+            and bool(meta.get("local_smoke_mode")) == local_smoke
+        ):
             matches.append((meta_path, meta))
     if len(matches) != 1:
         raise RuntimeError(
@@ -70,6 +75,11 @@ def _load_pilot_run(
         or meta.get("pilot_manifest_file_sha256") != pilot["manifest_file_sha256"]
         or not jsonl_path.exists()
         or meta.get("jsonl_sha256") != sha256_file(jsonl_path)
+        or bool(meta.get("local_smoke_mode")) != local_smoke
+        or (
+            local_smoke
+            and meta.get("local_smoke") != config.get("local_smoke")
+        )
     ):
         raise RuntimeError(f"{run_id}: incomplete or stale pilot artifact")
     expected_treatments = resolve_treatments(config, run_id)
@@ -162,6 +172,36 @@ def _load_pilot_run(
 
 def check_pilot(config_path: Path) -> dict:
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    local_smoke = bool(config.get("local_smoke"))
+    if local_smoke:
+        from scripts.run_retrieval_smoke import validate_smoke_config
+
+        validate_smoke_config(config)
+        smoke = config["local_smoke"]
+        source_path = repo_path(smoke["source_config_path"])
+        if not source_path.exists() or sha256_file(source_path) != smoke.get(
+            "source_config_sha256"
+        ):
+            raise RuntimeError("local smoke source config is missing or stale")
+        source = yaml.safe_load(source_path.read_text(encoding="utf-8"))
+        pilot_keys = (
+            "manifest_path",
+            "manifest_file_sha256",
+            "manifest_sha256",
+            "n",
+            "seed",
+            "retrieval_strata_counts",
+        )
+        if (
+            config.get("dataset") != source.get("dataset")
+            or config.get("retrieval") != source.get("retrieval")
+            or any(
+                (config.get("pilot") or {}).get(key)
+                != (source.get("pilot") or {}).get(key)
+                for key in pilot_keys
+            )
+        ):
+            raise RuntimeError("local smoke changed a frozen source input")
     pilot = config.get("pilot") or {}
     run_ids = list(pilot.get("run_ids") or ())
     if run_ids != ["baseline", "single_fp16"]:
@@ -181,13 +221,54 @@ def check_pilot(config_path: Path) -> dict:
     git_commits = {loaded[run_id][0].get("git_commit") for run_id in run_ids}
     if len(fingerprints) != 1 or None in fingerprints:
         raise RuntimeError("pilot arms use different experiment fingerprints")
-    if (
-        len(env_locks) != 1
-        or None in env_locks
-        or len(git_commits) != 1
-        or None in git_commits
-        or "unknown" in git_commits
-    ):
+    if len(git_commits) != 1 or None in git_commits or "unknown" in git_commits:
+        raise RuntimeError("pilot arms use different environment/code revisions")
+    if local_smoke:
+        if env_locks != {None}:
+            raise RuntimeError("local smoke must not claim a production environment lock")
+        metas = [loaded[run_id][0] for run_id in run_ids]
+        gpu_names = {meta.get("gpu_name") for meta in metas}
+        if len(gpu_names) != 1 or None in gpu_names:
+            raise RuntimeError("local smoke arms use different or missing GPUs")
+        fingerprint_sets = [
+            set((meta.get("stage_config_fingerprints") or {}).values())
+            for meta in metas
+        ]
+        if (
+            any(len(values) != 1 for values in fingerprint_sets)
+            or fingerprint_sets[0] != fingerprint_sets[1]
+            or any(meta.get("batch_size") != config["generation"]["batch_size"] for meta in metas)
+        ):
+            raise RuntimeError("local smoke arms are not memory matched")
+        resolved_revisions = []
+        for run_id in run_ids:
+            loads = [
+                record
+                for record in loaded[run_id][3]
+                if record.get("record_type") == "model_load"
+            ]
+            resolved = {
+                (
+                    record.get("resolved_model_revision"),
+                    record.get("resolved_tokenizer_revision"),
+                )
+                for record in loads
+            }
+            if not loads or len(resolved) != 1 or any(
+                value in {None, "TBD"}
+                for pair in resolved
+                for value in pair
+            ):
+                raise RuntimeError("local smoke runtime revision is missing or inconsistent")
+            resolved_revisions.append(resolved)
+        if resolved_revisions[0] != resolved_revisions[1]:
+            raise RuntimeError("local smoke arms resolved different model revisions")
+        footprints = {
+            meta.get("deduplicated_concurrent_model_footprint_mib") for meta in metas
+        }
+        if len(footprints) != 1 or None in footprints:
+            raise RuntimeError("local smoke arms are not memory matched")
+    elif len(env_locks) != 1 or None in env_locks:
         raise RuntimeError("pilot arms use different environment/code revisions")
 
     answers: dict[str, dict[str, dict]] = {}
@@ -431,10 +512,18 @@ def check_pilot(config_path: Path) -> dict:
         for reason in ("plan_complete", "semantic_inability")
     }
 
+    gate_profile = "local_smoke" if local_smoke else "production_a100"
     artifact = {
         "schema_version": PILOT_GATE_SCHEMA_VERSION,
-        "status": "GO" if passed else "STOP",
+        "gate_profile": gate_profile,
+        "status": (
+            "PASS_LOCAL_SMOKE" if passed else "FAIL_LOCAL_SMOKE"
+        ) if local_smoke else ("GO" if passed else "STOP"),
         "passed": passed,
+        "production_eligible": not local_smoke,
+        "local_smoke_profile_sha256": (
+            content_hash(config["local_smoke"]) if local_smoke else None
+        ),
         "source_config_file_sha256": sha256_file(config_path),
         "pilot_manifest_file_sha256": sha256_file(manifest_path),
         "pilot_manifest_sha256": pilot["manifest_sha256"],
@@ -512,6 +601,8 @@ def verify_gate(
         expected != content_hash(semantic)
         or artifact.get("passed") is not True
         or artifact.get("status") != "GO"
+        or artifact.get("gate_profile") != "production_a100"
+        or artifact.get("production_eligible") is not True
         or not source_config_ok
         or artifact.get("pilot_manifest_sha256") != pilot.get("manifest_sha256")
         or artifact.get("pilot_manifest_file_sha256")
