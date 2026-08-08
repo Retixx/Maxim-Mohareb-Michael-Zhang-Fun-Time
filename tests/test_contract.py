@@ -24,6 +24,25 @@ TINY_RUNS = {
     "qa_tiny",
     "ma_uniform_tiny",
 }
+ROLES = ("planner", "stepdef", "extractor", "qa")
+STATIC_TIERS = ("8bit", "4bit", "mid", "small", "tiny", "large")
+STATIC_RUNS = {
+    "baseline",
+    "single_fp16",
+    *(f"{role}_{tier}" for tier in STATIC_TIERS for role in ROLES),
+    *(f"ma_uniform_{tier}" for tier in STATIC_TIERS),
+}
+SECTION_16_ADDITIONS = {
+    *(f"{role}_14b_4bit" for role in ROLES),
+    "ma_uniform_14b_4bit",
+    "single_8bit",
+    "single_4bit",
+    "single_mid",
+    "single_small",
+    "single_tiny",
+    "single_large",
+    "single_14b_4bit",
+}
 
 
 def _line_hash(values: list[str]) -> str:
@@ -46,16 +65,26 @@ class FrozenContractTests(unittest.TestCase):
 
     def test_static_matrix_and_selector_are_closed(self) -> None:
         runs = self.config["runs"]
-        self.assertEqual(len(runs), 22)
+        self.assertEqual(len(runs), 32)
+        self.assertEqual(set(runs), STATIC_RUNS)
+        self.assertEqual(set(runs) & SECTION_16_ADDITIONS, set())
         self.assertEqual(set(runs) & TINY_RUNS, TINY_RUNS)
         self.assertEqual(runs["single_fp16"], {"solo": "fp16"})
 
         selector = self.config["allocation_selector"]
         self.assertEqual(
             set(selector["candidates"]),
-            {"base_fp16", "base_8bit", "base_4bit", "small_fp16", "tiny_fp16"},
+            {
+                "large_fp16",
+                "base_fp16",
+                "base_8bit",
+                "base_4bit",
+                "mid_fp16",
+                "small_fp16",
+                "tiny_fp16",
+            },
         )
-        self.assertEqual(selector["candidate_allocation_count"], 5**4)
+        self.assertEqual(selector["candidate_allocation_count"], 7**4)
         self.assertEqual(
             selector["tiny_eligibility_gate"]["ineligible_action"],
             "remove_tiny_for_that_role_only",

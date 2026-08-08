@@ -22,6 +22,25 @@ from scripts.run_campaign import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+ROLES = ("planner", "stepdef", "extractor", "qa")
+STATIC_TIERS = ("8bit", "4bit", "mid", "small", "tiny", "large")
+EXPECTED_STATIC_RUNS = {
+    "baseline",
+    "single_fp16",
+    *(f"{role}_{tier}" for tier in STATIC_TIERS for role in ROLES),
+    *(f"ma_uniform_{tier}" for tier in STATIC_TIERS),
+}
+SECTION_16_ADDITIONS = {
+    *(f"{role}_14b_4bit" for role in ROLES),
+    "ma_uniform_14b_4bit",
+    "single_8bit",
+    "single_4bit",
+    "single_mid",
+    "single_small",
+    "single_tiny",
+    "single_large",
+    "single_14b_4bit",
+}
 
 
 class CampaignPlanTests(unittest.TestCase):
@@ -34,9 +53,13 @@ class CampaignPlanTests(unittest.TestCase):
     def test_accuracy_plan_assigns_every_static_arm_once(self) -> None:
         plan = build_plan(self.config, kind="accuracy", workers=7, seed=42)
         assigned = [run_id for values in plan["assignments"].values() for run_id in values]
-        self.assertEqual(len(assigned), 22)
+        self.assertEqual(len(assigned), 32)
+        self.assertEqual(STATIC_RUNS, EXPECTED_STATIC_RUNS)
+        self.assertEqual(set(self.config["runs"]), EXPECTED_STATIC_RUNS)
         self.assertEqual(set(assigned), STATIC_RUNS)
         self.assertEqual(len(assigned), len(set(assigned)))
+        self.assertEqual(set(self.config["runs"]) - set(assigned), set())
+        self.assertEqual(set(assigned) & SECTION_16_ADDITIONS, set())
 
     def test_plan_is_worker_count_independent_in_global_order(self) -> None:
         one = build_plan(self.config, kind="accuracy", workers=1, seed=7)

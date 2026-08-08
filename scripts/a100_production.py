@@ -11,7 +11,6 @@ import argparse
 import hashlib
 import json
 import os
-import random
 import socket
 import subprocess
 import sys
@@ -213,7 +212,7 @@ def _load_campaign_tools():
 
 
 def load_frozen_accuracy_plan(config: dict) -> dict:
-    static_runs, _build, _complete, validate_matrix, _gate = _load_campaign_tools()
+    static_runs, build_plan, _complete, validate_matrix, _gate = _load_campaign_tools()
     validate_matrix(config)
     if _sha256(FROZEN_PLAN_PATH) != FROZEN_PLAN_SHA256:
         raise RuntimeError("frozen accuracy plan file hash mismatch")
@@ -225,20 +224,54 @@ def load_frozen_accuracy_plan(config: dict) -> dict:
         or plan.get("logical_workers") != FROZEN_WORKERS
     ):
         raise RuntimeError("frozen accuracy plan header mismatch")
-    expected_order = sorted(static_runs)
-    random.Random(FROZEN_SEED).shuffle(expected_order)
-    expected_assignments = {
-        str(index): expected_order[index::FROZEN_WORKERS]
+    frozen_order = list(plan.get("ordered_run_ids") or ())
+    frozen_run_ids = set(frozen_order)
+    frozen_assignments = {
+        str(index): frozen_order[index::FROZEN_WORKERS]
         for index in range(FROZEN_WORKERS)
     }
-    if plan.get("ordered_run_ids") != expected_order:
-        raise RuntimeError("frozen accuracy order differs from executable contract")
-    if plan.get("assignments") != expected_assignments:
-        raise RuntimeError("frozen accuracy assignments differ from executable contract")
-    flattened = [run_id for values in expected_assignments.values() for run_id in values]
-    if len(flattened) != 22 or set(flattened) != static_runs or len(set(flattened)) != 22:
-        raise RuntimeError("accuracy plan must assign every static arm exactly once")
-    return plan
+    if (
+        len(frozen_order) != 22
+        or len(frozen_run_ids) != 22
+        or not frozen_run_ids < static_runs
+        or plan.get("assignments") != frozen_assignments
+    ):
+        raise RuntimeError("frozen accuracy plan must remain the exact 22-arm prefix")
+
+    canonical = build_plan(
+        config,
+        kind="accuracy",
+        workers=FROZEN_WORKERS,
+        seed=FROZEN_SEED,
+    )
+    extension = [
+        run_id for run_id in canonical["ordered_run_ids"]
+        if run_id not in frozen_run_ids
+    ]
+    combined_order = [*frozen_order, *extension]
+    combined_assignments = {
+        str(index): combined_order[index::FROZEN_WORKERS]
+        for index in range(FROZEN_WORKERS)
+    }
+    if (
+        len(extension) != 10
+        or len(combined_order) != 32
+        or len(set(combined_order)) != 32
+        or set(combined_order) != static_runs
+        or any(
+            combined_assignments[str(index)][:len(frozen_assignments[str(index)])]
+            != frozen_assignments[str(index)]
+            for index in range(FROZEN_WORKERS)
+        )
+    ):
+        raise RuntimeError("expanded accuracy plan must assign all 32 arms exactly once")
+    return {
+        **plan,
+        "frozen_ordered_run_ids": frozen_order,
+        "frozen_assignments": frozen_assignments,
+        "ordered_run_ids": combined_order,
+        "assignments": combined_assignments,
+    }
 
 
 def build_phase_plan(config: dict, phase: str, worker_index: int) -> dict:

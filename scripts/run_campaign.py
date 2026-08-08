@@ -8,7 +8,7 @@ Examples::
     CUDA_VISIBLE_DEVICES=0 python scripts/run_campaign.py --kind timing --execute
 
 Every accuracy arm is assigned whole to one worker. Timing is restricted to one
-worker and the prespecified matrix excludes the five 0.5B appendix-floor arms;
+worker and the prespecified matrix excludes the five 0.6B appendix-floor arms;
 a frozen derived config may add exactly one selected tiny system for separately
 labelled post-selection timing.
 """
@@ -38,9 +38,11 @@ from src.pipeline import load_id_manifest  # noqa: E402
 from src.runner import resolve_treatments, validate_environment_lock  # noqa: E402
 STATIC_RUNS = {
     "baseline",
-    *(f"{role}_{tier}" for tier in ("8bit", "4bit", "small", "tiny")
+    *(f"{role}_{tier}"
+      for tier in ("8bit", "4bit", "mid", "small", "tiny", "large")
       for role in ("planner", "stepdef", "extractor", "qa")),
-    "ma_uniform_8bit", "ma_uniform_4bit", "ma_uniform_small", "ma_uniform_tiny",
+    *(f"ma_uniform_{tier}"
+      for tier in ("8bit", "4bit", "mid", "small", "tiny", "large")),
     "single_fp16",
 }
 TINY_RUNS = {
@@ -253,16 +255,22 @@ def validate_matrix(config: dict) -> None:
         allowed.add(frozenset(STATIC_RUNS | {OPTIMIZED_RUN}))
     if frozenset(runs) not in allowed:
         raise RuntimeError(
-            f"static matrix must be the exact 22-run contract; missing={sorted(STATIC_RUNS-runs)}, "
+            f"static matrix must be the exact 32-run contract; missing={sorted(STATIC_RUNS-runs)}, "
             f"extra={sorted(runs-STATIC_RUNS)}"
         )
     selector = config.get("allocation_selector") or {}
-    if selector.get("candidate_allocation_count") != 625:
-        raise RuntimeError("allocation selector must declare exactly 625 candidates")
+    if selector.get("candidate_allocation_count") != 7**4:
+        raise RuntimeError("allocation selector must declare exactly 2401 candidates")
     if set(selector.get("candidates") or {}) != {
-        "base_fp16", "base_8bit", "base_4bit", "small_fp16", "tiny_fp16"
+        "large_fp16", "base_fp16", "base_8bit", "base_4bit", "mid_fp16",
+        "small_fp16", "tiny_fp16",
     }:
-        raise RuntimeError("selector candidate set must cover all five frozen tiers")
+        raise RuntimeError("selector candidate set must cover all seven frozen tiers")
+    timing_runs = set((config.get("timing") or {}).get("run_ids") or ())
+    if timing_runs != STATIC_RUNS - TINY_RUNS:
+        raise RuntimeError(
+            "timing.run_ids must cover every non-tiny static arm exactly once"
+        )
     generation = config.get("generation") or {}
     if generation.get("batch_size") != 32 or generation.get("min_batch_size") != 32:
         raise RuntimeError("production batch size must be pinned fail-closed at 32")

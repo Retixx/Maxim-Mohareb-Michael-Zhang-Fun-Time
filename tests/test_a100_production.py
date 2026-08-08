@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import tempfile
@@ -12,6 +13,7 @@ from unittest.mock import patch
 import yaml
 
 from scripts.a100_production import (
+    FROZEN_PLAN_PATH,
     FROZEN_PLAN_SHA256,
     PersistentPhaseClaim,
     _claim_is_complete,
@@ -24,6 +26,35 @@ from scripts.a100_production import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+EXPECTED_FROZEN_PLAN_SHA256 = (
+    "511e2b9f974400daffe58f29f8905e4dc4b692cb86516903ab982e4eab53b456"
+)
+ACCURACY_EXTENSION_ORDER = [
+    "planner_large",
+    "extractor_mid",
+    "extractor_large",
+    "planner_mid",
+    "qa_large",
+    "ma_uniform_mid",
+    "stepdef_large",
+    "qa_mid",
+    "ma_uniform_large",
+    "stepdef_mid",
+]
+SECTION_16_ADDITIONS = {
+    "planner_14b_4bit",
+    "stepdef_14b_4bit",
+    "extractor_14b_4bit",
+    "qa_14b_4bit",
+    "ma_uniform_14b_4bit",
+    "single_8bit",
+    "single_4bit",
+    "single_mid",
+    "single_small",
+    "single_tiny",
+    "single_large",
+    "single_14b_4bit",
+}
 
 
 class _CudaProperties:
@@ -94,22 +125,46 @@ class A100ProductionTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "certifiable physical GPU UUID"):
                 certify_one_full_a100()
 
-    def test_frozen_plan_is_exact_six_shard_22_arm_contract(self) -> None:
-        plan = load_frozen_accuracy_plan(self.config)
-        flattened = [
+    def test_frozen_plan_is_extended_in_memory_without_mutating_manifest(self) -> None:
+        self.assertEqual(FROZEN_PLAN_SHA256, EXPECTED_FROZEN_PLAN_SHA256)
+        self.assertEqual(
+            hashlib.sha256(FROZEN_PLAN_PATH.read_bytes()).hexdigest(),
+            EXPECTED_FROZEN_PLAN_SHA256,
+        )
+        frozen = json.loads(FROZEN_PLAN_PATH.read_text(encoding="utf-8"))
+        frozen_flattened = [
             run_id
             for index in range(6)
-            for run_id in plan["assignments"][str(index)]
+            for run_id in frozen["assignments"][str(index)]
         ]
-        self.assertEqual(len(flattened), 22)
-        self.assertEqual(len(set(flattened)), 22)
-        self.assertEqual(len(FROZEN_PLAN_SHA256), 64)
+        self.assertEqual(len(frozen["ordered_run_ids"]), 22)
+        self.assertEqual(len(frozen_flattened), 22)
+        self.assertEqual(len(set(frozen_flattened)), 22)
+
+        plan = load_frozen_accuracy_plan(self.config)
+        self.assertEqual(len(plan["ordered_run_ids"]), 32)
+        self.assertEqual(plan["ordered_run_ids"][:22], frozen["ordered_run_ids"])
+        self.assertEqual(plan["ordered_run_ids"][22:], ACCURACY_EXTENSION_ORDER)
+        for index in range(6):
+            worker = str(index)
+            frozen_worker = frozen["assignments"][worker]
+            self.assertEqual(
+                plan["assignments"][worker][:len(frozen_worker)],
+                frozen_worker,
+            )
+            self.assertEqual(
+                plan["assignments"][worker],
+                plan["ordered_run_ids"][index::6],
+            )
+        self.assertEqual(set(plan["ordered_run_ids"]), set(self.config["runs"]))
+        self.assertEqual(set(self.config["runs"]) - set(plan["ordered_run_ids"]), set())
+        self.assertEqual(set(plan["ordered_run_ids"]) & SECTION_16_ADDITIONS, set())
+
         built = build_phase_plan(self.config, "accuracy", 5)
         self.assertEqual(built["logical_workers"], 6)
-        self.assertEqual(
-            built["assignments"]["5"], plan["assignments"]["5"]
-        )
-        with self.assertRaisesRegex(ValueError, "\[0, 6\)"):
+        self.assertEqual(built["ordered_run_ids"], plan["ordered_run_ids"])
+        self.assertEqual(built["assignments"], plan["assignments"])
+        with self.assertRaisesRegex(ValueError, r"\[0, 6\)"):
             build_phase_plan(self.config, "accuracy", 6)
 
     def test_selected_accuracy_is_single_authorized_run(self) -> None:

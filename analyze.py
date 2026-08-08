@@ -925,12 +925,12 @@ def analyze_role_families(
     n_resamples: int = DEFAULT_BOOTSTRAP_RESAMPLES,
     seed: int = 0,
 ) -> dict[str, Any]:
-    """Primary Q-vs-S and aggressive-4bit secondary role families."""
+    """Primary 8-bit-vs-mid and aggressive-4bit-vs-mid role families."""
     primary = _family_analysis(
         runs,
         left_suffix="8bit",
-        right_suffix="small",
-        family_name="primary_3b8_vs_1p5b_fp16",
+        right_suffix="mid",
+        family_name="primary_8b8_vs_4b_fp16",
         n_resamples=n_resamples,
         seed=seed,
         adjust_f1=True,
@@ -938,19 +938,19 @@ def analyze_role_families(
     secondary = _family_analysis(
         runs,
         left_suffix="4bit",
-        right_suffix="small",
-        family_name="secondary_3b4_vs_1p5b_fp16",
+        right_suffix="mid",
+        family_name="secondary_8b4_vs_4b_fp16",
         n_resamples=n_resamples,
         seed=seed + 100,
         adjust_f1=True,
     )
     primary["interpretation"] = (
-        "Positive means the 3B 8-bit treatment retained more accuracy than the "
-        "near-memory-matched 1.5B FP16 treatment. Inference is on direct paired "
+        "Positive means the 8B 8-bit treatment retained more accuracy than the "
+        "near-memory-matched 4B FP16 treatment. Inference is on direct paired "
         "differences; overlap of separate arm CIs is not used."
     )
     secondary["interpretation"] = (
-        "Aggressive 3B 4-bit is a separately corrected secondary family, not a "
+        "Aggressive 8B 4-bit is a separately corrected secondary family, not a "
         "clean bit-width dose-response continuation of LLM.int8."
     )
     return {"primary": primary, "secondary_4bit": secondary}
@@ -1168,7 +1168,14 @@ def analyze_role_costs(
         return {}
     output: dict[str, Any] = {}
     for family_index, (label, suffix) in enumerate(
-        (("3b_8bit", "8bit"), ("3b_4bit", "4bit"), ("1p5b_fp16", "small"))
+        (
+            ("8b_8bit", "8bit"),
+            ("8b_4bit", "4bit"),
+            ("4b_fp16", "mid"),
+            ("1p7b_fp16", "small"),
+            ("0p6b_fp16", "tiny"),
+            ("14b_fp16", "large"),
+        )
     ):
         run_ids = [role_run(role, suffix) for role in ROLES]
         if not all(run_id in runs for run_id in run_ids):
@@ -1223,7 +1230,7 @@ def analyze_solo(
     if SOLO_RUN not in runs or BASELINE_RUN not in runs:
         return None
     output: dict[str, Any] = {
-        "contrast_direction": "single_3b_fp16_minus_uniform_multiagent_3b_fp16",
+        "contrast_direction": "single_8b_fp16_minus_uniform_multiagent_8b_fp16",
         "prespecified": True,
         "resampling_unit": "question",
     }
@@ -1279,7 +1286,7 @@ def analyze_optimized_system(
     if selected_run_id not in runs or BASELINE_RUN not in runs:
         return None
     output: dict[str, Any] = {
-        "contrast_direction": "optimized_minus_uniform_multiagent_3b_fp16",
+        "contrast_direction": "optimized_minus_uniform_multiagent_8b_fp16",
         "claim_status": "exploratory_same_sample_post_selection",
         "resampling_unit": "question",
         "warning": (
@@ -1330,36 +1337,36 @@ def treated_model_memory(run: RunData, role: str) -> float:
 
 
 def near_memory_match(runs: dict[str, RunData]) -> dict[str, Any]:
-    """Report, rather than erase, the discrete 3B8/1.5B-FP16 budget gap."""
+    """Report, rather than erase, the discrete 8B8/4B-FP16 budget gap."""
     per_role: dict[str, Any] = {}
     for role in ROLES:
-        q_run, s_run = role_run(role, "8bit"), role_run(role, "small")
-        _require_runs(runs, [q_run, s_run], "near-memory-match")
-        q_memory = treated_model_memory(runs[q_run], role)
-        s_memory = treated_model_memory(runs[s_run], role)
-        gap = q_memory - s_memory
-        q_system_memory = _memory_mib(runs[q_run])
-        s_system_memory = _memory_mib(runs[s_run])
-        system_gap = q_system_memory - s_system_memory
+        quantized_run, mid_run = role_run(role, "8bit"), role_run(role, "mid")
+        _require_runs(runs, [quantized_run, mid_run], "near-memory-match")
+        quantized_memory = treated_model_memory(runs[quantized_run], role)
+        mid_memory = treated_model_memory(runs[mid_run], role)
+        gap = quantized_memory - mid_memory
+        quantized_system_memory = _memory_mib(runs[quantized_run])
+        mid_system_memory = _memory_mib(runs[mid_run])
+        system_gap = quantized_system_memory - mid_system_memory
         per_role[role] = {
             "treated_model": {
-                "3b_8bit_mib": q_memory,
-                "1p5b_fp16_mib": s_memory,
-                "gap_mib_3b8_minus_1p5b": gap,
-                "gap_percent_of_1p5b": 100 * gap / s_memory,
+                "8b_8bit_mib": quantized_memory,
+                "4b_fp16_mib": mid_memory,
+                "gap_mib_8b8_minus_4b_fp16": gap,
+                "gap_percent_of_4b_fp16": 100 * gap / mid_memory,
                 "lower_memory_arm": (
-                    "1p5b_fp16" if gap > 0 else "3b_8bit" if gap < 0 else "equal"
+                    "4b_fp16" if gap > 0 else "8b_8bit" if gap < 0 else "equal"
                 ),
             },
             "one_role_full_system_deduplicated_concurrent": {
-                "3b_8bit_mib": q_system_memory,
-                "1p5b_fp16_mib": s_system_memory,
-                "gap_mib_3b8_minus_1p5b": system_gap,
-                "gap_percent_of_1p5b": 100 * system_gap / s_system_memory,
+                "8b_8bit_mib": quantized_system_memory,
+                "4b_fp16_mib": mid_system_memory,
+                "gap_mib_8b8_minus_4b_fp16": system_gap,
+                "gap_percent_of_4b_fp16": 100 * system_gap / mid_system_memory,
                 "lower_memory_arm": (
-                    "1p5b_fp16"
+                    "4b_fp16"
                     if system_gap > 0
-                    else "3b_8bit" if system_gap < 0 else "equal"
+                    else "8b_8bit" if system_gap < 0 else "equal"
                 ),
             },
         }
@@ -2236,7 +2243,7 @@ def analyze_latency_batches(
                 output_tokens / total_wall if total_wall else None
             )
             baseline = baseline_rates.get(stage)
-            result["ratio_to_uniform_ma_3b_fp16"] = (
+            result["ratio_to_uniform_ma_8b_fp16"] = (
                 float(result["estimate"]) / baseline if baseline else None
             )
             stages[stage] = result
@@ -2356,7 +2363,7 @@ def analyze_latency_batches(
         for run_id, estimate in system_estimates.items():
             system = output["runs"][run_id]["system"]
             if run_id == BASELINE_RUN:
-                system["ratio_to_uniform_ma_3b_fp16"] = 1.0
+                system["ratio_to_uniform_ma_8b_fp16"] = 1.0
                 system["ratio_ci_lower"] = 1.0
                 system["ratio_ci_upper"] = 1.0
             else:
@@ -2367,7 +2374,7 @@ def analyze_latency_batches(
                     where=baseline_draws > 0,
                 )
                 finite = np.sort(ratio_draws[np.isfinite(ratio_draws)])
-                system["ratio_to_uniform_ma_3b_fp16"] = estimate / baseline_system
+                system["ratio_to_uniform_ma_8b_fp16"] = estimate / baseline_system
                 system["ratio_ci_lower"] = float(finite[int(0.025 * len(finite))])
                 system["ratio_ci_upper"] = float(
                     finite[min(int(0.975 * len(finite)), len(finite) - 1)]
@@ -2532,7 +2539,7 @@ def select_allocation(
     alpha: float = 0.05,
     eligible_tiny_roles: set[str] | None = None,
 ) -> dict[str, Any]:
-    """Enumerate the 5^4 universe, then apply role-specific tiny feasibility.
+    """Enumerate the 7^4 universe, then apply role-specific tiny feasibility.
 
     Candidate F1 is the prespecified additive approximation from single-role
     effects.  Memory is the sum of *distinct* configuration footprints, so using
@@ -2653,7 +2660,7 @@ def select_allocation(
                 "at_least_negative_margin"
             ),
             "bootstrap_draws": draw_count,
-            "bootstrap_shared_across_all_16_nonzero_role_effects": True,
+            "bootstrap_shared_across_all_24_nonzero_role_effects": True,
         },
         "tie_break": [
             "minimum_memory",
@@ -2687,7 +2694,7 @@ def validate_selector_contract(config: dict[str, Any]) -> dict[str, Any]:
             f"{SELECTOR_CONFIGS}"
         )
     if contract.get("candidate_allocation_count") != len(SELECTOR_CONFIGS) ** len(ROLES):
-        raise AnalysisError("allocation_selector candidate count must be exactly 625")
+        raise AnalysisError("allocation_selector candidate count must be exactly 2401")
     if contract.get("output_run_id") != OPTIMIZED_RUN:
         raise AnalysisError(f"allocation_selector output_run_id must be {OPTIMIZED_RUN}")
     gate = contract.get("tiny_eligibility_gate") or {}
@@ -2965,8 +2972,8 @@ def _markdown(report: dict[str, Any]) -> str:
     role_analysis = report.get("role_analysis")
     if role_analysis:
         for key, title in (
-            ("primary", "Primary: 3B 8-bit minus 1.5B FP16"),
-            ("secondary_4bit", "Secondary: 3B 4-bit minus 1.5B FP16"),
+            ("primary", "Primary: 8B 8-bit minus 4B FP16"),
+            ("secondary_4bit", "Secondary: 8B 4-bit minus 4B FP16"),
         ):
             family = role_analysis[key]
             lines.extend([
@@ -3006,7 +3013,7 @@ def _markdown(report: dict[str, Any]) -> str:
         lines.append("")
     if report.get("solo_vs_multiagent"):
         comparison = report["solo_vs_multiagent"]
-        lines.extend(["## Single-agent versus uniform multi-agent 3B FP16", ""])
+        lines.extend(["## Single-agent versus uniform multi-agent 8B FP16", ""])
         for metric in ("f1", "em"):
             estimate = comparison[metric]
             lines.append(
@@ -3152,12 +3159,12 @@ def _markdown(report: dict[str, Any]) -> str:
         lines.extend([
             "## A100 steady-state end-to-end service inverse throughput",
             "",
-            "| Run | service seconds/question (95% CI) | ratio to uniform MA 3B FP16 | calls/question |",
+            "| Run | service seconds/question (95% CI) | ratio to uniform MA 8B FP16 | calls/question |",
             "|---|---:|---:|---:|",
         ])
         for run_id, timing in sorted(latency_runs.items()):
             system = timing["system"]
-            ratio = system.get("ratio_to_uniform_ma_3b_fp16")
+            ratio = system.get("ratio_to_uniform_ma_8b_fp16")
             ratio_text = f"{ratio:.3f}" if ratio is not None else "n/a"
             lines.append(
                 f"| {run_id} | {system['estimate_seconds_per_question']:.4f} "
@@ -3193,7 +3200,7 @@ def build_report(
             "n_resamples": n_resamples,
             "bootstrap_seed": bootstrap_seed,
             "ci_overlap_used_for_inference": False,
-            "zero_point_five_b_scope": (
+            "zero_point_six_b_scope": (
                 "lower_limit_appendix_plus_role_specific_protocol_gate_for_selector"
             ),
         },
@@ -3205,7 +3212,7 @@ def build_report(
     family_ids = [
         role_run(role, suffix)
         for role in ROLES
-        for suffix in ("8bit", "4bit", "small")
+        for suffix in ("8bit", "4bit", "mid")
     ]
     if all(run_id in runs for run_id in family_ids):
         report["role_analysis"] = analyze_role_families(
@@ -3336,7 +3343,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "permit a non-final dry/intermediate report; final analysis fails closed "
-            "unless all 22 static accuracy and configured timing arms are present"
+            "unless all 32 static accuracy and configured timing arms are present"
         ),
     )
     return parser.parse_args()

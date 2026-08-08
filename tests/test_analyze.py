@@ -9,18 +9,26 @@ from analyze import (
     AnalysisError,
     EXPECTED_FINAL_MANIFEST_SHA256,
     RunData,
+    SELECTOR_CONFIGS,
     STATIC_RUN_IDS,
     analyze_call_counts,
     analyze_evidence,
     analyze_latency_batches,
+    analyze_optimized_system,
+    analyze_role_costs,
+    analyze_role_families,
     analyze_selection_churn,
+    analyze_solo,
     _complete_matching_accuracy_run,
     _validate_analysis_environment_lock,
     content_hash,
+    build_report,
     discover_runs,
     load_run,
     paired_differences,
     pareto_frontier,
+    near_memory_match,
+    role_run,
     select_allocation,
     verify_selection_artifact,
     validate_campaign_completeness,
@@ -28,7 +36,24 @@ from analyze import (
 
 
 ROLES = ("planner", "step_definer", "extractor", "qa")
-CONFIGS = ("base_fp16", "base_8bit", "base_4bit", "small_fp16", "tiny_fp16")
+CONFIGS = (
+    "large_fp16",
+    "base_fp16",
+    "base_8bit",
+    "base_4bit",
+    "mid_fp16",
+    "small_fp16",
+    "tiny_fp16",
+)
+FOOTPRINTS = {
+    "large_fp16": 200.0,
+    "base_fp16": 100.0,
+    "base_8bit": 60.0,
+    "base_4bit": 40.0,
+    "mid_fp16": 55.0,
+    "small_fp16": 50.0,
+    "tiny_fp16": 10.0,
+}
 TIMING_HASH = "1" * 64
 
 
@@ -106,6 +131,7 @@ class AnalyzeTests(unittest.TestCase):
                     _validate_analysis_environment_lock(config)
 
     def test_final_completeness_gate_requires_full_accuracy_and_timing_matrix(self):
+        self.assertEqual(len(STATIC_RUN_IDS), 32)
         config = {
             "runs": {run_id: {} for run_id in STATIC_RUN_IDS},
             "timing": {"run_ids": ["baseline"]},
@@ -221,12 +247,15 @@ class AnalyzeTests(unittest.TestCase):
         with self.assertRaisesRegex(AnalysisError, "not paired"):
             paired_differences(a, b, "f1")
 
-    def test_selector_enumerates_five_configs_and_fixed_charges(self):
+    def test_selector_enumerates_seven_configs_and_fixed_charges(self):
+        self.assertEqual(SELECTOR_CONFIGS, CONFIGS)
         effects = {
             role: {
+                "large_fp16": -2.0,
                 "base_fp16": 0.0,
                 "base_8bit": -0.2,
                 "base_4bit": -0.3,
+                "mid_fp16": -2.0,
                 "small_fp16": -0.4,
                 "tiny_fp16": -2.0,
             }
@@ -240,16 +269,14 @@ class AnalyzeTests(unittest.TestCase):
                        for configuration, effect in effects[role].items()}
                 for role in ROLES
             },
-            footprints_mib={
-                "base_fp16": 100.0,
-                "base_8bit": 60.0,
-                "base_4bit": 40.0,
-                "small_fp16": 50.0,
-                "tiny_fp16": 10.0,
-            },
+            footprints_mib=FOOTPRINTS,
             margin_points=1.0,
         )
-        self.assertEqual(result["candidate_count"], 5**4)
+        self.assertEqual(result["candidate_count"], 7**4)
+        self.assertEqual(
+            result["criterion"]["bootstrap_shared_across_all_24_nonzero_role_effects"],
+            True,
+        )
         # all@4bit and all@small violate the margin. all@8bit is feasible and
         # costs one 60-MiB fixed charge, less than feasible mixed configs.
         self.assertEqual(
@@ -266,12 +293,8 @@ class AnalyzeTests(unittest.TestCase):
                            for configuration, effect in effects[role].items()}
                     for role in ROLES
                 },
-                footprints_mib={
-                    "base_fp16": 100.0,
-                    "base_8bit": 60.0,
-                    "base_4bit": 40.0,
-                    "small_fp16": 50.0,
-                },
+                footprints_mib={key: value for key, value in FOOTPRINTS.items()
+                                if key != "large_fp16"},
             )
 
     def test_selector_allows_uniform_no_change(self):
@@ -290,13 +313,7 @@ class AnalyzeTests(unittest.TestCase):
                        for configuration, effect in effects[role].items()}
                 for role in ROLES
             },
-            footprints_mib={
-                "base_fp16": 100,
-                "base_8bit": 60,
-                "base_4bit": 40,
-                "small_fp16": 50,
-                "tiny_fp16": 10,
-            },
+            footprints_mib=FOOTPRINTS,
             margin_points=0.5,
         )
         self.assertEqual(
@@ -306,9 +323,11 @@ class AnalyzeTests(unittest.TestCase):
     def test_selector_uses_ni_lower_bound_not_only_point_estimate(self):
         effects = {
             role: {
+                "large_fp16": -2.0,
                 "base_fp16": 0.0,
                 "base_8bit": -0.2,
                 "base_4bit": -2.0,
+                "mid_fp16": -2.0,
                 "small_fp16": -2.0,
                 "tiny_fp16": -2.0,
             }
@@ -318,9 +337,11 @@ class AnalyzeTests(unittest.TestCase):
         # its lower bootstrap bound is -4.0 and therefore cannot pass NI.
         draws = {
             role: {
+                "large_fp16": [-2.0] * 100,
                 "base_fp16": [0.0] * 100,
                 "base_8bit": [-1.0] * 50 + [0.6] * 50,
                 "base_4bit": [-2.0] * 100,
+                "mid_fp16": [-2.0] * 100,
                 "small_fp16": [-2.0] * 100,
                 "tiny_fp16": [-2.0] * 100,
             }
@@ -330,13 +351,7 @@ class AnalyzeTests(unittest.TestCase):
             baseline_f1_points=80.0,
             role_effects_points=effects,
             role_effect_draws_points=draws,
-            footprints_mib={
-                "base_fp16": 100,
-                "base_8bit": 60,
-                "base_4bit": 40,
-                "small_fp16": 50,
-                "tiny_fp16": 10,
-            },
+            footprints_mib=FOOTPRINTS,
             margin_points=1.0,
         )
         self.assertNotEqual(
@@ -345,6 +360,143 @@ class AnalyzeTests(unittest.TestCase):
         self.assertGreaterEqual(
             result["selected"]["predicted_effect_ci_lower"], -1.0
         )
+
+    def test_selector_applies_tiny_eligibility_per_role(self):
+        effects = {
+            role: {configuration: 0.0 for configuration in CONFIGS}
+            for role in ROLES
+        }
+        result = select_allocation(
+            baseline_f1_points=80.0,
+            role_effects_points=effects,
+            role_effect_draws_points={
+                role: {configuration: [effect] * 100
+                       for configuration, effect in effects[role].items()}
+                for role in ROLES
+            },
+            footprints_mib=FOOTPRINTS,
+            eligible_tiny_roles={"qa"},
+        )
+        self.assertEqual(result["eligible_tiny_roles"], ["qa"])
+        self.assertEqual(result["candidate_count"], 2401)
+        self.assertEqual(result["eligible_candidate_count"], 6**3 * 7)
+        self.assertEqual(result["eligibility_filtered_count"], 2401 - 6**3 * 7)
+        self.assertTrue(all(
+            configuration != "tiny_fp16"
+            for role, configuration in result["selected"]["allocation"].items()
+            if role != "qa"
+        ))
+
+    def test_role_families_use_mid_not_small_as_near_memory_peer(self):
+        runs = {
+            role_run(role, suffix): make_run(role_run(role, suffix))
+            for role in ROLES
+            for suffix in ("8bit", "4bit", "mid")
+        }
+        families = analyze_role_families(runs, n_resamples=100, seed=0)
+        self.assertEqual(
+            families["primary"]["family"], "primary_8b8_vs_4b_fp16"
+        )
+        self.assertEqual(
+            families["primary"]["contrast_direction"], "8bit_minus_mid"
+        )
+        self.assertEqual(
+            families["secondary_4bit"]["family"], "secondary_8b4_vs_4b_fp16"
+        )
+        self.assertEqual(
+            families["secondary_4bit"]["contrast_direction"], "4bit_minus_mid"
+        )
+
+    def test_report_role_family_readiness_requires_mid_arms(self):
+        runs = {
+            role_run(role, suffix): make_run(role_run(role, suffix))
+            for role in ROLES
+            for suffix in ("8bit", "4bit", "mid")
+        }
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "analyze.validate_final_cohort"
+        ), mock.patch("analyze.near_memory_match", return_value={"status": "tested"}):
+            report = build_report(
+                {},
+                runs,
+                Path(directory),
+                n_resamples=100,
+                freeze_selection=False,
+                require_complete=False,
+            )
+        self.assertIn("role_analysis", report)
+        self.assertNotIn("role_analysis_status", report)
+
+    def test_role_costs_cover_all_six_treatment_axes(self):
+        runs = {"baseline": make_run("baseline")}
+        for role in ROLES:
+            for suffix in ("8bit", "4bit", "mid", "small", "tiny", "large"):
+                run_id = role_run(role, suffix)
+                runs[run_id] = make_run(run_id)
+        costs = analyze_role_costs(runs, n_resamples=100, seed=0)
+        self.assertEqual(set(costs), {
+            "8b_8bit", "8b_4bit", "4b_fp16", "1p7b_fp16", "0p6b_fp16",
+            "14b_fp16",
+        })
+        for family in costs.values():
+            self.assertEqual(family["contrast_direction"], "baseline_minus_treatment")
+            self.assertEqual(set(family["metrics"]["f1"]), set(ROLES))
+
+    def test_system_contrast_directions_name_the_8b_reference(self):
+        baseline = make_run("baseline")
+        solo = analyze_solo(
+            {"baseline": baseline, "single_fp16": make_run("single_fp16")},
+            n_resamples=100,
+            seed=0,
+        )
+        self.assertEqual(
+            solo["contrast_direction"],
+            "single_8b_fp16_minus_uniform_multiagent_8b_fp16",
+        )
+        optimized = analyze_optimized_system(
+            {"baseline": baseline, "ma_optimized_exploratory": make_run(
+                "ma_optimized_exploratory"
+            )},
+            n_resamples=100,
+            seed=0,
+        )
+        self.assertEqual(
+            optimized["contrast_direction"],
+            "optimized_minus_uniform_multiagent_8b_fp16",
+        )
+
+    def test_near_memory_match_uses_mid_runs_and_current_memory_keys(self):
+        runs = {}
+        for role in ROLES:
+            for suffix, treated_mib, system_mib in (
+                ("8bit", 8500.0, 24500.0),
+                ("mid", 8000.0, 24000.0),
+            ):
+                run_id = role_run(role, suffix)
+                run = make_run(run_id)
+                runs[run_id] = RunData(**{
+                    **run.__dict__,
+                    "meta": {
+                        **run.meta,
+                        "deduplicated_concurrent_model_footprint_mib": system_mib,
+                        "stages": {role: {"model_footprint_mib": treated_mib}},
+                    },
+                })
+        result = near_memory_match(runs)
+        expected_keys = {
+            "8b_8bit_mib",
+            "4b_fp16_mib",
+            "gap_mib_8b8_minus_4b_fp16",
+            "gap_percent_of_4b_fp16",
+            "lower_memory_arm",
+        }
+        for comparison in result["per_role"].values():
+            self.assertEqual(set(comparison["treated_model"]), expected_keys)
+            self.assertEqual(
+                set(comparison["one_role_full_system_deduplicated_concurrent"]),
+                expected_keys,
+            )
+            self.assertEqual(comparison["treated_model"]["lower_memory_arm"], "4b_fp16")
 
     def test_pareto_is_measured_nondominance_without_interpolation(self):
         points = [
@@ -468,7 +620,7 @@ class AnalyzeTests(unittest.TestCase):
             available["runs"]["baseline"]["stages"]["qa"]["estimate"], 2.5
         )
         self.assertEqual(
-            available["runs"]["baseline"]["stages"]["qa"]["ratio_to_uniform_ma_3b_fp16"],
+            available["runs"]["baseline"]["stages"]["qa"]["ratio_to_uniform_ma_8b_fp16"],
             1.0,
         )
 
