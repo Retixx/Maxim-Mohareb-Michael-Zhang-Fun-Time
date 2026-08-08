@@ -1,0 +1,36 @@
+{
+  "k": 10,
+  "anchor_k": 7,
+  "minimum_both_gold_recall": 0.75,
+  "passages": [
+    {
+      "title": "Polish-Russian War (film)",
+      "sentences": ["Polish-Russian War is a Polish film directed by Xawery Zulawski."]
+    },
+    {
+      "title": "Xawery Zulawski",
+      "sentences": ["Xawery Zulawski studied at Lodz Academy."]
+    },
+    {"title": "Noise 0", "sentences": ["Polish Russian War film director feature zero."]},
+    {"title": "Noise 1", "sentences": ["Polish Russian War film director feature one."]},
+    {"title": "Noise 2", "sentences": ["Polish Russian War film director feature two."]},
+    {"title": "Noise 3", "sentences": ["Polish Russian War film director feature three."]},
+    {"title": "Noise 4", "sentences": ["Polish Russian War film director feature four."]},
+    {"title": "Noise 5", "sentences": ["Polish Russian War film director feature five."]},
+    {"title": "Noise 6", "sentences": ["Polish Russian War film director feature six."]},
+    {"title": "Noise 7", "sentences": ["Polish Russian War film director feature seven."]},
+    {"title": "Noise 8", "sentences": ["Polish Russian War film director feature eight."]},
+    {"title": "Noise 9", "sentences": ["Polish Russian War film director feature nine."]},
+    {"title": "Noise 10", "sentences": ["Polish Russian War film director feature ten."]},
+    {"title": "Noise 11", "sentences": ["Polish Russian War film director feature eleven."]}
+  ],
+  "questions": [
+    {
+      "question_id": "headroom-canary-1",
+      "question": "Who directed the film Polish-Russian War?",
+      "followup_task": "Where did Xawery Zulawski study?",
+      "answer": "Lodz Academy",
+      "gold_titles": ["Polish-Russian War (film)", "Xawery Zulawski"]
+    }
+  ]
+}

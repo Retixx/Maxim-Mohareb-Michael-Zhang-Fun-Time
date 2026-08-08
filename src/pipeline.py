@@ -456,6 +456,13 @@ def _step_task(q: dict, idx: dict, step_index: int) -> tuple[dict, str]:
         # parse in telemetry.
         if task_type not in {"aggregate", "question-answering"}:
             task_type = "question-answering"
+        if task_type == "aggregate" and not _grounded_prior_answers(
+            step_history_for(q, idx, before_step=step_index)
+        ):
+            # Aggregate has no retrieval/Extractor route. Without grounded prior
+            # state it would ask QA to answer from an empty evidence set, so keep
+            # the model's task text but force evidence acquisition.
+            task_type = "question-answering"
         return {"type": task_type, "task": task.strip()}, source
 
     plan = sub_questions_for(q, idx)
@@ -480,42 +487,45 @@ def _retrieval_decision(
     task: dict,
     retriever,
 ) -> dict:
-    """Build one frozen retrieval event without consulting gold data."""
+    """Build one frozen anchored-union event without consulting gold data."""
     history = step_history_for(q, idx, before_step=step_index)
     grounded_answers = _grounded_prior_answers(history)
-    grounded_followup_fired = bool(step_index > 0 and grounded_answers)
 
     anchor_query = q["question"]
-    anchor_titles: list[str] = []
+    anchor_titles = retriever.index.search_titles(anchor_query, retriever.k)
+    task_attempted = bool(step_index > 0 and retriever.task_k > 0)
     task_query = None
     task_titles: list[str] = []
-    if grounded_followup_fired:
-        query_parts = [task["task"]]
-        task_norm = retrieval.norm(task["task"])
+    if task_attempted:
+        query_parts = [anchor_query, task["task"]]
         query_parts.extend(
             answer
             for answer in grounded_answers
-            if retrieval.norm(answer) not in task_norm
+            if not _answer_is_grounded(answer, query_parts)
         )
         task_query = " | ".join(query_parts)
         task_titles = retriever.index.search_titles(task_query, retriever.k)
         query = task_query
-        titles = task_titles
-        query_source = "grounded_step_task"
+        titles = retrieval.fuse_rankings(
+            anchor_titles,
+            task_titles,
+            k=retriever.k,
+            anchor_k=retriever.anchor_k,
+        )
+        query_source = "anchor_task_union"
     else:
-        anchor_titles = retriever.index.search_titles(anchor_query, retriever.k)
         query = anchor_query
-        titles = anchor_titles
+        titles = list(anchor_titles[:retriever.k])
         query_source = "original_question_anchor"
 
     components = [{
         "name": "original_question_anchor",
-        "attempted": not grounded_followup_fired,
-        "query": anchor_query if not grounded_followup_fired else None,
+        "attempted": True,
+        "query": anchor_query,
         "titles": anchor_titles,
     }, {
         "name": "grounded_step_task",
-        "attempted": grounded_followup_fired,
+        "attempted": task_attempted,
         "query": task_query,
         "titles": task_titles,
     }]
@@ -527,13 +537,17 @@ def _retrieval_decision(
         "raw_step_task": task["task"],
         "grounded_prior_answers": grounded_answers,
         "query_source": query_source,
-        "grounded_followup_fired": grounded_followup_fired,
+        # Historical field name retained for artifact continuity. Under v2 it
+        # means the later-step task component fired, not that grounding gated it.
+        "grounded_followup_fired": task_attempted,
         "anchor_query": anchor_query,
         "anchor_titles": anchor_titles,
-        "task_component_attempted": grounded_followup_fired,
+        "task_component_attempted": task_attempted,
         "task_query": task_query,
         "task_titles": task_titles,
-        "query_count": 1,
+        "anchor_k": retriever.anchor_k,
+        "task_k": retriever.task_k,
+        "query_count": sum(component["attempted"] for component in components),
         "components": components,
         "query": query,
         "titles": titles,
@@ -1120,8 +1134,25 @@ def build_answer_records(
             component.get("name") == "grounded_step_task"
             for component in attempted_components
         )
+        eligible_followup_events = [
+            event for position, event in enumerate(retrieval_events)
+            if bool(event.get("attempted", event.get("query") is not None))
+            and event.get("task_type", "question-answering")
+            == "question-answering"
+            and int(event.get("step", position + 1)) > 1
+        ]
+        fired_followup_events = [
+            event for event in eligible_followup_events
+            if bool(event.get("task_component_attempted"))
+            or any(
+                component.get("name") == "grounded_step_task"
+                and component.get("attempted")
+                for component in (event.get("components") or [])
+            )
+        ]
         grounded_followup_firing_rate = (
-            task_query_count / len(attempted_events) if attempted_events else 0.0
+            len(fired_followup_events) / len(eligible_followup_events)
+            if eligible_followup_events else 0.0
         )
         incremental_task_gold_titles = [
             title for title in gold_titles
@@ -1228,6 +1259,10 @@ def build_answer_records(
             "retrieval_task_gold_title_recall": task_recall,
             "retrieval_task_query_count": task_query_count,
             "retrieval_grounded_followup_fired": bool(task_query_count),
+            "retrieval_followup_eligible_step_count": (
+                len(eligible_followup_events)
+            ),
+            "retrieval_followup_fired_step_count": len(fired_followup_events),
             "retrieval_grounded_followup_firing_rate": (
                 grounded_followup_firing_rate
             ),

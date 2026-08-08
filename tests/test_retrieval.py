@@ -6,10 +6,17 @@ that changed shape with passages, or a BM25 implementation that drifted from its
 reference formula.
 """
 
+import json
 import unittest
+from pathlib import Path
+
+import yaml
 
 from src import prompts, retrieval
 from src.pipeline import build_answer_records, build_stage_calls, load_questions
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _passages(spec: dict[str, list[str]]) -> list[retrieval.Passage]:
@@ -328,10 +335,12 @@ class ContextTests(unittest.TestCase):
         self.assertNotEqual(a["corpus_sha256"], b["corpus_sha256"])
         self.assertEqual(a["initial_query_source"], "original_question")
         self.assertEqual(a["grounded_followup_k"], 2)
-        self.assertTrue(a["grounded_followup_requires_evidence"])
+        self.assertEqual(a["anchor_k"], 1)
+        self.assertEqual(a["task_k"], 1)
+        self.assertFalse(a["grounded_followup_requires_evidence"])
         self.assertEqual(
             a["query_policy"],
-            "original_question_first_then_full_grounded_task_v1",
+            "original_question_anchor_7_plus_anchored_step_task_3_v2",
         )
 
     def test_format_passages_is_byte_identical_to_the_frozen_renderer(self):
@@ -341,6 +350,22 @@ class ContextTests(unittest.TestCase):
             retrieval.format_passages(passages),
             prompts.format_paragraphs([p.title for p in passages],
                                       [p.sentences for p in passages]),
+        )
+
+    def test_query_policy_fingerprint_is_pinned(self):
+        config = yaml.safe_load(
+            (PROJECT_ROOT / "config" / "experiment.yaml").read_text(
+                encoding="utf-8"
+            )
+        )["retrieval"]
+        fingerprint = self.ctx.fingerprint()
+        self.assertEqual(retrieval.QUERY_POLICY, config["query_policy"])
+        self.assertEqual(fingerprint["query_policy"], config["query_policy"])
+        self.assertEqual(fingerprint["anchor_k"], config["anchor_k"])
+        self.assertEqual(fingerprint["task_k"], config["task_k"])
+        self.assertIs(
+            fingerprint["grounded_followup_requires_evidence"],
+            config["grounded_followup_requires_evidence"],
         )
 
 
@@ -405,7 +430,7 @@ class StageWiringTests(unittest.TestCase):
         self.assertFalse(event["grounded_followup_fired"])
         self.assertFalse(event["task_component_attempted"])
 
-    def test_second_round_consumes_prior_qa_and_extractor_state(self):
+    def test_followup_query_contains_anchor(self):
         self.idx[("q1", "step_definer", 0)] = {
             "parsed": {
                 "type": "question-answering",
@@ -445,17 +470,58 @@ class StageWiringTests(unittest.TestCase):
         got = second["consumer_input"]["retrieval"]
         self.assertEqual(got["step"], 2)
         self.assertEqual(got["anchor_query"], self.q["question"])
+        self.assertIn(self.q["question"], got["task_query"])
         self.assertIn("Xawery Zulawski", got["task_query"])
         self.assertEqual(got["grounded_prior_answers"], ["Xawery Zulawski"])
-        self.assertEqual(got["query_count"], 1)
-        self.assertEqual(got["query_source"], "grounded_step_task")
+        self.assertEqual(got["query_count"], 2)
+        self.assertEqual(got["query_source"], "anchor_task_union")
         self.assertTrue(got["grounded_followup_fired"])
-        self.assertEqual(got["anchor_titles"], [])
+        self.assertEqual(
+            got["anchor_titles"],
+            self.ctx.index.search_titles(self.q["question"], 10),
+        )
         self.assertEqual(
             got["titles"],
-            self.ctx.index.search_titles(got["task_query"], 10),
+            retrieval.fuse_rankings(
+                got["anchor_titles"],
+                self.ctx.index.search_titles(got["task_query"], 10),
+                k=10,
+                anchor_k=7,
+            ),
         )
         self.assertIn("Xawery Zulawski", got["titles"])
+
+    def test_retrieval_unions_both_components(self):
+        self.idx[("q1", "extractor", 0)] = {
+            "parsed": {"spans": ["It was directed by Xawery Zulawski."]},
+        }
+        self.idx[("q1", "qa", 0)] = {
+            "parsed": {
+                "answer": "Xawery Zulawski", "success": "yes", "rating": 9,
+            },
+        }
+        self.idx[("q1", "step_definer_step2", 1)] = {
+            "parsed": {
+                "type": "question-answering",
+                "task": "Where was Xawery Zulawski educated?",
+            },
+        }
+        call = build_stage_calls(
+            "extractor_step2", [self.q], self.idx, retriever=self.ctx
+        )[0]
+        event = call["consumer_input"]["retrieval"]
+        self.assertEqual(
+            [component["attempted"] for component in event["components"]],
+            [True, True],
+        )
+        self.assertEqual(len(event["titles"]), 10)
+        self.assertEqual(len(event["titles"]), len(set(event["titles"])))
+        self.assertEqual(
+            event["titles"],
+            retrieval.fuse_rankings(
+                event["anchor_titles"], event["task_titles"], k=10, anchor_k=7
+            ),
+        )
 
     def test_salvaged_step_task_keeps_its_query_when_type_is_missing(self):
         self.idx[("q1", "step_definer", 0)] = {
@@ -500,7 +566,7 @@ class StageWiringTests(unittest.TestCase):
         self.assertIn(self.q["question"], query)
         self.assertEqual(call["consumer_payload_source"], "fallback")
 
-    def test_unsupported_qa_guess_is_withheld_from_state_and_targeted_retrieval(self):
+    def test_followup_fires_without_verbatim_grounding(self):
         self.idx[("q1", "extractor", 0)] = {
             "parsed": {"spans": ["It was directed by Xawery Zulawski."]},
         }
@@ -522,16 +588,68 @@ class StageWiringTests(unittest.TestCase):
         )[0]
         event = call["consumer_input"]["retrieval"]
         self.assertEqual(event["grounded_prior_answers"], [])
-        self.assertEqual(event["query_count"], 1)
-        self.assertEqual(event["query_source"], "original_question_anchor")
-        self.assertFalse(event["grounded_followup_fired"])
-        self.assertFalse(event["task_component_attempted"])
-        self.assertEqual(event["query"], self.q["question"])
-        self.assertEqual(
-            event["titles"],
-            self.ctx.index.search_titles(self.q["question"], 10),
-        )
+        self.assertEqual(event["query_count"], 2)
+        self.assertEqual(event["query_source"], "anchor_task_union")
+        self.assertTrue(event["grounded_followup_fired"])
+        self.assertTrue(event["task_component_attempted"])
+        self.assertIn(self.q["question"], event["task_query"])
+        self.assertIn("Which coast is Bay of Biscay on?", event["task_query"])
+        self.assertNotEqual(event["task_query"], self.q["question"])
         self.assertNotIn("Bay of Biscay", event["anchor_query"])
+
+    def test_retrieval_headroom_floor(self):
+        fixture = json.loads(
+            (
+                PROJECT_ROOT
+                / "tests"
+                / "fixtures"
+                / "retrieval_headroom_canary.json"
+            ).read_text(encoding="utf-8")
+        )
+        context = retrieval.RetrievalContext(
+            [
+                retrieval.Passage(row["title"], row["sentences"])
+                for row in fixture["passages"]
+            ],
+            k=fixture["k"],
+            hop1=fixture["anchor_k"],
+        )
+        both_gold = []
+        for row in fixture["questions"]:
+            question = {
+                "question_id": row["question_id"],
+                "question": row["question"],
+                "answer": row["answer"],
+                "supporting_facts": {
+                    "title": row["gold_titles"],
+                    "sent_id": [0] * len(row["gold_titles"]),
+                },
+            }
+            index = {
+                (row["question_id"], "planner", 0): {
+                    "parsed": {"sub_questions": ["Find the bridge", "Resolve it"]},
+                },
+                (row["question_id"], "qa", 0): {
+                    "parsed": {
+                        "answer": "unsupported guess",
+                        "success": "yes",
+                        "rating": 5,
+                    },
+                },
+                (row["question_id"], "step_definer_step2", 1): {
+                    "parsed": {
+                        "type": "question-answering",
+                        "task": row["followup_task"],
+                    },
+                },
+            }
+            call = build_stage_calls(
+                "extractor_step2", [question], index, retriever=context
+            )[0]
+            titles = set(call["consumer_input"]["retrieval"]["titles"])
+            both_gold.append(set(row["gold_titles"]) <= titles)
+        recall = sum(both_gold) / len(both_gold)
+        self.assertGreaterEqual(recall, fixture["minimum_both_gold_recall"])
 
     def test_qa_keeps_extractor_evidence_grouped_by_document(self):
         self.idx[("q1", "step_definer", 0)] = {
@@ -716,7 +834,9 @@ class StageWiringTests(unittest.TestCase):
         self.assertEqual(answer["retrieval_query_count"], 2)
         self.assertEqual(answer["retrieval_task_query_count"], 1)
         self.assertTrue(answer["retrieval_grounded_followup_fired"])
-        self.assertEqual(answer["retrieval_grounded_followup_firing_rate"], 0.5)
+        self.assertEqual(answer["retrieval_followup_eligible_step_count"], 1)
+        self.assertEqual(answer["retrieval_followup_fired_step_count"], 1)
+        self.assertEqual(answer["retrieval_grounded_followup_firing_rate"], 1.0)
         self.assertEqual(
             answer["retrieval_incremental_task_gold_titles"], ["Director page"]
         )
@@ -787,44 +907,36 @@ class StageWiringTests(unittest.TestCase):
         self.assertEqual(prompts.role_for("qa_step3"), "qa")
         self.assertEqual(prompts.role_for("plan_summary"), "step_definer")
 
-    def test_aggregate_route_skips_retrieval_and_extractor(self):
+    def test_aggregate_without_grounded_state_is_downgraded_to_qa(self):
         self.idx[("q1", "step_definer", 0)] = {
             "parsed": {"type": "aggregate", "task": "Compare the known dates."}
         }
-        self.assertEqual(build_stage_calls("extractor", [self.q], self.idx, self.ctx), [])
+        extractor_calls = build_stage_calls(
+            "extractor", [self.q], self.idx, self.ctx
+        )
+        self.assertTrue(extractor_calls)
+        self.assertEqual(
+            extractor_calls[0]["consumer_input"]["step_definition"]["type"],
+            "question-answering",
+        )
         qa_call = build_stage_calls("qa", [self.q], self.idx, self.ctx)[0]
-        self.assertEqual(qa_call["consumer_input"]["task_type"], "aggregate")
-        self.assertEqual(qa_call["consumer_input"]["retrieval"], {
-            "step": 1,
-            "task_type": "aggregate",
-            "attempted": False,
-            "query": None,
-            "query_count": 0,
-            "components": [],
-            "titles": [],
-        })
+        self.assertEqual(
+            qa_call["consumer_input"]["task_type"], "question-answering"
+        )
+        self.assertTrue(qa_call["consumer_input"]["retrieval"]["attempted"])
 
     def test_aggregate_qa_renders_only_grounded_prior_answers(self):
+        self.idx[("q1", "extractor", 0)] = {
+            "parsed": {"spans": ["It was directed by Xawery Zulawski."]},
+        }
         self.idx[("q1", "qa", 0)] = {
-            "parsed": {"answer": "Bay of Biscay", "success": "yes", "rating": 10},
+            "parsed": {
+                "answer": "Xawery Zulawski", "success": "yes", "rating": 10,
+            },
         }
         self.idx[("q1", "step_definer_step2", 1)] = {
             "parsed": {"type": "aggregate", "task": "Use the prior answer."},
         }
-        unsupported = build_stage_calls("qa_step2", [self.q], self.idx)[0]
-        self.assertEqual(
-            unsupported["fields"]["evidence"], "(no evidence collected)"
-        )
-        self.assertFalse(
-            unsupported["consumer_input"]["evidence_blocks"][0][
-                "included_in_prompt"
-            ]
-        )
-
-        self.idx[("q1", "extractor", 0)] = {
-            "parsed": {"spans": ["It was directed by Xawery Zulawski."]},
-        }
-        self.idx[("q1", "qa", 0)]["parsed"]["answer"] = "Xawery Zulawski"
         grounded = build_stage_calls("qa_step2", [self.q], self.idx)[0]
         self.assertIn("Prior step answer: Xawery Zulawski", grounded["fields"]["evidence"])
         self.assertTrue(
