@@ -217,7 +217,9 @@ Use one `Qwen/Qwen3-1.7B` load for QA and plan summary with:
   1,409,286,144 4-bit parameters, zero 8-bit parameters, and fraction
   0.8190786008502311;
 - greedy generation, QA ceiling 96 and summary ceiling 128;
-- batch size exactly 4 and the original scored-batch membership/order;
+- batch size exactly 4; `spans_plus_passages` preserves the original scored-batch
+  membership/order, while `passages_only` preserves source call order filtered
+  to the frozen 128 IDs and uses canonical consecutive groups of at most four;
 - `models.render_chat` as the only renderer, with `enable_thinking=False`;
 - immediate failure if any raw output contains `<think>` or `</think>`; and
 - a Tesla T4 (compute capability 7.5).
@@ -286,7 +288,8 @@ experiment fingerprint. Its canonical payload binds:
 - QA and summary template hashes and versions;
 - summary-history, grounding, stop, and finalizer policies;
 - model commit, tokenizer hashes, quantization census, package/GPU identity,
-  decoding ceilings, batch membership, and `enable_thinking=false`;
+  decoding ceilings, condition-specific batch membership, and
+  `enable_thinking=false`;
 - replay code hash/commit and scorer/bootstrap configuration.
 
 The finalized metadata binds that treatment fingerprint to the completed calls
