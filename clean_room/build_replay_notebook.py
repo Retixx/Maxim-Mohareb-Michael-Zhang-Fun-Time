@@ -11,7 +11,7 @@ import pathlib
 HERE = pathlib.Path(__file__).parent
 BRANCH = "multihop-vs-single-hop-rag-bug-fix"
 REPO = "https://github.com/Retixx/Maxim-Mohareb-Michael-Zhang-Fun-Time.git"
-COMMIT = "15a54f7"
+COMMIT = "f45cafc"
 OUT = "analysis/passage_plus_spans_replay"
 
 
