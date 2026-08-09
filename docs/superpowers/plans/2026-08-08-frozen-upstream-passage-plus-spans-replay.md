@@ -17,6 +17,23 @@
 - Create `tests/test_passage_replay.py`: synthetic unit fixtures plus one cached integration audit over `evidence/gate_c_1.7b/`.
 - Do not modify `src/`, `SPEC.md`, config, manifests, prompts, retrieval, or committed evidence.
 
+## Binding Independent-Review Amendments
+
+These requirements restore details already approved in the design and supersede any looser wording later in this plan:
+
+- [ ] Persist one successful `model_load` record, 21 `phase=reproduction_sentinel` calls with six sentinel batch certificates, and 1,038 `phase=scored` calls with 262 scored batch certificates. Final validation therefore expects 1,059 agent calls, 268 batch certificates, 328 answers, and one model-load record. No sentinel row may be counted as a scored treatment call.
+- [ ] Resume is certificate-gated. A call row without its valid trailing batch certificate is an orphan and cannot enter treated state. Reject duplicate/unexpected keys. Validate condition, fingerprint, canonical treatment batch hash, exact membership/order, batch ID/ordinal/member index, parent key/hash, source/treatment message hashes, rendered-chat hash, model/revision/precision, and required output fields. For an orphan/partial batch, regenerate the complete original batch, compare every preexisting output field byte-for-byte, append only missing members, then append the certificate and `fsync`; any mismatch aborts.
+- [ ] Hash `tok.chat_template` and a deterministic tokenizer snapshot: save the loaded tokenizer into a repository-local temporary snapshot directory, SHA-256 every regular file in sorted relative-path order, and record the per-file map plus a canonical aggregate hash. Record a SHA-256 of `models.render_chat()` for every source/sentinel/treatment call.
+- [ ] Before generation or persistence, render and tokenize every dynamic prompt with no truncation and require `prompt_tokens + ceiling <= recorded context_window_tokens`, using ceiling 96 for QA and 128 for summaries. Persist measured prompt tokens, ceiling, total, and context window; cover retrieval-backed QA, aggregate QA, and summaries.
+- [ ] The root replay fingerprint binds both treatment schemas, passage header, formatter source/hash, frozen trace, old/new message hashes, rendered-chat hashes, QA/summary template versions and hashes, history/grounding/stop/finalizer policy identifiers, model commit, tokenizer snapshot hashes, exact quantization census, package/GPU identity, ceilings, batch manifests, `enable_thinking=false`, replay code hash/commit, and scorer/bootstrap settings. Distinct condition fingerprints bind their own IDs and batches. Output hashes remain outside these fingerprints.
+- [ ] Prove prompt isolation with poison mutations to gold answer/title/supporting facts/stratum and single-arm all-gold flags: messages and hashes must not change. Add a static/runtime guard forbidding `pipeline.build_stage_calls`, retriever construction, title search, solo call construction/generation, and any retrieval import in both replay modules.
+- [ ] QA reporting compares the reverse usable treated candidate against the reverse usable source-MA QA candidate for overall n=200, both-gold n=128, and both strata. Also emit last-executed and best-intermediate oracle diagnostics, per-step parse/salvage, success disagreement directions and IDs, grounding, literal answer survival, prompt tokens, earliest-new-no sensitivity, and explicit original-stop/new-success right-censoring. New success values never change the primary frozen call graph.
+- [ ] Every paired comparison reports `a_f1`, `b_f1`, `delta_f1_points`, `a_em`, `b_em`, `delta_em_points`, bootstrap, McNemar, and wins/losses/ties. Never extrapolate `passages_only` outside the frozen 128 subset; its strata are the subset's 95 hidden-bridge and 33 fully-named questions.
+- [ ] Test every preregistered interpretation branch and the inclusive two-point boundary with numeric tolerance. Show the SPEC §15.5 thresholds beside diagnostics, while forbidding `PASS_GATE_C`, `GO`, and “§4.3 is repairable.”
+- [ ] Strengthen immutable/output audits: exact source commit, subset strata 95/33, baseline-only membership, no generated solo calls, complete manifest/calls/answers/summary/meta schema, lineage on sentinel/treatment calls, exact certificate coverage, 200/128 condition answers, final artifact hashes, and `meta.json` published last as the sole completion certificate.
+- [ ] Sentinel hard equality is exactly raw output, parsed payload, salvaged payload, prompt tokens, output tokens, and generated-sequence tokens. Record `parse_status`, source/replay batch telemetry, and think-tag checks, but do not make package strings or `parse_status` additional equivalence gates.
+- [ ] Replay recorded sentence lists faithfully, including an empty list if the pinned source ever contains one; source hashes and relational joins—not an added nonempty-sentence rule—define validity.
+
 ### Task 1: Immutable Source Bundle and Gold-Free Trace Projection
 
 **Files:**
@@ -221,7 +238,7 @@ def render_treated_evidence(original: str, join: PassageJoin, condition: str) ->
     raise ValueError(f"unknown replay condition {condition!r}")
 ```
 
-Implement `join_recorded_passages()` with ranks exactly `0..9`, title/task/retrieval equality, and nonempty sentences. Implement `source_scored_batches()` from `record_type=batch`, `phase=scored` certificates. Implement `condition_batches()` so plus preserves source certificates exactly and only filters each stage's source order to the frozen 128 IDs then chunks by four.
+Implement `join_recorded_passages()` with ranks exactly `0..9` and title/task/retrieval equality, replaying each pinned sentence list faithfully. Implement `source_scored_batches()` from `record_type=batch`, `phase=scored` certificates. Implement `condition_batches()` so plus preserves source certificates exactly and only filters each stage's source order to the frozen 128 IDs then chunks by four.
 
 - [ ] **Step 4: Add exact population and batch assertions**
 
@@ -412,7 +429,13 @@ def paired_comparison(a: Mapping[str, dict], b: Mapping[str, dict],
     return {
         "n": len(ids), "a_f1": mean(float(a[q]["f1"]) for q in ids),
         "b_f1": mean(float(b[q]["f1"]) for q in ids),
-        "delta_f1_points": mean(values), "bootstrap": bootstrap,
+        "delta_f1_points": mean(values),
+        "a_em": mean(float(a[q]["em"]) for q in ids),
+        "b_em": mean(float(b[q]["em"]) for q in ids),
+        "delta_em_points": 100.0 * mean(
+            float(a[q]["em"]) - float(b[q]["em"]) for q in ids
+        ),
+        "bootstrap": bootstrap,
         "mcnemar": mcnemar, "wins": sum(x > 0 for x in values),
         "losses": sum(x < 0 for x in values), "ties": sum(x == 0 for x in values),
     }
@@ -473,12 +496,12 @@ Select the first scored certificate for `qa`, `qa_step2`, `qa_step3`, `qa_step4`
 
 ```python
 SENTINEL_FIELDS = (
-    "raw_output", "parse_status", "parsed", "salvaged",
+    "raw_output", "parsed", "salvaged",
     "prompt_tokens", "output_tokens", "generated_sequence_tokens",
 )
 ```
 
-Reject `<think>` or `</think>` before persistence. Only a complete match authorizes scored conditions, regardless of package warnings.
+Record `parse_status` but do not add it to hard equality. Reject `<think>` or `</think>` before persistence. Only a complete match authorizes scored conditions, regardless of package warnings. After all 21 match in memory, persist the successful model-load record, sentinel calls, and their six certificates before starting scored conditions.
 
 - [ ] **Step 5: Run tests and commit**
 
@@ -513,7 +536,7 @@ Implement `execute_batch_plan()` rather than calling `runner._run_stage`, whose 
 5. augment records with condition, treatment fingerprint, parent key/hash, source/treatment prompt hashes, and phase;
 6. write missing call records, then the batch certificate, then `fsync`.
 
-Use `runner.JsonlStore` on `calls.jsonl.partial`. A resume is accepted only when every existing record has the current treatment fingerprint and condition-aware key; a partial batch is regenerated with its original neighbors and only missing members are appended.
+Use `runner.JsonlStore` on `calls.jsonl.partial`. Apply the binding certificate-gated resume rules above; fingerprint-and-key equality alone is never sufficient.
 
 - [ ] **Step 4: Implement CLI and atomic publication**
 
@@ -532,7 +555,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 `--audit-only` performs every CPU integrity check, builds all call/batch manifests, computes the survival headline, and prints 200/128 cohorts, 427/200 source calls, 4,260 joins, 627/627 hashes, 627/411 condition calls, and 262 batches without loading model weights.
 
-`--execute` runs audit, loads one model, records version warnings, passes the sentinel, runs plus QA stages then plus summaries, runs only QA stages then only summaries, creates 328 answer records, scores, and validates final counts. Write all data as `.partial`; close/fsync/hash/rename data artifacts; write `meta.json` last with hashes as the sole completion certificate. Never overwrite a complete result or publish final meta after failure.
+`--execute` runs audit, loads one model, records version warnings, passes and persists the sentinel, runs plus QA stages then plus summaries, runs only QA stages then only summaries, creates 328 answer records, scores, and validates the full counts in the binding amendments. Write all data as `.partial`; close/fsync/hash/rename data artifacts; write `meta.json` last with hashes as the sole completion certificate. Never overwrite a complete result or publish final meta after failure.
 
 - [ ] **Step 5: Run tests and commit**
 
@@ -605,9 +628,18 @@ Skip this commit when verification requires no changes.
 
 - [ ] **Step 1: Run on Kaggle T4 from the final harness commit**
 
-After cloning the existing branch and renormalizing line endings, run:
+From the existing branch—never a parallel branch—fetch the final harness commit, reset the index/worktree only as part of the user-required clean Kaggle checkout line-ending normalization, install compatible dependencies without exact package-string aborts, and run:
 
 ```bash
+git fetch origin multihop-vs-single-hop-rag-bug-fix
+git checkout multihop-vs-single-hop-rag-bug-fix
+git pull --ff-only origin multihop-vs-single-hop-rag-bug-fix
+git rm --cached -r .
+git reset --hard
+# No --upgrade and no exact version gate: retain Kaggle's PyTorch/CUDA image,
+# install only missing direct packages, record all versions, then trust only
+# the byte-exact 21-call sentinel.
+python -m pip install transformers bitsandbytes datasets accelerate PyYAML numpy scipy huggingface-hub
 python -u clean_room/passage_replay.py \
   --source-dir evidence/gate_c_1.7b \
   --output-dir analysis/passage_plus_spans_replay \
@@ -625,6 +657,7 @@ Require final `meta.json`, matching calls/answers hashes, 1,038 scored calls, 26
 ```bash
 tar -czf passage_plus_spans_replay.tar.gz -C analysis passage_plus_spans_replay
 sha256sum passage_plus_spans_replay.tar.gz
+ssh codex-guest@144.217.94.114 download passage_plus_spans_replay.tar.gz > passage_plus_spans_replay.tar.gz
 ```
 
 Keep the archive in the repository for SSH handoff. Do not edit SPEC §4.3 or claim `PASS_GATE_C`; report the result as `Gate-C-comparable fixed-trace diagnostic` using the preregistered interpretation table.
