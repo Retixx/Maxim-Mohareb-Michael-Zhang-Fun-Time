@@ -18,7 +18,7 @@ from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from statistics import mean
+from statistics import mean, median
 
 from src import prompts
 
@@ -749,6 +749,7 @@ def _source_summary(source: ReplaySource, qid: str) -> dict:
 def _treated_record_for(
     treated_qa_index: Mapping,
     condition: str,
+    condition_fingerprint_sha256: str,
     qid: str,
     stage: str,
     call_index: int,
@@ -763,6 +764,12 @@ def _treated_record_for(
     _require_equal(record.get("question_id"), qid, "treated QA question ID")
     _require_equal(record.get("stage"), stage, "treated QA stage")
     _require_equal(record.get("call_index"), call_index, "treated QA call index")
+    _require_equal(record.get("condition"), condition, "treated QA condition")
+    _require_equal(
+        record.get("condition_fingerprint_sha256"),
+        condition_fingerprint_sha256,
+        "treated QA condition fingerprint",
+    )
     return record
 
 
@@ -775,7 +782,7 @@ def _visible_texts_for_step(
     consumer_input = source_qa.get("consumer_input") or {}
     if consumer_input.get("task_type") == "aggregate":
         return [
-            f"Prior step answer: {item['answer']}"
+            item["answer"]
             for item in prior_history
             if item.get("answer_grounded") is True and item.get("answer")
         ]
@@ -797,6 +804,7 @@ def rebuild_treated_history(
     qid: str,
     treated_qa_index: Mapping,
     condition: str,
+    condition_fingerprint_sha256: str,
     *,
     before_step: int | None = None,
 ) -> list[dict]:
@@ -821,6 +829,7 @@ def rebuild_treated_history(
         treated_record = _treated_record_for(
             treated_qa_index,
             condition,
+            condition_fingerprint_sha256,
             qid,
             stage,
             step_index,
@@ -866,6 +875,7 @@ def build_treated_qa_call(
     qa: dict,
     condition: str,
     treated_qa_index: Mapping,
+    condition_fingerprint_sha256: str,
 ) -> dict:
     if condition not in CONDITIONS:
         raise ValueError(f"unknown replay condition {condition!r}")
@@ -886,6 +896,7 @@ def build_treated_qa_call(
             qid,
             treated_qa_index,
             condition,
+            condition_fingerprint_sha256,
             before_step=call_index,
         )
         blocks: list[tuple[str, list[str]]] = []
@@ -1129,6 +1140,152 @@ def extractor_survival_headline(source: ReplaySource) -> dict:
     return result
 
 
+def _normalizer_text(value: str) -> str:
+    return re.sub(r"\s+", " ", unicodedata.normalize("NFKC", value or "")).strip().casefold()
+
+
+def _overlap_token_f1(left: str, right: str) -> float:
+    left_tokens = _TOKEN.findall(_normalizer_text(left))
+    right_tokens = _TOKEN.findall(_normalizer_text(right))
+    common = Counter(left_tokens) & Counter(right_tokens)
+    overlap = sum(common.values())
+    if overlap == 0:
+        return 0.0
+    return 2.0 * overlap / (len(left_tokens) + len(right_tokens))
+
+
+def _not_in_source_candidates(record: dict) -> tuple[list[str], list[str]]:
+    payload = record.get("parsed")
+    if not isinstance(payload, dict):
+        payload = record.get("salvaged")
+    spans = payload.get("spans") if isinstance(payload, dict) else []
+    if not isinstance(spans, list):
+        spans = []
+    source_sentences = (record.get("consumer_input") or {}).get("document_sentences")
+    if not isinstance(source_sentences, list):
+        raise IntegrityError("Extractor source sentence list is missing")
+    sources = [
+        sentence.strip()
+        for sentence in source_sentences
+        if isinstance(sentence, str) and sentence.strip()
+    ]
+    normalized_sources = [_normalizer_text(sentence) for sentence in sources]
+    rejected: list[str] = []
+    for candidate in spans:
+        if not isinstance(candidate, str) or not candidate.strip():
+            continue
+        candidate_norm = _normalizer_text(candidate)
+        exact = [
+            index
+            for index, source_norm in enumerate(normalized_sources)
+            if candidate_norm == source_norm
+        ]
+        if exact:
+            continue
+        contained_sources = [
+            index
+            for index, source_norm in enumerate(normalized_sources)
+            if source_norm and source_norm in candidate_norm
+        ]
+        if len(contained_sources) > 1:
+            continue
+        fragment_matches = (
+            [
+                index
+                for index, source_norm in enumerate(normalized_sources)
+                if candidate_norm in source_norm
+            ]
+            if len(candidate_norm) >= 25
+            else []
+        )
+        if not set(contained_sources + fragment_matches) and len(candidate_norm) >= 25:
+            rejected.append(candidate)
+    telemetry = record.get("extractor_normalization") or {}
+    expected = (telemetry.get("rejection_reasons") or {}).get("not_in_source", 0)
+    _require_equal(len(rejected), expected, "reconstructed not_in_source spans")
+    return rejected, sources
+
+
+def extractor_near_match_diagnostic(source: ReplaySource) -> dict:
+    """Measure fuzzy similarity without changing normalization or QA inputs."""
+    thresholds = (0.5, 0.7, 0.8, 0.9)
+    both_gold = set(source.both_gold_ids)
+    scores: list[tuple[str, float]] = []
+    input_spans = 0
+    rejected_spans = 0
+    rejection_reasons: Counter[str] = Counter()
+    for record in source.baseline_records:
+        if (
+            record.get("record_type") != "agent_call"
+            or record.get("prompt_role") != "extractor"
+        ):
+            continue
+        normalization = record.get("extractor_normalization") or {}
+        input_spans += int(normalization.get("input_span_count") or 0)
+        rejected_spans += int(normalization.get("rejected_input_count") or 0)
+        rejection_reasons.update(normalization.get("rejection_reasons") or {})
+        candidates, sources = _not_in_source_candidates(record)
+        for candidate in candidates:
+            best = max(
+                (_overlap_token_f1(candidate, sentence) for sentence in sources),
+                default=0.0,
+            )
+            scores.append((record["question_id"], best))
+
+    def summarize(values: list[tuple[str, float]]) -> dict:
+        numeric = [score for _, score in values]
+        if not numeric:
+            raise IntegrityError("near-match diagnostic cohort is empty")
+        counts = {
+            f"{threshold:.2f}": sum(score >= threshold for score in numeric)
+            for threshold in thresholds
+        }
+        return {
+            "rejected_not_in_source_spans": len(values),
+            "questions_with_rejection": len({qid for qid, _ in values}),
+            "mean_best_token_f1": round(mean(numeric), 6),
+            "median_best_token_f1": round(median(numeric), 6),
+            "at_or_above": counts,
+            "fraction_at_or_above": {
+                threshold: round(count / len(values), 6)
+                for threshold, count in counts.items()
+            },
+        }
+
+    result = {
+        "method": (
+            "best source-sentence multiset token F1 after NFKC, casefold, and "
+            "Unicode alphanumeric tokenization; diagnostic only, no fuzzy spans reach QA"
+        ),
+        "normalizer_totals": {
+            "input_spans": input_spans,
+            "rejected_spans": rejected_spans,
+            "rejected_fraction": round(rejected_spans / input_spans, 6),
+            "rejection_reasons": dict(sorted(rejection_reasons.items())),
+        },
+        "all_questions": summarize(scores),
+        "both_gold_questions": summarize(
+            [(qid, score) for qid, score in scores if qid in both_gold]
+        ),
+        "interpretation": (
+            "At token-F1 >= 0.80, 228 of 625 not_in_source spans have a lexical "
+            "near match. This diagnostic alone cannot distinguish faithful "
+            "paraphrases from irrelevant or entity-substituted near matches and "
+            "therefore does not assign loss between the model and normalizer."
+        ),
+    }
+    _require_equal(input_spans, 1460, "Extractor input-span total")
+    _require_equal(rejected_spans, 830, "Extractor rejected-span total")
+    _require_equal(rejection_reasons.get("not_in_source"), 625, "not_in_source total")
+    _require_equal(result["all_questions"]["at_or_above"]["0.80"], 228, "all near-match@0.80")
+    _require_equal(
+        result["both_gold_questions"]["at_or_above"]["0.80"],
+        162,
+        "both-gold near-match@0.80",
+    )
+    return result
+
+
 def paired_comparison(
     a: Mapping[str, dict],
     b: Mapping[str, dict],
@@ -1264,6 +1421,7 @@ def _candidate_from_history(
 def _summary_record_for(
     summary_records: Mapping,
     condition: str,
+    condition_fingerprint_sha256: str,
     qid: str,
 ) -> dict:
     record = summary_records.get(qid)
@@ -1274,6 +1432,12 @@ def _summary_record_for(
     _require_equal(record.get("question_id"), qid, "treated summary question ID")
     _require_equal(record.get("stage"), "plan_summary", "treated summary stage")
     _require_equal(record.get("call_index"), 0, "treated summary call index")
+    _require_equal(record.get("condition"), condition, "treated summary condition")
+    _require_equal(
+        record.get("condition_fingerprint_sha256"),
+        condition_fingerprint_sha256,
+        "treated summary condition fingerprint",
+    )
     return record
 
 
@@ -1282,6 +1446,7 @@ def build_condition_result(
     condition: str,
     treated_qa_index: Mapping,
     summary_records: Mapping,
+    condition_fingerprint_sha256: str,
 ) -> ConditionResult:
     if condition == SPANS_PLUS_PASSAGES:
         question_ids = source.question_ids
@@ -1300,12 +1465,14 @@ def build_condition_result(
             qid,
             treated_qa_index,
             condition,
+            condition_fingerprint_sha256,
         )
         for step_index in range(len(history)):
             stage = prompts.stage_for("qa", step_index)
             record = _treated_record_for(
                 treated_qa_index,
                 condition,
+                condition_fingerprint_sha256,
                 qid,
                 stage,
                 step_index,
@@ -1314,7 +1481,12 @@ def build_condition_result(
             if key in canonical_qa:
                 raise IntegrityError(f"duplicate treated QA record {condition}/{key!r}")
             canonical_qa[key] = record
-        summary = _summary_record_for(summary_records, condition, qid)
+        summary = _summary_record_for(
+            summary_records,
+            condition,
+            condition_fingerprint_sha256,
+            qid,
+        )
         final = resolve_treated_answer(summary, history)
         gold = source.scoring[qid].gold_answer
         reverse = _candidate_from_history(history, gold, "reverse_usable")
@@ -1435,10 +1607,23 @@ def _qa_mechanism_report(
     parse_by_stage: dict[str, Counter] = {}
     payload_by_stage: dict[str, Counter] = {}
     prompt_tokens_by_stage: dict[str, list[int]] = {}
+    parse_salvage_by_question_step: list[dict] = []
     for key, record in result.qa_records.items():
         parse_by_stage.setdefault(key.stage, Counter())[str(record.get("parse_status"))] += 1
         _, payload_source = effective_payload(record)
         payload_by_stage.setdefault(key.stage, Counter())[payload_source] += 1
+        parse_salvage_by_question_step.append(
+            {
+                "question_id": key.question_id,
+                "stage": key.stage,
+                "call_index": key.call_index,
+                "step_number": key.call_index + 1,
+                "parse_status": record.get("parse_status"),
+                "parsed_present": record.get("parsed") is not None,
+                "salvaged_present": record.get("salvaged") is not None,
+                "effective_payload_source": payload_source,
+            }
+        )
         prompt_tokens = record.get("prompt_tokens")
         if isinstance(prompt_tokens, int) and not isinstance(prompt_tokens, bool):
             prompt_tokens_by_stage.setdefault(key.stage, []).append(prompt_tokens)
@@ -1486,14 +1671,17 @@ def _qa_mechanism_report(
         ):
             right_censored.append(qid)
 
-    sensitivity_records: dict[str, dict] = {}
+    sensitivity_records = dict(treated_reverse)
+    affected_sensitivity_records: dict[str, dict] = {}
     for qid, step_number in earliest_new_no.items():
         truncated = result.histories[qid][:step_number]
-        sensitivity_records[qid] = _candidate_from_history(
+        candidate = _candidate_from_history(
             truncated,
             source.scoring[qid].gold_answer,
             "reverse_usable",
         )
+        sensitivity_records[qid] = candidate
+        affected_sensitivity_records[qid] = candidate
     prompt_telemetry = {
         stage: {
             "calls": len(values),
@@ -1526,6 +1714,7 @@ def _qa_mechanism_report(
         "parse_status_by_stage": {
             stage: dict(counts) for stage, counts in parse_by_stage.items()
         },
+        "parse_salvage_by_question_step": parse_salvage_by_question_step,
         "payload_source_by_stage": {
             stage: dict(counts) for stage, counts in payload_by_stage.items()
         },
@@ -1543,11 +1732,26 @@ def _qa_mechanism_report(
         "earliest_new_no_sensitivity": {
             "affected_n": len(earliest_new_no),
             "earliest_step_by_question": earliest_new_no,
-            "truncated_candidate_scores": (
-                _mean_scores(sensitivity_records, tuple(earliest_new_no))
+            "affected_truncated_candidate_scores": (
+                _mean_scores(affected_sensitivity_records, tuple(earliest_new_no))
                 if earliest_new_no
                 else {"n": 0, "f1": None, "em": None}
             ),
+            "full_cohort": {
+                "definition": (
+                    "truncate after the first treated success=no that was not no "
+                    "in the frozen source; leave unaffected questions unchanged"
+                ),
+                "means": {
+                    name: _mean_scores(sensitivity_records, ids)
+                    for name, ids in cohorts.items()
+                },
+                "versus_source_ma": _comparison_family(
+                    sensitivity_records,
+                    source_reverse,
+                    cohorts,
+                ),
+            },
         },
         "right_censoring": {
             "definition": "source semantic_inability stop with treated last QA success=yes",
@@ -1665,6 +1869,11 @@ def score_replay(
             single,
             source.both_gold_ids,
         ),
+        "spans_only_minus_single": paired_comparison(
+            baseline,
+            single,
+            source.both_gold_ids,
+        ),
     }
     plus_subset_f1 = three_way["spans_plus_passages_minus_single"]["a_f1"]
     only_subset_f1 = three_way["passages_only_minus_single"]["a_f1"]
@@ -1692,6 +1901,9 @@ def score_replay(
             },
         },
         "extractor_answer_survival_both_gold": extractor_survival_headline(source),
+        "extractor_normalizer_near_match_diagnostic": extractor_near_match_diagnostic(
+            source
+        ),
         "qa_level": {
             SPANS_PLUS_PASSAGES: plus_qa_report,
             PASSAGES_ONLY: only_qa_report,
