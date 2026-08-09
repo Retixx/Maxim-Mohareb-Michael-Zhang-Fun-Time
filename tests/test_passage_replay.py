@@ -1,4 +1,5 @@
 import copy
+import json
 import shutil
 import tempfile
 import unittest
@@ -7,6 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from clean_room import passage_replay_core as core
+from clean_room import passage_replay as runtime
 from src import agents, prompts
 
 
@@ -504,6 +506,211 @@ class PassageReplayScoringTests(unittest.TestCase):
         self.assertIn("reverse_usable", report["qa_level"][core.SPANS_PLUS_PASSAGES])
         self.assertIn("success_drift", report["qa_level"][core.SPANS_PLUS_PASSAGES])
         self.assertIn("right_censoring", report["qa_level"][core.SPANS_PLUS_PASSAGES])
+
+
+class FakeReplayTokenizer:
+    chat_template = "fake-chat-template"
+
+    def __init__(self, token_count=10):
+        self.token_count = token_count
+        self.calls = []
+
+    def save_pretrained(self, path):
+        path = Path(path)
+        (path / "nested").mkdir()
+        (path / "z.json").write_text('{"z":1}', encoding="utf-8")
+        (path / "nested" / "a.txt").write_text("alpha", encoding="utf-8")
+
+    def __call__(self, text, **kwargs):
+        self.calls.append((text, kwargs))
+        return {"input_ids": list(range(self.token_count))}
+
+
+class PassageReplayRuntimeContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source = core.load_source_bundle(EVIDENCE)
+
+    def test_package_mismatch_warns_but_sentinel_is_hard_gate(self):
+        warnings = runtime.version_warnings(
+            {"torch": "2.10.0+cu128", "transformers": "5.14.1"},
+            {"torch": "2.11.0+cu128", "transformers": "5.15.0"},
+        )
+        self.assertEqual(len(warnings), 2)
+
+        source_records = runtime.sentinel_source_calls(self.source)
+        replay_records = copy.deepcopy(source_records)
+        replay_records[0]["parse_status"] = "recorded-but-not-gating"
+        report = runtime.compare_sentinel(source_records, replay_records)
+        self.assertFalse(report["parse_status_all_match"])
+        replay_records[0]["output_tokens"] += 1
+        with self.assertRaisesRegex(core.IntegrityError, "sentinel.*output_tokens"):
+            runtime.compare_sentinel(source_records, replay_records)
+
+    def test_sentinel_selects_exactly_21_source_members(self):
+        batches = runtime.sentinel_batches(self.source)
+        self.assertEqual([len(batch.members) for batch in batches], [4, 4, 4, 4, 1, 4])
+        self.assertEqual(sum(len(batch.members) for batch in batches), 21)
+        self.assertEqual(
+            [batch.stage for batch in batches],
+            ["qa", "qa_step2", "qa_step3", "qa_step4", "qa_step5", "plan_summary"],
+        )
+
+    def test_sentinel_rejects_thinking_tags_case_insensitively(self):
+        source_records = runtime.sentinel_source_calls(self.source)
+        replay_records = copy.deepcopy(source_records)
+        replay_records[0]["raw_output"] += "<ThInK>bad</tHiNk>"
+        with self.assertRaisesRegex(core.IntegrityError, "thinking tag"):
+            runtime.compare_sentinel(source_records, replay_records)
+
+    def test_tokenizer_snapshot_hashes_files_and_chat_template(self):
+        tokenizer = FakeReplayTokenizer()
+        with tempfile.TemporaryDirectory(dir=ROOT) as raw:
+            scratch = Path(raw)
+            first = runtime.capture_tokenizer_identity(
+                tokenizer,
+                repo_root=ROOT,
+                scratch_parent=scratch,
+            )
+            second = runtime.capture_tokenizer_identity(
+                tokenizer,
+                repo_root=ROOT,
+                scratch_parent=scratch,
+            )
+        self.assertEqual(first, second)
+        self.assertEqual(list(first.files), ["nested/a.txt", "z.json"])
+        self.assertEqual(first.chat_template_type, "str")
+        self.assertEqual(len(first.snapshot_sha256), 64)
+        self.assertEqual(len(first.chat_template_sha256), 64)
+
+    def test_runtime_prompt_audit_uses_one_renderer_and_hard_context_ceiling(self):
+        tokenizer = FakeReplayTokenizer(token_count=100)
+        messages = [{"role": "user", "content": "x"}]
+        from unittest.mock import patch
+
+        with patch("src.models.render_chat", return_value="rendered") as render:
+            audit = runtime.audit_prompt_runtime(
+                tokenizer,
+                messages,
+                prompt_role="qa",
+                recorded_context_window_tokens=196,
+            )
+        render.assert_called_once_with(tokenizer, messages)
+        self.assertEqual(audit.prompt_tokens, 100)
+        self.assertEqual(audit.output_ceiling_tokens, 96)
+        self.assertEqual(audit.prompt_plus_ceiling_tokens, 196)
+        self.assertEqual(
+            tokenizer.calls[0][1],
+            {"padding": False, "truncation": False, "add_special_tokens": False},
+        )
+
+        with patch("src.models.render_chat", return_value="rendered"):
+            with self.assertRaisesRegex(core.IntegrityError, "context window"):
+                runtime.audit_prompt_runtime(
+                    tokenizer,
+                    messages,
+                    prompt_role="qa",
+                    recorded_context_window_tokens=195,
+                )
+
+    def test_condition_fingerprints_bind_condition_ids_and_batches(self):
+        base = {"schema": "test", "axis": {"value": 1}}
+        execution_sha = core.canonical_json_sha256(base)
+        plus_sha, plus_payload = runtime.condition_fingerprint(
+            execution_sha,
+            core.SPANS_PLUS_PASSAGES,
+            self.source.question_ids,
+            core.condition_batches(self.source, core.SPANS_PLUS_PASSAGES),
+        )
+        only_sha, _ = runtime.condition_fingerprint(
+            execution_sha,
+            core.PASSAGES_ONLY,
+            self.source.both_gold_ids,
+            core.condition_batches(self.source, core.PASSAGES_ONLY),
+        )
+        self.assertNotEqual(plus_sha, only_sha)
+        changed = copy.deepcopy(plus_payload)
+        changed["ordered_ids"] = list(reversed(changed["ordered_ids"]))
+        self.assertNotEqual(plus_sha, core.canonical_json_sha256(changed))
+        self.assertNotIn("output", json.dumps(plus_payload).lower())
+
+    def test_execution_identity_hard_gates_model_gpu_census_batch_and_thinking(self):
+        valid = {
+            "model_id": runtime.MODEL_ID,
+            "model_revision": runtime.MODEL_REVISION,
+            "tokenizer_revision": runtime.MODEL_REVISION,
+            "precision": runtime.PRECISION,
+            "census": dict(runtime.EXPECTED_CENSUS),
+            "gpu": {
+                "gpu_available": True,
+                "gpu_name": runtime.EXPECTED_GPU_NAME,
+                "gpu_compute_capability": runtime.EXPECTED_GPU_COMPUTE_CAPABILITY,
+            },
+            "batch_size": 4,
+            "enable_thinking": False,
+        }
+        runtime.validate_execution_identity(valid)
+        mutations = {
+            "model": ("model_revision", "wrong"),
+            "precision": ("precision", "8bit"),
+            "batch": ("batch_size", 3),
+            "thinking": ("enable_thinking", True),
+        }
+        for label, (key, value) in mutations.items():
+            with self.subTest(label=label):
+                changed = copy.deepcopy(valid)
+                changed[key] = value
+                with self.assertRaises(core.IntegrityError):
+                    runtime.validate_execution_identity(changed)
+        for key, value in (
+            ("gpu_name", "A100"),
+            ("gpu_compute_capability", "8.0"),
+        ):
+            changed = copy.deepcopy(valid)
+            changed["gpu"][key] = value
+            with self.assertRaises(core.IntegrityError):
+                runtime.validate_execution_identity(changed)
+        changed = copy.deepcopy(valid)
+        changed["census"]["nominal_params"] += 1
+        with self.assertRaises(core.IntegrityError):
+            runtime.validate_execution_identity(changed)
+
+    def test_execution_fingerprint_binds_static_contract_without_outputs(self):
+        identity = {
+            "model_id": runtime.MODEL_ID,
+            "model_revision": runtime.MODEL_REVISION,
+            "tokenizer_revision": runtime.MODEL_REVISION,
+            "precision": runtime.PRECISION,
+            "census": dict(runtime.EXPECTED_CENSUS),
+            "gpu": {
+                "gpu_available": True,
+                "gpu_name": runtime.EXPECTED_GPU_NAME,
+                "gpu_compute_capability": runtime.EXPECTED_GPU_COMPUTE_CAPABILITY,
+            },
+            "batch_size": 4,
+            "enable_thinking": False,
+            "tokenizer_identity": {"snapshot_sha256": "a" * 64},
+            "library_versions": {"torch": "different-is-warning-only"},
+            "source_rendered_prompt_manifest_sha256": "b" * 64,
+        }
+        sha, payload = runtime.build_execution_fingerprint_payload(self.source, identity)
+        self.assertEqual(sha, core.canonical_json_sha256(payload))
+        serialized = json.dumps(payload, sort_keys=True).lower()
+        for required in (
+            "frozen_trace_sha256",
+            "passage_formatter",
+            "prompt_contract",
+            "history_policy",
+            "condition_batch_manifests",
+            "replay_code_sha256",
+            "bootstrap",
+        ):
+            self.assertIn(required, serialized)
+        self.assertNotIn("calls_sha256", serialized)
+        self.assertNotIn("answers_sha256", serialized)
+        changed = copy.deepcopy(payload)
+        changed["runtime_identity"]["library_versions"]["torch"] = "another"
+        self.assertNotEqual(sha, core.canonical_json_sha256(changed))
 
 
 if __name__ == "__main__":
