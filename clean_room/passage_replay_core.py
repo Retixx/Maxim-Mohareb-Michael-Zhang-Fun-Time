@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from src import pipeline
+from src import prompts
 
 
 BASELINE_JSONL = "baseline_qwen3-1.7b_n200_seed20260806_pilot.jsonl"
@@ -85,6 +86,45 @@ class AuditReport:
     extractor_joins: int
 
 
+@dataclass(frozen=True, order=True)
+class CallKey:
+    question_id: str
+    stage: str
+    call_index: int
+
+
+@dataclass(frozen=True, order=True)
+class ConditionCallKey:
+    condition: str
+    question_id: str
+    stage: str
+    call_index: int
+
+
+@dataclass(frozen=True)
+class PassageJoin:
+    titles: tuple[str, ...]
+    sentence_lists: tuple[tuple[str, ...], ...]
+
+
+@dataclass(frozen=True)
+class FrozenBatch:
+    stage: str
+    ordinal: int
+    members: tuple[CallKey, ...]
+    source_batch_id: str | None
+    batch_id: str
+    canonical_sha256: str
+    source_batch_ids: tuple[str, ...]
+
+
+QA_STAGES = ("qa", "qa_step2", "qa_step3", "qa_step4", "qa_step5")
+PASSAGE_HEADER = "Retrieved passages for the current step:"
+SPANS_PLUS_PASSAGES = "spans_plus_passages"
+PASSAGES_ONLY = "passages_only"
+CONDITIONS = (SPANS_PLUS_PASSAGES, PASSAGES_ONLY)
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -96,6 +136,655 @@ def sha256_file(path: Path) -> str:
 def ordered_ids_sha256(question_ids: tuple[str, ...] | list[str]) -> str:
     payload = "".join(f"{qid}\n" for qid in question_ids).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def canonical_json_sha256(value) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def rendered_prompt_sha256(messages: list[dict]) -> str:
+    """Match ``src.agents.rendered_prompt_sha256`` without importing models."""
+    payload = json.dumps(
+        messages,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _require_str(mapping: dict, key: str, label: str) -> str:
+    value = mapping.get(key)
+    if not isinstance(value, str) or not value:
+        raise IntegrityError(f"{label} has invalid {key}: {value!r}")
+    return value
+
+
+def _require_int(mapping: dict, key: str, label: str) -> int:
+    value = mapping.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise IntegrityError(f"{label} has invalid {key}: {value!r}")
+    return value
+
+
+def _index_agent_calls(records: tuple[dict, ...], label: str) -> dict:
+    index: dict[tuple[str, str, int], dict] = {}
+    for record in records:
+        if record.get("record_type") != "agent_call":
+            continue
+        qid = _require_str(record, "question_id", label)
+        stage = _require_str(record, "stage", label)
+        call_index = _require_int(record, "call_index", label)
+        key = (qid, stage, call_index)
+        if key in index:
+            raise IntegrityError(f"duplicate {label} source call {key!r}")
+        index[key] = record
+    return index
+
+
+def _render_prior_steps(prior_steps: list[dict] | None) -> str:
+    if not prior_steps:
+        return "(none; this is the first plan step)"
+    lines: list[str] = []
+    for item in prior_steps:
+        grounded = item.get("answer_grounded")
+        answer = item.get("answer") or "(no answer)"
+        lines.append(f"Step {item['step_number']} goal: {item['sub_question']}")
+        lines.append(f"Step {item['step_number']} answer: {answer}")
+        if grounded is not None:
+            lines.append(
+                f"Step {item['step_number']} grounding: "
+                f"{'evidence-grounded' if grounded else 'unsupported guess'}"
+            )
+        if item.get("success") is not None:
+            lines.append(
+                f"Step {item['step_number']} success/rating: "
+                f"{item.get('success')} / {item.get('rating')}"
+            )
+    return "\n".join(lines)
+
+
+def _build_qa_fields(
+    question: str,
+    evidence_blocks: list[tuple[str, list[str]]],
+    *,
+    sub_question: str,
+    step_number: int,
+    plan_steps: int,
+) -> dict:
+    lines: list[str] = []
+    displayed = 0
+    for label, spans in evidence_blocks:
+        if not spans:
+            continue
+        displayed += 1
+        lines.append(f"{displayed}. {label}")
+        lines.extend(f"   - {span}" for span in spans)
+    return {
+        "question": question,
+        "sub_question": sub_question,
+        "step_number": step_number,
+        "plan_steps": plan_steps,
+        "evidence": "\n".join(lines) if lines else "(no evidence collected)",
+    }
+
+
+def _build_plan_summary_fields(
+    question: str,
+    plan: tuple[str, ...] | list[str],
+    prior_steps: list[dict],
+    stop_reason: str,
+) -> dict:
+    return {
+        "question": question,
+        "full_plan": "\n".join(
+            f"{index}. {item}" for index, item in enumerate(plan, start=1)
+        ),
+        "prior_state": _render_prior_steps(prior_steps),
+        "stop_reason": stop_reason,
+    }
+
+
+def source_qa_records(source: ReplaySource) -> tuple[dict, ...]:
+    return tuple(
+        record
+        for record in source.baseline_records
+        if record.get("record_type") == "agent_call" and record.get("prompt_role") == "qa"
+    )
+
+
+def source_summary_records(source: ReplaySource) -> tuple[dict, ...]:
+    return tuple(
+        record
+        for record in source.baseline_records
+        if record.get("record_type") == "agent_call"
+        and record.get("prompt_role") == "plan_summary"
+    )
+
+
+def reconstruct_source_qa_fields(source: ReplaySource, qa: dict) -> dict:
+    qid = _require_str(qa, "question_id", "QA call")
+    if qid not in source.questions:
+        raise IntegrityError(f"QA call has unexpected question ID {qid}")
+    call_index = _require_int(qa, "call_index", f"QA call {qid}")
+    expected_stage = prompts.stage_for("qa", call_index)
+    _require_equal(qa.get("stage"), expected_stage, f"QA stage for {qid}")
+    _require_equal(qa.get("prompt_role"), "qa", f"QA prompt role for {qid}")
+    consumer_input = qa.get("consumer_input")
+    if not isinstance(consumer_input, dict):
+        raise IntegrityError(f"QA call {qid}/{expected_stage} has invalid consumer input")
+    step_definition = consumer_input.get("step_definition")
+    if not isinstance(step_definition, dict):
+        raise IntegrityError(f"QA call {qid}/{expected_stage} has invalid step definition")
+    task = _require_str(step_definition, "task", f"QA call {qid}/{expected_stage}")
+    evidence_blocks = consumer_input.get("evidence_blocks")
+    if not isinstance(evidence_blocks, list):
+        raise IntegrityError(f"QA call {qid}/{expected_stage} has invalid evidence blocks")
+    task_type = consumer_input.get("task_type")
+    if task_type not in {"question-answering", "aggregate"}:
+        raise IntegrityError(f"QA call {qid}/{expected_stage} has invalid task type {task_type!r}")
+
+    blocks: list[tuple[str, list[str]]] = []
+    for block_number, block in enumerate(evidence_blocks):
+        if not isinstance(block, dict):
+            raise IntegrityError(
+                f"QA call {qid}/{expected_stage} block {block_number} is not an object"
+            )
+        spans = block.get("prompt_spans")
+        if not isinstance(spans, list) or not all(isinstance(span, str) for span in spans):
+            raise IntegrityError(
+                f"QA call {qid}/{expected_stage} block {block_number} has invalid prompt spans"
+            )
+        if not spans:
+            continue
+        if task_type == "aggregate":
+            label = _require_str(
+                block,
+                "sub_question",
+                f"QA call {qid}/{expected_stage} aggregate block {block_number}",
+            )
+        else:
+            rank = _require_int(
+                block,
+                "document_rank",
+                f"QA call {qid}/{expected_stage} block {block_number}",
+            )
+            title = _require_str(
+                block,
+                "document_title",
+                f"QA call {qid}/{expected_stage} block {block_number}",
+            )
+            label = f"Document {rank + 1}: {title}"
+        blocks.append((label, list(spans)))
+
+    frozen = source.questions[qid]
+    fields = _build_qa_fields(
+        frozen.question,
+        blocks,
+        sub_question=task,
+        step_number=call_index + 1,
+        plan_steps=len(frozen.plan),
+    )
+    messages = prompts.build_messages("qa", **fields)
+    if rendered_prompt_sha256(messages) != qa.get("rendered_prompt_sha256"):
+        raise IntegrityError(f"source QA message hash mismatch for {qid}/{expected_stage}")
+    return fields
+
+
+def reconstruct_source_summary_fields(source: ReplaySource, summary: dict) -> dict:
+    qid = _require_str(summary, "question_id", "summary call")
+    if qid not in source.questions:
+        raise IntegrityError(f"summary call has unexpected question ID {qid}")
+    _require_equal(summary.get("stage"), "plan_summary", f"summary stage for {qid}")
+    _require_equal(summary.get("call_index"), 0, f"summary call index for {qid}")
+    consumer_input = summary.get("consumer_input")
+    if not isinstance(consumer_input, dict):
+        raise IntegrityError(f"summary call {qid} has invalid consumer input")
+    frozen = source.questions[qid]
+    _require_equal(tuple(consumer_input.get("plan") or ()), frozen.plan, f"summary plan for {qid}")
+    _require_equal(consumer_input.get("stop_reason"), frozen.stop_reason, f"summary stop for {qid}")
+    history = consumer_input.get("completed_steps")
+    if not isinstance(history, list):
+        raise IntegrityError(f"summary call {qid} has invalid completed history")
+    fields = _build_plan_summary_fields(
+        frozen.question,
+        frozen.plan,
+        history,
+        frozen.stop_reason,
+    )
+    messages = prompts.build_messages("plan_summary", **fields)
+    if rendered_prompt_sha256(messages) != summary.get("rendered_prompt_sha256"):
+        raise IntegrityError(f"source summary message hash mismatch for {qid}")
+    return fields
+
+
+def join_recorded_passages(source: ReplaySource, qa: dict) -> PassageJoin:
+    qid = _require_str(qa, "question_id", "QA call")
+    call_index = _require_int(qa, "call_index", f"QA call {qid}")
+    expected_stage = prompts.stage_for("qa", call_index)
+    _require_equal(qa.get("stage"), expected_stage, f"QA stage for {qid}")
+    consumer_input = qa.get("consumer_input")
+    if not isinstance(consumer_input, dict):
+        raise IntegrityError(f"QA call {qid}/{expected_stage} has invalid consumer input")
+    _require_equal(
+        consumer_input.get("task_type"),
+        "question-answering",
+        f"passage route for {qid}/{expected_stage}",
+    )
+    step_definition = consumer_input.get("step_definition")
+    retrieval = consumer_input.get("retrieval")
+    blocks = consumer_input.get("evidence_blocks")
+    if not isinstance(step_definition, dict) or step_definition.get("type") != "question-answering":
+        raise IntegrityError(f"invalid QA step definition for {qid}/{expected_stage}")
+    if not isinstance(retrieval, dict):
+        raise IntegrityError(f"invalid QA retrieval event for {qid}/{expected_stage}")
+    titles = retrieval.get("titles")
+    if not isinstance(titles, list) or len(titles) != 10 or not all(
+        isinstance(title, str) and title for title in titles
+    ):
+        raise IntegrityError(f"QA retrieval titles are not an ordered top-10 for {qid}/{expected_stage}")
+    if not isinstance(blocks, list) or len(blocks) != 10:
+        raise IntegrityError(f"QA evidence blocks are not an ordered top-10 for {qid}/{expected_stage}")
+
+    ext_stage = prompts.stage_for("extractor", call_index)
+    expected_keys = {(qid, ext_stage, rank) for rank in range(10)}
+    actual_keys = {
+        key
+        for key in source.baseline_index
+        if key[0] == qid and key[1] == ext_stage
+    }
+    if actual_keys != expected_keys:
+        raise IntegrityError(
+            f"Extractor ranks for {qid}/{ext_stage} are not exactly 0..9: "
+            f"{sorted(key[2] for key in actual_keys)!r}"
+        )
+
+    sentence_lists: list[tuple[str, ...]] = []
+    for rank in range(10):
+        block = blocks[rank]
+        extractor = source.baseline_index[(qid, ext_stage, rank)]
+        ext_input = extractor.get("consumer_input")
+        if not isinstance(block, dict) or not isinstance(ext_input, dict):
+            raise IntegrityError(f"invalid passage join object for {qid}/{ext_stage}/{rank}")
+        _require_equal(extractor.get("call_index"), rank, f"Extractor call index {qid}/{ext_stage}")
+        _require_equal(ext_input.get("document_rank"), rank, f"Extractor document rank {qid}/{ext_stage}")
+        _require_equal(block.get("document_rank"), rank, f"QA document rank {qid}/{expected_stage}")
+        _require_equal(ext_input.get("document_title"), titles[rank], f"Extractor title {qid}/{ext_stage}/{rank}")
+        _require_equal(block.get("document_title"), titles[rank], f"QA title {qid}/{expected_stage}/{rank}")
+        _require_equal(ext_input.get("step_definition"), step_definition, f"Extractor task {qid}/{ext_stage}/{rank}")
+        _require_equal(ext_input.get("retrieval"), retrieval, f"Extractor retrieval {qid}/{ext_stage}/{rank}")
+        for span_key in ("spans", "prompt_spans"):
+            spans = block.get(span_key)
+            if not isinstance(spans, list) or not all(isinstance(span, str) for span in spans):
+                raise IntegrityError(f"invalid QA {span_key} for {qid}/{expected_stage}/{rank}")
+        _require_equal(
+            block.get("included_in_prompt"),
+            bool(block.get("prompt_spans")),
+            f"QA prompt inclusion for {qid}/{expected_stage}/{rank}",
+        )
+        sentences = ext_input.get("document_sentences")
+        if not isinstance(sentences, list) or not all(
+            isinstance(sentence, str) for sentence in sentences
+        ):
+            raise IntegrityError(f"invalid source sentences for {qid}/{ext_stage}/{rank}")
+        sentence_lists.append(tuple(sentences))
+    return PassageJoin(tuple(titles), tuple(sentence_lists))
+
+
+def render_treated_evidence(original: str, join: PassageJoin, condition: str) -> str:
+    passages = prompts.format_paragraphs(
+        list(join.titles),
+        [list(sentences) for sentences in join.sentence_lists],
+    )
+    block = f"{PASSAGE_HEADER}\n{passages}"
+    if condition == SPANS_PLUS_PASSAGES:
+        return f"{original}\n\n{block}"
+    if condition == PASSAGES_ONLY:
+        return block
+    raise ValueError(f"unknown replay condition {condition!r}")
+
+
+def _source_batch_sha256(members: tuple[CallKey, ...]) -> str:
+    payload = "".join(
+        f"{member.question_id}\t{member.call_index}\n" for member in members
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _condition_batch_sha256(
+    condition: str,
+    stage: str,
+    ordinal: int,
+    members: tuple[CallKey, ...],
+) -> str:
+    return canonical_json_sha256(
+        {
+            "condition": condition,
+            "stage": stage,
+            "ordinal": ordinal,
+            "members": [
+                {
+                    "question_id": member.question_id,
+                    "stage": member.stage,
+                    "call_index": member.call_index,
+                }
+                for member in members
+            ],
+        }
+    )
+
+
+def source_scored_batches(source: ReplaySource, stage: str) -> tuple[FrozenBatch, ...]:
+    if stage not in (*QA_STAGES, "plan_summary"):
+        raise ValueError(f"unsupported replay stage {stage!r}")
+    records = [
+        record
+        for record in source.baseline_records
+        if record.get("record_type") == "batch"
+        and record.get("phase") == "scored"
+        and record.get("stage") == stage
+    ]
+    ordinals = [_require_int(record, "batch_ordinal", f"source {stage} batch") for record in records]
+    if len(ordinals) != len(set(ordinals)) or sorted(ordinals) != list(range(len(records))):
+        raise IntegrityError(f"source {stage} batch ordinals are not unique and contiguous")
+    records.sort(key=lambda record: record["batch_ordinal"])
+
+    expected_keys = {
+        CallKey(record["question_id"], stage, int(record["call_index"]))
+        for record in source.baseline_index.values()
+        if record.get("stage") == stage
+        and record.get("record_type") == "agent_call"
+        and record.get("prompt_role") in {"qa", "plan_summary"}
+    }
+    seen: set[CallKey] = set()
+    batches: list[FrozenBatch] = []
+    for record in records:
+        ordinal = int(record["batch_ordinal"])
+        batch_id = f"{stage}:{ordinal:06d}"
+        _require_equal(record.get("batch_id"), batch_id, f"source {stage} batch ID")
+        _require_equal(record.get("batch_size_requested"), BATCH_SIZE, f"source {stage} batch size")
+        _require_equal(record.get("oom"), False, f"source {stage} batch OOM")
+        _require_equal(record.get("model_id"), MODEL_ID, f"source {stage} batch model")
+        _require_equal(record.get("precision"), PRECISION, f"source {stage} batch precision")
+        _require_equal(record.get("model_revision"), "TBD", f"source {stage} model revision")
+        _require_equal(record.get("tokenizer_revision"), "TBD", f"source {stage} tokenizer revision")
+        _require_equal(
+            record.get("experiment_fingerprint"),
+            SOURCE_EXPERIMENT_FINGERPRINT,
+            f"source {stage} batch experiment",
+        )
+        _require_equal(
+            record.get("question_manifest_sha256"),
+            FULL_IDS_SHA256,
+            f"source {stage} batch manifest",
+        )
+        raw_members = record.get("members")
+        if not isinstance(raw_members, list) or not 1 <= len(raw_members) <= BATCH_SIZE:
+            raise IntegrityError(f"source {stage} batch {ordinal} has invalid members")
+        members = tuple(
+            CallKey(
+                _require_str(member, "question_id", f"source {stage} batch {ordinal}"),
+                stage,
+                _require_int(member, "call_index", f"source {stage} batch {ordinal}"),
+            )
+            for member in raw_members
+            if isinstance(member, dict)
+        )
+        if len(members) != len(raw_members):
+            raise IntegrityError(f"source {stage} batch {ordinal} has non-object member")
+        _require_equal(
+            record.get("batch_size_actual"),
+            len(members),
+            f"source {stage} batch actual size",
+        )
+        _require_equal(
+            record.get("canonical_batch_sha256"),
+            _source_batch_sha256(members),
+            f"source {stage} canonical batch SHA-256",
+        )
+        if seen.intersection(members):
+            raise IntegrityError(f"source {stage} batch membership is duplicated")
+        for member_index, member in enumerate(members):
+            call = source.baseline_index.get(
+                (member.question_id, member.stage, member.call_index)
+            )
+            if call is None:
+                raise IntegrityError(f"source {stage} batch references missing call {member!r}")
+            _require_equal(call.get("batch_id"), batch_id, f"source call batch for {member!r}")
+            _require_equal(
+                call.get("batch_member_index"),
+                member_index,
+                f"source call member index for {member!r}",
+            )
+            _require_equal(call.get("model_id"), MODEL_ID, f"source call model for {member!r}")
+            _require_equal(call.get("precision"), PRECISION, f"source call precision for {member!r}")
+            _require_equal(
+                call.get("experiment_fingerprint"),
+                SOURCE_EXPERIMENT_FINGERPRINT,
+                f"source call experiment for {member!r}",
+            )
+        seen.update(members)
+        batches.append(
+            FrozenBatch(
+                stage=stage,
+                ordinal=ordinal,
+                members=members,
+                source_batch_id=batch_id,
+                batch_id=batch_id,
+                canonical_sha256=_source_batch_sha256(members),
+                source_batch_ids=(batch_id,),
+            )
+        )
+    if seen != expected_keys:
+        raise IntegrityError(
+            f"source {stage} certificates do not exactly cover calls: "
+            f"missing={len(expected_keys - seen)}, extra={len(seen - expected_keys)}"
+        )
+    return tuple(batches)
+
+
+def condition_batches(
+    source: ReplaySource,
+    condition: str,
+    stage: str | None = None,
+) -> tuple[FrozenBatch, ...]:
+    if condition not in CONDITIONS:
+        raise ValueError(f"unknown replay condition {condition!r}")
+    stages = (stage,) if stage is not None else (*QA_STAGES, "plan_summary")
+    subset = set(source.both_gold_ids)
+    output: list[FrozenBatch] = []
+    for concrete_stage in stages:
+        source_batches = source_scored_batches(source, concrete_stage)
+        if condition == SPANS_PLUS_PASSAGES:
+            groups = [
+                (batch.members, batch.source_batch_ids)
+                for batch in source_batches
+            ]
+        else:
+            retained: list[tuple[CallKey, str]] = []
+            for batch in source_batches:
+                for member in batch.members:
+                    if member.question_id not in subset:
+                        continue
+                    if concrete_stage in QA_STAGES:
+                        qa = source.baseline_index[
+                            (member.question_id, member.stage, member.call_index)
+                        ]
+                        if (qa.get("consumer_input") or {}).get("task_type") != "question-answering":
+                            raise IntegrityError(
+                                "passages_only cohort unexpectedly contains aggregate QA"
+                            )
+                    retained.append((member, batch.batch_id))
+            groups = []
+            for start in range(0, len(retained), BATCH_SIZE):
+                chunk = retained[start : start + BATCH_SIZE]
+                source_ids = tuple(dict.fromkeys(source_id for _, source_id in chunk))
+                groups.append((tuple(member for member, _ in chunk), source_ids))
+
+        for ordinal, (members, source_ids) in enumerate(groups):
+            batch_id = f"{condition}:{concrete_stage}:{ordinal:06d}"
+            output.append(
+                FrozenBatch(
+                    stage=concrete_stage,
+                    ordinal=ordinal,
+                    members=tuple(members),
+                    source_batch_id=(source_ids[0] if len(source_ids) == 1 else None),
+                    batch_id=batch_id,
+                    canonical_sha256=_condition_batch_sha256(
+                        condition,
+                        concrete_stage,
+                        ordinal,
+                        tuple(members),
+                    ),
+                    source_batch_ids=tuple(source_ids),
+                )
+            )
+    return tuple(output)
+
+
+def condition_call_keys(
+    source: ReplaySource,
+    condition: str,
+) -> tuple[ConditionCallKey, ...]:
+    keys = tuple(
+        ConditionCallKey(
+            condition,
+            member.question_id,
+            member.stage,
+            member.call_index,
+        )
+        for batch in condition_batches(source, condition)
+        for member in batch.members
+    )
+    if len(keys) != len(set(keys)):
+        raise IntegrityError(f"{condition} call manifest contains duplicate keys")
+    expected = 627 if condition == SPANS_PLUS_PASSAGES else 411
+    if len(keys) != expected:
+        raise IntegrityError(
+            f"{condition} call manifest has {len(keys)} calls, expected {expected}"
+        )
+    return keys
+
+
+def _effective_payload(record: dict | None) -> tuple[dict, str]:
+    if record and isinstance(record.get("parsed"), dict):
+        return dict(record["parsed"]), "parsed"
+    if record and isinstance(record.get("salvaged"), dict):
+        return dict(record["salvaged"]), "salvaged"
+    return {}, "fallback"
+
+
+def audit_source(source: ReplaySource) -> AuditReport:
+    _require_equal(source.baseline_meta.get("git_commit"), SOURCE_COMMIT, "source commit")
+    _require_equal(len(source.question_ids), 200, "source question count")
+    _require_equal(source.question_ids_sha256, FULL_IDS_SHA256, "source question hash")
+    _require_equal(len(source.both_gold_ids), 128, "both-gold count")
+    _require_equal(
+        Counter(item.stratum for item in source.scoring.values()),
+        Counter({"hidden_bridge": 160, "fully_named": 40}),
+        "source strata",
+    )
+    _require_equal(
+        Counter(source.scoring[qid].stratum for qid in source.both_gold_ids),
+        Counter({"hidden_bridge": 95, "fully_named": 33}),
+        "both-gold strata",
+    )
+
+    qa_records = source_qa_records(source)
+    stage_counts = Counter(record.get("stage") for record in qa_records)
+    expected_counts = Counter(
+        {"qa": 200, "qa_step2": 187, "qa_step3": 32, "qa_step4": 7, "qa_step5": 1}
+    )
+    _require_equal(stage_counts, expected_counts, "source QA stage counts")
+    qa_hash_matches = 0
+    question_answering = 0
+    aggregate = 0
+    joins = 0
+    qa_by_question: Counter[str] = Counter()
+    for qa in qa_records:
+        qid = _require_str(qa, "question_id", "source QA")
+        call_index = _require_int(qa, "call_index", f"source QA {qid}")
+        qa_by_question[qid] += 1
+        consumer_input = qa.get("consumer_input") or {}
+        step_definition = consumer_input.get("step_definition")
+        step_stage = prompts.stage_for("step_definer", call_index)
+        step_record = source.baseline_index.get((qid, step_stage, call_index))
+        payload, _ = _effective_payload(step_record)
+        _require_equal(payload, step_definition, f"Step Definer/QA task for {qid}/{call_index}")
+        reconstruct_source_qa_fields(source, qa)
+        qa_hash_matches += 1
+        if consumer_input.get("task_type") == "question-answering":
+            join_recorded_passages(source, qa)
+            question_answering += 1
+            joins += 10
+        elif consumer_input.get("task_type") == "aggregate":
+            aggregate += 1
+            _require_equal(
+                bool((consumer_input.get("retrieval") or {}).get("attempted")),
+                False,
+                f"aggregate retrieval for {qid}/{call_index}",
+            )
+            if qid in set(source.both_gold_ids):
+                raise IntegrityError("aggregate QA unexpectedly lies in both-gold cohort")
+        else:
+            raise IntegrityError(f"unknown QA task type for {qid}/{call_index}")
+
+    summaries = source_summary_records(source)
+    _require_equal(len(summaries), 200, "source summary count")
+    if {record.get("question_id") for record in summaries} != set(source.question_ids):
+        raise IntegrityError("source summaries do not cover the question cohort exactly")
+    summary_hash_matches = 0
+    for summary in summaries:
+        qid = _require_str(summary, "question_id", "source summary")
+        history = (summary.get("consumer_input") or {}).get("completed_steps")
+        if not isinstance(history, list):
+            raise IntegrityError(f"source summary has invalid history for {qid}")
+        _require_equal(len(history), qa_by_question[qid], f"summary/QA history length for {qid}")
+        answer = source.baseline_answers[qid]
+        _require_equal(tuple(answer.get("plan_steps") or ()), source.questions[qid].plan, f"answer plan for {qid}")
+        _require_equal(answer.get("stop_reason"), source.questions[qid].stop_reason, f"answer stop for {qid}")
+        _require_equal(answer.get("executed_steps"), len(history), f"answer executed steps for {qid}")
+        reconstruct_source_summary_fields(source, summary)
+        summary_hash_matches += 1
+
+    source_batches = tuple(
+        batch
+        for stage in (*QA_STAGES, "plan_summary")
+        for batch in source_scored_batches(source, stage)
+    )
+    _require_equal(len(source_batches), 158, "source replay batch count")
+    _require_equal(sum(len(batch.members) for batch in source_batches), 627, "source replay calls")
+    plus_batches = condition_batches(source, SPANS_PLUS_PASSAGES)
+    only_batches = condition_batches(source, PASSAGES_ONLY)
+    _require_equal((len(plus_batches), len(only_batches)), (158, 104), "condition batch counts")
+    _require_equal(
+        (
+            sum(len(batch.members) for batch in plus_batches),
+            sum(len(batch.members) for batch in only_batches),
+        ),
+        (627, 411),
+        "condition call counts",
+    )
+    combined = condition_call_keys(source, SPANS_PLUS_PASSAGES) + condition_call_keys(
+        source, PASSAGES_ONLY
+    )
+    if len(combined) != len(set(combined)):
+        raise IntegrityError("condition-aware call keys collide")
+
+    return AuditReport(
+        qa_stage_counts=dict(stage_counts),
+        qa_prompt_hash_matches=qa_hash_matches,
+        summary_prompt_hash_matches=summary_hash_matches,
+        question_answering_calls=question_answering,
+        aggregate_calls=aggregate,
+        extractor_joins=joins,
+    )
 
 
 def _read_json(path: Path) -> dict:
@@ -208,8 +897,8 @@ def load_source_bundle(source_dir: Path) -> ReplaySource:
                 f"{label} answer question manifest for {qid}",
             )
 
-    baseline_index = pipeline.index_records(list(baseline_records))
-    single_index = pipeline.index_records(list(single_records))
+    baseline_index = _index_agent_calls(baseline_records, "baseline")
+    single_index = _index_agent_calls(single_records, "single")
     questions: dict[str, FrozenQuestion] = {}
     scoring: dict[str, ScoringQuestion] = {}
     for qid in question_ids:
@@ -245,6 +934,11 @@ def load_source_bundle(source_dir: Path) -> ReplaySource:
         ordered_ids_sha256(both_gold_ids),
         BOTH_GOLD_IDS_SHA256,
         "baseline-defined both-gold ordered ID SHA-256",
+    )
+    _require_equal(
+        Counter(scoring[qid].stratum for qid in both_gold_ids),
+        Counter({"hidden_bridge": 95, "fully_named": 33}),
+        "baseline-defined both-gold strata",
     )
 
     return ReplaySource(
