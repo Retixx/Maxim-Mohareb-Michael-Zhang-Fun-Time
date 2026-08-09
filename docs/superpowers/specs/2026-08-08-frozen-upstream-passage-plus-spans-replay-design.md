@@ -2,8 +2,7 @@
 
 **Date:** 2026-08-08
 
-**Status:** Approved intervention boundary; implementation awaits written-spec
-review.
+**Status:** Approved for implementation with the amendments below.
 
 **Scope:** A fixed-trace causal diagnostic over the committed Qwen3-1.7B Gate C
 artifacts. This design changes no production pipeline, retrieval policy, frozen
@@ -11,12 +10,13 @@ manifest, or SPEC contract.
 
 ## Goal
 
-Measure whether giving QA the recorded retrieved passages in addition to the
-recorded normalized Extractor spans closes the observed multi-agent accuracy
-gap. The experiment must isolate QA-visible context from retrieval and routing:
-Planner output, Step Definer routes and tasks, retrieval titles, source passages,
-Extractor outputs, executed-step topology, and the original stop reason remain
-frozen. QA and the strictly downstream `plan_summary` are regenerated.
+Measure whether giving QA the recorded retrieved passages closes the observed
+multi-agent accuracy gap, and whether retaining the normalized Extractor spans
+adds anything beyond those passages. The experiment must isolate QA-visible
+context from retrieval and routing: Planner output, Step Definer routes and
+tasks, retrieval titles, source passages, Extractor outputs, executed-step
+topology, and the original stop reason remain frozen. QA and the strictly
+downstream `plan_summary` are regenerated.
 
 The experiment reports both:
 
@@ -40,13 +40,15 @@ further retrieval work is out of scope.
 
 ## Approaches Considered
 
-### Selected: fixed recorded trace, regenerated QA and summary
+### Selected: fixed recorded trace, two regenerated QA treatments and summaries
 
-Replay every recorded QA call from immutable artifact state, add recorded
-passages only to question-answering calls, propagate regenerated QA state into
-the one downstream aggregate call and all plan summaries, and compare with both
-the old MA answers and the untouched single-hop answers. This is the smallest
-design that isolates passage access while producing a final-answer metric.
+Replay every recorded QA call from immutable artifact state for the full
+`spans_plus_passages` treatment. On the both-gold 128-question subset, also run a
+`passages_only` treatment that replaces rather than appends the spans. Propagate
+each treatment's regenerated QA state into its downstream plan summaries and
+compare with both the old spans-only MA answers and the untouched single-hop
+answers. This isolates passage access, measures the possible salience effect of
+duplicated selected spans, and produces coherent final-answer metrics.
 
 ### Rejected: live downstream pipeline rerun
 
@@ -105,24 +107,29 @@ The single arm's own all-gold set has 108 questions and must not redefine it.
 | Retrieval events, queries, titles, rank, and passage sentences | Frozen from the QA and Extractor records; no retriever is constructed |
 | Raw and normalized Extractor spans | Frozen; Extractor is not regenerated |
 | Executed QA call keys | Frozen at 427 calls |
-| QA outputs | Regenerated for all recorded calls |
+| QA outputs | Regenerated for all 200 questions under `spans_plus_passages` and the both-gold 128 under `passages_only` |
 | Executed-step topology and stop reason | Frozen at the source trace |
 | Plan-summary inputs | Rebuilt from the frozen plan/trace plus treated QA state |
-| Plan-summary outputs | Regenerated for all 200 questions |
+| Plan-summary outputs | Regenerated separately for all 200 `spans_plus_passages` questions and all 128 `passages_only` questions |
 | Single-hop arm | Read-only recorded comparator; no model calls |
 
 The source trace contains 427 QA calls by stage: 200, 187, 32, 7, and 1.
 Exactly 426 are question-answering routes, each joined to ten Extractor records,
 for 4,260 frozen passage exposures. One step-3 call is an aggregate route. There
-are 200 summary calls. The minimum treatment therefore costs 627 scored
-generations, not 411; 411 covers only the both-gold subset.
+are 200 summary calls. The full `spans_plus_passages` treatment therefore costs
+627 scored generations. The both-gold subset contains 283 QA calls and requires
+128 matching summaries, so the coherent `passages_only` condition adds 411
+scored generations, not approximately 270. The two treatments total 1,038
+scored generations.
 
 Every source call is identified by `(question_id, stage, call_index)`. Calls are
 assembled directly from recorded fields. The harness must not call
 `pipeline.build_stage_calls`, because that function derives activity, routing,
 grounding, and retrieval from live state.
 
-## Exact QA Treatment
+## Exact QA Treatments
+
+### Spans plus passages
 
 For every question-answering call, reconstruct the original QA fields from its
 recorded task and `consumer_input.evidence_blocks[].prompt_spans`. Require the
@@ -154,6 +161,26 @@ QA answers because those answers are downstream of the intervention. Freezing
 the old aggregate evidence would reintroduce stale QA state. This aggregate is
 outside the both-gold subset.
 
+### Passages only
+
+Run this condition only for the frozen both-gold 128-question subset. All 283 QA
+calls in that subset are question-answering routes, so there is no aggregate
+edge case. Replace the original `{evidence}` value rather than appending to it:
+
+```text
+Retrieved passages for the current step:
+[1] <recorded title>: <recorded sentences in source order>
+...
+[10] <recorded title>: <recorded sentences in source order>
+```
+
+Use the same frozen passage joins, QA template, model, generation settings,
+executed trace, grounding logic, summary rebuilding, and finalizer as
+`spans_plus_passages`. Selected sentences occur once in their original passage
+position; no normalized Extractor block is rendered. Regenerate all 128 plan
+summaries from the `passages_only` QA histories. This condition has a distinct
+treatment fingerprint and may not reuse `spans_plus_passages` summaries.
+
 ## Treated State and Plan Summary
 
 Parse and salvage regenerated QA output with the existing code. Recompute each
@@ -166,8 +193,9 @@ query, retrieval titles, or executed-step set.
 Build each summary history from scratch. Preserve the original question, full
 plan, ordered step goals/tasks, executed steps, and source `stop_reason`; replace
 only QA-derived answer, success, rating, payload provenance, and grounding with
-treated values. Regenerate exactly 200 `plan_summary` calls with the unchanged
-summary prompt. Resolve the scored answer with the existing precedence:
+treated values. Regenerate exactly 200 `spans_plus_passages` and 128
+`passages_only` `plan_summary` calls with the unchanged summary prompt. Resolve
+the scored answer with the existing precedence:
 `summary_parsed`, `summary_salvaged`, reverse usable QA fallback, then empty.
 
 Regenerated `success` can disagree with the frozen trace. The primary estimand
@@ -192,12 +220,18 @@ Use one `Qwen/Qwen3-1.7B` load for QA and plan summary with:
 - batch size exactly 4 and the original scored-batch membership/order;
 - `models.render_chat` as the only renderer, with `enable_thinking=False`;
 - immediate failure if any raw output contains `<think>` or `</think>`; and
-- a Tesla T4 (compute capability 7.5) with exact source package versions:
-  PyTorch 2.10.0+cu128, Transformers 5.14.1, bitsandbytes 0.50.0, and CUDA
-  12.8. A mismatch aborts before generation.
+- a Tesla T4 (compute capability 7.5).
 
-Stage-preserving execution requires 108 QA batches and 50 summary batches.
-There are no warm-up generations in the scored treatment.
+Record the source and replay PyTorch, Transformers, bitsandbytes, CUDA, Python,
+driver, and GPU versions in provenance. Differences from source PyTorch
+2.10.0+cu128, Transformers 5.14.1, bitsandbytes 0.50.0, or CUDA 12.8 produce
+prominent warnings but do not abort. Empirical reproduction, not package-string
+equality, is the environment-equivalence gate.
+
+Stage-preserving `spans_plus_passages` execution requires 108 QA batches and 50
+summary batches. `passages_only` requires 72 QA batches and 32 summary batches.
+Together they require 262 scored batches. There are no warm-up generations in
+the scored treatments.
 
 The source artifact records `resolved_tokenizer_revision=TBD`. The replay loads
 the tokenizer from the pinned model commit, hashes its chat template and
@@ -207,9 +241,11 @@ tokenizer snapshot. Before the treatment, run a 21-generation reproducibility
 sentinel: the first recorded scored batch from each of the five QA stages plus
 the first summary batch, using byte-identical source messages and source batch
 membership. Raw output, parsed/salvaged payload, and token count must match the
-source exactly. Any mismatch aborts the treatment and requires either restoring
-the source service identity or approving a full contemporaneous spans-only MA
-control.
+source exactly for all 21 calls. A sentinel pass authorizes both treatments even
+when package versions differ. Any single mismatch aborts before scored
+generation, even when every package version matches, and requires either
+restoring the source service identity or approving a full contemporaneous
+spans-only MA control.
 
 ## Integrity and Failure Handling
 
@@ -225,7 +261,7 @@ The CPU audit phase fails closed unless all of the following hold:
 5. every Step Definer task agrees with its QA and Extractor task text;
 6. reconstructing all original QA and summary message objects reproduces 627 of
    627 recorded message hashes;
-7. scored batch certificates cover every regenerated call exactly once;
+7. scored batch certificates cover all 1,038 regenerated calls exactly once;
 8. no gold answer, gold title, supporting-fact label, or retrieval stratum is
    read while assembling model inputs; and
 9. every treated prompt plus its output ceiling fits the recorded context
@@ -245,7 +281,7 @@ experiment fingerprint. Its canonical payload binds:
 - full and both-gold ordered cohort hashes;
 - the frozen semantic trace: plans, call keys, tasks, routes, retrieval events,
   ordered titles/sentences, normalized spans, and stop reasons;
-- treatment schema and exact passage formatter source/hash;
+- both treatment schemas and the exact passage formatter source/hash;
 - old and new message-object hashes plus tokenizer-rendered chat hashes;
 - QA and summary template hashes and versions;
 - summary-history, grounding, stop, and finalizer policies;
@@ -262,9 +298,10 @@ and treatment prompt hashes. Outputs live under the ignored
 `analysis/passage_plus_spans_replay/` directory:
 
 - `manifest.json`: ordered IDs, frozen subset, call keys, and source lineage;
-- `calls.jsonl`: model load, 21 reproducibility-sentinel calls, 627 scored
+- `calls.jsonl`: model load, 21 reproducibility-sentinel calls, 1,038 scored
   treatment calls, and their batch certificates;
-- `answers.jsonl`: 200 treated answer records;
+- `answers.jsonl`: 200 `spans_plus_passages` and 128 `passages_only` answer
+  records, each labeled by condition;
 - `meta.json`: environment, integrity gates, fingerprints, and finalized hashes;
 - `summary.json`: metrics, paired tests, mechanism telemetry, and interpretation.
 
@@ -298,6 +335,40 @@ helpers. Report treatment versus both source MA and recorded single-hop for:
 - 10,000-draw paired bootstrap intervals with seed 20260807; and
 - exact two-sided McNemar tests on EM.
 
+On the both-gold subset, report the complete three-way comparison among recorded
+`spans_only`, regenerated `spans_plus_passages`, and regenerated
+`passages_only`, plus each condition's gap to recorded single-hop. Report every
+pairwise F1/EM delta, paired interval, McNemar result, and win/loss/tie count.
+Interpret the `spans_plus_passages` minus `passages_only` contrast as the net
+effect of retaining and repeating selected spans, not as a pure semantic value
+of extraction: the design intentionally does not add a fourth deduplicated
+condition.
+
+### Required survival headline
+
+`summary.json` must expose this frozen-artifact decomposition as a top-level
+headline, independent of treatment results:
+
+```json
+{
+  "extractor_answer_survival_both_gold": {
+    "n": 128,
+    "raw_producer_present": 84,
+    "normalized_qa_prompt_present": 52,
+    "raw_and_prompt_present": 50,
+    "absent_from_raw_and_prompt": 42,
+    "present_raw_removed_by_normalizer": 34,
+    "absent_raw_recovered_by_normalizer": 2,
+    "method": "contiguous normalize_answer token phrase"
+  }
+}
+```
+
+The paper-facing headline is `84/128 -> 52/128`: approximately 42 questions
+lose the literal answer at the Extractor model and 34 more lose it at the exact
+normalizer. The four-way flow remains present so the two normalization gains are
+not hidden. This bounds what a normalizer-only repair can recover.
+
 Report the fraction of the original MA-to-single F1 gap recovered. Show the
 SPEC §15.5 thresholds beside the overall and stratum estimates, but label the
 result `Gate-C-comparable fixed-trace diagnostic`, never `PASS_GATE_C` or `GO`.
@@ -307,12 +378,12 @@ and a fresh full pipeline run.
 
 ## Implementation Surface and Verification
 
-After this design is reviewed, the implementation plan should add only:
+The implementation plan should add only:
 
 - a `clean_room/` replay CLI that reads the committed artifacts directly,
   performs audit-only or GPU execution, and never initializes retrieval; and
-- focused tests for trace reconstruction, passage joins and formatting,
-  aggregate treated-state propagation, grounding, summary rebuilding,
+- focused tests for trace reconstruction, passage joins and both context
+  conditions, aggregate treated-state propagation, grounding, summary rebuilding,
   fingerprints, source-hash rejection, no-gold prompt assembly, fixed batch
   membership, and final scoring.
 
@@ -329,6 +400,30 @@ later tasks may embody old QA answers, so the design can underestimate a
 deployable passage-aware pipeline. Conversely, it cannot estimate extra steps
 that a newly successful formerly stopped trace might execute. These limitations
 are deliberate consequences of removing retrieval and routing drift.
+
+Predeclare "at or near the recorded single-hop score" as an absolute paired mean
+F1 gap of at most 2.0 points within the reported cohort; uncertainty intervals
+remain visible and are not replaced by that practical-equivalence threshold.
+Read the outcomes as follows:
+
+- If `spans_plus_passages` is at or near single-hop, report that full-passage QA
+  reproduces single-call behavior and **extraction is not contributing a net
+  advantage over raw retrieval**. Do not report that the §4.3 extract-only
+  contract is repairable; the recovered score came from bypassing that contract.
+- If `passages_only` is also within 2.0 points of `spans_plus_passages`, selected
+  Extractor spans add no measurable value beyond raw passages and duplication is
+  not responsible for the recovery.
+- If `spans_plus_passages` exceeds `passages_only` by more than 2.0 points,
+  report a selected-span/repetition-salience increment. This experiment cannot
+  separate useful selection from repetition without another condition.
+- If `passages_only` exceeds `spans_plus_passages` by more than 2.0 points,
+  report that retained spans or their duplication distract QA.
+- If both passage treatments remain materially below single-hop, passage access
+  alone is insufficient and the remaining defect lies in QA, frozen
+  decomposition state, plan summary, or their interaction.
+- If a passage treatment materially exceeds single-hop, report decomposition
+  value conditional on the frozen trace, while retaining the fixed-trace and
+  post-hoc limitations.
 
 Only after the QA-level and final-answer results exist should the team decide
 whether §4.3's extract-then-answer contract warrants a proposed change.
