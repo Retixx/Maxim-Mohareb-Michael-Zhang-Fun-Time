@@ -1,0 +1,60 @@
+{
+  "schema_version": 2,
+  "gate": "SPEC_15_GATES_A_AND_B_CPU",
+  "status": "PASS",
+  "passed": true,
+  "oracle_query_uses_hidden_gold_titles": true,
+  "claim_boundary": "mechanism-only upper bound; not live Step Definer or accuracy evidence",
+  "source_config_sha256": "b1e4aa32587a894f1f96bc153fc3957fe6bed4eaf5d0a2f030238ebe4c209fc1",
+  "manifest_file_sha256": "ba2836fdcd180a16daae625c09ae6bc4f68aee26a072e9bbef14e44ec6868f90",
+  "question_ids_sha256": "5d4cc24872aeb603cbd005f790958199ef4cc993a1e7f048403608603da602af",
+  "retrieval_fingerprint": {
+    "corpus_passages": 72094,
+    "corpus_sha256": "931425de7b123e3081ed63387c8d591a8aba4cf872d2cf47144e924260d92b73",
+    "algorithm": "sparse_bm25_lucene_idf_v1",
+    "tie_break": "score_desc_corpus_index_asc",
+    "query_policy": "original_question_anchor_7_plus_anchored_step_task_3_v2",
+    "k_per_step": 10,
+    "initial_query_source": "original_question",
+    "grounded_followup_k": 10,
+    "anchor_k": 7,
+    "task_k": 3,
+    "grounded_followup_requires_evidence": false,
+    "bm25_k1": 1.5,
+    "bm25_b": 0.75,
+    "vocab_terms": 180483
+  },
+  "gate_a_checks": {
+    "hidden_bridge_n_at_least_1000": true,
+    "k_is_10": true,
+    "hidden_bridge_both_gold_recall_at_least_0_75": true,
+    "exposure_never_exceeds_k": true,
+    "fully_named_ranking_is_unchanged": true
+  },
+  "gate_b": {
+    "eligible_steps": 1097,
+    "fired_steps": 1097,
+    "firing_rate": 1.0,
+    "checks": {
+      "hidden_bridge_eligible_steps_at_least_1000": true,
+      "followup_firing_rate_at_least_0_80": true,
+      "probe_has_no_verbatim_grounding": true,
+      "every_followup_query_contains_anchor": true
+    }
+  },
+  "strata": {
+    "hidden_bridge": {
+      "n": 1097,
+      "single_both_gold_recall_at_10": 0.5077484047402006,
+      "repaired_both_gold_recall_at_10": 0.927073837739289,
+      "delta": 0.4193254329990884
+    },
+    "fully_named": {
+      "n": 403,
+      "single_both_gold_recall_at_10": 0.8411910669975186,
+      "repaired_both_gold_recall_at_10": 0.8411910669975186,
+      "delta": 0.0
+    }
+  },
+  "max_unique_titles": 10
+}
