@@ -311,7 +311,11 @@ def audit_prompt_runtime(
         truncation=False,
         add_special_tokens=False,
     )
-    token_ids = encoded.get("input_ids") if isinstance(encoded, dict) else None
+    # Mapping, not dict: transformers' BatchEncoding subclasses
+    # collections.UserDict, so isinstance(encoded, dict) is False for every real
+    # tokenizer. That made token_ids None and raised the integrity error below
+    # on the first GPU run. Unit tests missed it because they return plain dicts.
+    token_ids = encoded.get("input_ids") if isinstance(encoded, Mapping) else None
     if (
         isinstance(token_ids, list)
         and len(token_ids) == 1
