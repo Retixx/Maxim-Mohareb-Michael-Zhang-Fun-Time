@@ -354,5 +354,157 @@ class PassageReplayTreatedStateTests(unittest.TestCase):
         self.assertEqual((empty["answer"], empty["source"]), ("", "none"))
 
 
+class PassageReplayScoringTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source = core.load_source_bundle(EVIDENCE)
+
+    def test_survival_headline_reproduces_artifact(self):
+        self.assertEqual(
+            core.extractor_survival_headline(self.source),
+            {
+                "n": 128,
+                "raw_producer_present": 84,
+                "normalized_qa_prompt_present": 52,
+                "raw_and_prompt_present": 50,
+                "absent_from_raw_and_prompt": 42,
+                "present_raw_removed_by_normalizer": 34,
+                "absent_raw_recovered_by_normalizer": 2,
+                "method": "contiguous normalize_answer token phrase",
+            },
+        )
+
+    def test_paired_metrics_include_f1_em_and_declared_direction(self):
+        a = {
+            "q1": {"f1": 1.0, "em": 1.0},
+            "q2": {"f1": 0.0, "em": 0.0},
+            "q3": {"f1": 0.5, "em": 0.0},
+        }
+        b = {
+            "q1": {"f1": 0.0, "em": 0.0},
+            "q2": {"f1": 0.5, "em": 1.0},
+            "q3": {"f1": 0.5, "em": 0.0},
+        }
+        report = core.paired_comparison(a, b, ("q1", "q2", "q3"))
+        self.assertEqual(report["n"], 3)
+        self.assertAlmostEqual(report["a_f1"], 0.5)
+        self.assertAlmostEqual(report["b_f1"], 1 / 3)
+        self.assertAlmostEqual(report["delta_f1_points"], 100 / 6)
+        self.assertAlmostEqual(report["a_em"], 1 / 3)
+        self.assertAlmostEqual(report["b_em"], 1 / 3)
+        self.assertAlmostEqual(report["delta_em_points"], 0.0)
+        self.assertEqual((report["wins"], report["losses"], report["ties"]), (1, 1, 1))
+        self.assertEqual(report["mcnemar"]["a_only_wins"], 1)
+        self.assertEqual(report["mcnemar"]["b_only_wins"], 1)
+        self.assertIn("f1_points", report["bootstrap"])
+        self.assertIn("em_points", report["bootstrap"])
+
+    def test_paired_metrics_reject_incomplete_cohort(self):
+        with self.assertRaisesRegex(core.IntegrityError, "incomplete"):
+            core.paired_comparison(
+                {"q1": {"f1": 1.0, "em": 1.0}},
+                {},
+                ("q1",),
+            )
+
+    def test_practical_equivalence_includes_exact_two_point_boundary(self):
+        self.assertTrue(core.practically_equivalent(0.4213, 0.4013))
+        self.assertFalse(core.practically_equivalent(0.4213, 0.4012))
+
+    def test_all_predeclared_interpretation_branches(self):
+        near = core.interpret_scores(single_f1=0.4213, plus_f1=0.4090, only_f1=0.4110)
+        self.assertIn(
+            "extraction is not contributing a net advantage over raw retrieval",
+            near,
+        )
+        self.assertIn("selected Extractor spans add no measurable value", near)
+
+        salience = core.interpret_scores(single_f1=0.50, plus_f1=0.45, only_f1=0.42)
+        self.assertIn("selected-span/repetition-salience increment", salience)
+
+        distraction = core.interpret_scores(single_f1=0.50, plus_f1=0.42, only_f1=0.45)
+        self.assertIn("retained spans or their duplication distract QA", distraction)
+
+        insufficient = core.interpret_scores(single_f1=0.50, plus_f1=0.40, only_f1=0.39)
+        self.assertIn("passage access alone is insufficient", insufficient)
+
+        decomposition = core.interpret_scores(single_f1=0.42, plus_f1=0.45, only_f1=0.44)
+        self.assertIn("decomposition value conditional on the frozen trace", decomposition)
+
+        combined = " ".join((near, salience, distraction, insufficient, decomposition))
+        self.assertNotIn("§4.3 is repairable", combined)
+        self.assertNotIn("PASS_GATE_C", combined)
+        self.assertNotIn("GO", combined)
+
+    def test_report_label_and_gate_thresholds_are_diagnostic_only(self):
+        self.assertEqual(
+            core.REPORT_LABEL,
+            "Gate-C-comparable fixed-trace diagnostic",
+        )
+        self.assertEqual(
+            core.GATE_C_THRESHOLDS,
+            {
+                "overall_delta_f1_points_min": 5.0,
+                "overall_ci_lower_points_strictly_greater_than": 2.0,
+                "mcnemar_p_strictly_less_than": 0.01,
+                "hidden_bridge_delta_f1_points_min": 8.0,
+                "fully_named_delta_f1_points_range": [-2.0, 2.0],
+            },
+        )
+
+    def test_source_outputs_round_trip_through_complete_report(self):
+        plus_index = {}
+        only_index = {}
+        both_gold = set(self.source.both_gold_ids)
+        for record in core.source_qa_records(self.source):
+            key = (record["question_id"], record["stage"], record["call_index"])
+            plus_index[(core.SPANS_PLUS_PASSAGES, *key)] = record
+            if record["question_id"] in both_gold:
+                only_index[(core.PASSAGES_ONLY, *key)] = record
+        summaries = {
+            record["question_id"]: record
+            for record in core.source_summary_records(self.source)
+        }
+        plus = core.build_condition_result(
+            self.source,
+            core.SPANS_PLUS_PASSAGES,
+            plus_index,
+            summaries,
+        )
+        only = core.build_condition_result(
+            self.source,
+            core.PASSAGES_ONLY,
+            only_index,
+            {qid: summaries[qid] for qid in self.source.both_gold_ids},
+        )
+        report = core.score_replay(
+            self.source,
+            {core.SPANS_PLUS_PASSAGES: plus, core.PASSAGES_ONLY: only},
+        )
+
+        self.assertEqual(len(plus.answer_records), 200)
+        self.assertEqual(len(only.answer_records), 128)
+        for qid, record in plus.answer_records.items():
+            self.assertEqual(record["predicted_answer"], self.source.baseline_answers[qid]["predicted_answer"])
+            self.assertEqual(record["f1"], self.source.baseline_answers[qid]["f1"])
+            self.assertEqual(record["em"], self.source.baseline_answers[qid]["em"])
+        self.assertEqual(report["report_label"], core.REPORT_LABEL)
+        self.assertEqual(
+            report["final_answer"][core.SPANS_PLUS_PASSAGES]["versus_source_ma"]["overall"][
+                "delta_f1_points"
+            ],
+            0.0,
+        )
+        self.assertEqual(
+            report["final_answer"]["three_way_both_gold"][
+                "spans_plus_passages_minus_spans_only"
+            ]["delta_f1_points"],
+            0.0,
+        )
+        self.assertIn("reverse_usable", report["qa_level"][core.SPANS_PLUS_PASSAGES])
+        self.assertIn("success_drift", report["qa_level"][core.SPANS_PLUS_PASSAGES])
+        self.assertIn("right_censoring", report["qa_level"][core.SPANS_PLUS_PASSAGES])
+
+
 if __name__ == "__main__":
     unittest.main()

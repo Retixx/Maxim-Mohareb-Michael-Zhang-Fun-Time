@@ -10,12 +10,15 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import re
+import string
 import unicodedata
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from statistics import mean
 
 from src import prompts
 
@@ -122,11 +125,29 @@ class FrozenBatch:
     source_batch_ids: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class ConditionResult:
+    condition: str
+    question_ids: tuple[str, ...]
+    qa_records: dict[CallKey, dict]
+    summary_records: dict[str, dict]
+    histories: dict[str, list[dict]]
+    answer_records: dict[str, dict]
+
+
 QA_STAGES = ("qa", "qa_step2", "qa_step3", "qa_step4", "qa_step5")
 PASSAGE_HEADER = "Retrieved passages for the current step:"
 SPANS_PLUS_PASSAGES = "spans_plus_passages"
 PASSAGES_ONLY = "passages_only"
 CONDITIONS = (SPANS_PLUS_PASSAGES, PASSAGES_ONLY)
+REPORT_LABEL = "Gate-C-comparable fixed-trace diagnostic"
+GATE_C_THRESHOLDS = {
+    "overall_delta_f1_points_min": 5.0,
+    "overall_ci_lower_points_strictly_greater_than": 2.0,
+    "mcnemar_p_strictly_less_than": 0.01,
+    "hidden_bridge_delta_f1_points_min": 8.0,
+    "fully_named_delta_f1_points_range": [-2.0, 2.0],
+}
 _TOKEN = re.compile(r"[^\W_]+", re.UNICODE)
 _NO_ANSWER_SENTINELS = frozenset(
     {
@@ -997,6 +1018,758 @@ def resolve_treated_answer(summary_record: dict | None, history: list[dict]) -> 
                 "qa_step": item.get("step_number"),
             }
     return {"answer": "", "source": "none", "grounded": None, "qa_step": None}
+
+
+def normalize_answer(value: str) -> str:
+    """HotpotQA answer normalization, kept local to preserve CPU isolation."""
+    lowered = (value or "").lower()
+    without_punctuation = "".join(
+        character for character in lowered if character not in set(string.punctuation)
+    )
+    without_articles = re.sub(r"\b(a|an|the)\b", " ", without_punctuation)
+    return " ".join(without_articles.split())
+
+
+def exact_match(prediction: str, gold: str) -> float:
+    return float(normalize_answer(prediction) == normalize_answer(gold))
+
+
+def f1_score(prediction: str, gold: str) -> float:
+    normalized_prediction = normalize_answer(prediction)
+    normalized_gold = normalize_answer(gold)
+    if normalized_prediction in {"yes", "no", "noanswer"} and normalized_prediction != normalized_gold:
+        return 0.0
+    if normalized_gold in {"yes", "no", "noanswer"} and normalized_prediction != normalized_gold:
+        return 0.0
+    prediction_tokens = normalized_prediction.split()
+    gold_tokens = normalized_gold.split()
+    common = Counter(prediction_tokens) & Counter(gold_tokens)
+    same = sum(common.values())
+    if same == 0:
+        return 0.0
+    precision = same / len(prediction_tokens)
+    recall = same / len(gold_tokens)
+    return 2 * precision * recall / (precision + recall)
+
+
+def _normalized_answer_present(answer: str, texts: list[str]) -> bool:
+    normalized = normalize_answer(answer)
+    if not normalized:
+        return False
+    needle = f" {normalized} "
+    return any(
+        needle in f" {normalize_answer(text)} "
+        for text in texts
+        if isinstance(text, str) and text.strip()
+    )
+
+
+def extractor_survival_headline(source: ReplaySource) -> dict:
+    raw_present = 0
+    prompt_present = 0
+    both_present = 0
+    neither_present = 0
+    raw_removed = 0
+    prompt_recovered = 0
+    for qid in source.both_gold_ids:
+        raw_spans: list[str] = []
+        for record in source.baseline_records:
+            if (
+                record.get("record_type") != "agent_call"
+                or record.get("prompt_role") != "extractor"
+                or record.get("question_id") != qid
+            ):
+                continue
+            payload = record.get("parsed")
+            if not isinstance(payload, dict):
+                payload = record.get("salvaged")
+            if isinstance(payload, dict):
+                spans = payload.get("spans")
+                if isinstance(spans, list):
+                    raw_spans.extend(span for span in spans if isinstance(span, str))
+        prompt_spans = [
+            span
+            for qa in source_qa_records(source)
+            if qa.get("question_id") == qid
+            for block in (qa.get("consumer_input") or {}).get("evidence_blocks") or []
+            for span in block.get("prompt_spans") or []
+            if isinstance(span, str)
+        ]
+        gold = source.scoring[qid].gold_answer
+        raw_has = _normalized_answer_present(gold, raw_spans)
+        prompt_has = _normalized_answer_present(gold, prompt_spans)
+        raw_present += raw_has
+        prompt_present += prompt_has
+        both_present += raw_has and prompt_has
+        neither_present += not raw_has and not prompt_has
+        raw_removed += raw_has and not prompt_has
+        prompt_recovered += not raw_has and prompt_has
+
+    result = {
+        "n": len(source.both_gold_ids),
+        "raw_producer_present": raw_present,
+        "normalized_qa_prompt_present": prompt_present,
+        "raw_and_prompt_present": both_present,
+        "absent_from_raw_and_prompt": neither_present,
+        "present_raw_removed_by_normalizer": raw_removed,
+        "absent_raw_recovered_by_normalizer": prompt_recovered,
+        "method": "contiguous normalize_answer token phrase",
+    }
+    expected = {
+        "n": 128,
+        "raw_producer_present": 84,
+        "normalized_qa_prompt_present": 52,
+        "raw_and_prompt_present": 50,
+        "absent_from_raw_and_prompt": 42,
+        "present_raw_removed_by_normalizer": 34,
+        "absent_raw_recovered_by_normalizer": 2,
+        "method": "contiguous normalize_answer token phrase",
+    }
+    _require_equal(result, expected, "extractor answer-survival headline")
+    return result
+
+
+def paired_comparison(
+    a: Mapping[str, dict],
+    b: Mapping[str, dict],
+    ids: tuple[str, ...] | list[str],
+) -> dict:
+    from src import metrics as experiment_metrics
+
+    cohort = tuple(ids)
+    if not cohort or len(cohort) != len(set(cohort)):
+        raise IntegrityError("paired comparison has empty or duplicate cohort IDs")
+    missing_a = [qid for qid in cohort if qid not in a]
+    missing_b = [qid for qid in cohort if qid not in b]
+    if missing_a or missing_b:
+        raise IntegrityError(
+            f"paired comparison has incomplete condition IDs: "
+            f"a_missing={len(missing_a)}, b_missing={len(missing_b)}"
+        )
+    f1_differences = {
+        qid: 100.0 * (float(a[qid]["f1"]) - float(b[qid]["f1"]))
+        for qid in cohort
+    }
+    em_differences = {
+        qid: 100.0 * (float(a[qid]["em"]) - float(b[qid]["em"]))
+        for qid in cohort
+    }
+    bootstrap = experiment_metrics.joint_paired_bootstrap(
+        {"f1_points": f1_differences, "em_points": em_differences},
+        n_resamples=10_000,
+        seed=20260807,
+    )
+    mcnemar = experiment_metrics.exact_mcnemar(
+        [int(a[qid]["em"]) for qid in cohort],
+        [int(b[qid]["em"]) for qid in cohort],
+    )
+    f1_values = list(f1_differences.values())
+    return {
+        "n": len(cohort),
+        "a_f1": mean(float(a[qid]["f1"]) for qid in cohort),
+        "b_f1": mean(float(b[qid]["f1"]) for qid in cohort),
+        "delta_f1_points": mean(f1_values),
+        "a_em": mean(float(a[qid]["em"]) for qid in cohort),
+        "b_em": mean(float(b[qid]["em"]) for qid in cohort),
+        "delta_em_points": mean(em_differences.values()),
+        "bootstrap": bootstrap,
+        "mcnemar": mcnemar,
+        "wins": sum(value > 0 for value in f1_values),
+        "losses": sum(value < 0 for value in f1_values),
+        "ties": sum(value == 0 for value in f1_values),
+    }
+
+
+def practically_equivalent(a: float, b: float) -> bool:
+    gap = abs(float(a) - float(b))
+    return gap < 0.02 or math.isclose(gap, 0.02, rel_tol=0.0, abs_tol=1e-12)
+
+
+def interpret_scores(*, single_f1: float, plus_f1: float, only_f1: float) -> str:
+    readings: list[str] = []
+    if practically_equivalent(plus_f1, single_f1):
+        readings.append(
+            "Full-passage QA is at or near recorded single-hop: extraction is not "
+            "contributing a net advantage over raw retrieval."
+        )
+    if practically_equivalent(only_f1, plus_f1):
+        readings.append(
+            "The conditions indicate selected Extractor spans add no measurable value "
+            "beyond raw passages, "
+            "and duplication is not responsible for the recovery."
+        )
+    if plus_f1 - only_f1 > 0.02 and not math.isclose(
+        plus_f1 - only_f1, 0.02, rel_tol=0.0, abs_tol=1e-12
+    ):
+        readings.append(
+            "The result contains a selected-span/repetition-salience increment; this "
+            "experiment cannot separate useful selection from repetition."
+        )
+    if only_f1 - plus_f1 > 0.02 and not math.isclose(
+        only_f1 - plus_f1, 0.02, rel_tol=0.0, abs_tol=1e-12
+    ):
+        readings.append("The comparison indicates retained spans or their duplication distract QA.")
+    if single_f1 - plus_f1 > 0.02 and single_f1 - only_f1 > 0.02:
+        readings.append(
+            "Both passage treatments remain materially below single-hop: passage "
+            "access alone is insufficient, and the remaining defect lies in QA, "
+            "frozen decomposition state, plan summary, or their interaction."
+        )
+    if max(plus_f1, only_f1) - single_f1 > 0.02:
+        readings.append(
+            "A passage treatment shows decomposition value conditional on the frozen "
+            "trace; fixed-trace and post-hoc limitations still apply."
+        )
+    if not readings:
+        readings.append(
+            "The estimates do not cross a preregistered two-point interpretation boundary."
+        )
+    return " ".join(readings)
+
+
+def _candidate_from_history(
+    history: list[dict],
+    gold_answer: str,
+    mode: str,
+) -> dict:
+    if mode == "reverse_usable":
+        selected = next(
+            (item for item in reversed(history) if usable_short_answer(item.get("answer"))),
+            None,
+        )
+    elif mode == "last_executed":
+        selected = history[-1] if history else None
+    elif mode == "best_intermediate":
+        selected = max(
+            history,
+            key=lambda item: f1_score(
+                item.get("answer") if isinstance(item.get("answer"), str) else "",
+                gold_answer,
+            ),
+            default=None,
+        )
+    else:
+        raise ValueError(f"unknown QA candidate mode {mode!r}")
+    answer_value = selected.get("answer", "") if selected else ""
+    answer = answer_value if isinstance(answer_value, str) else ""
+    return {
+        "answer": " ".join(answer.split()),
+        "qa_step": selected.get("step_number") if selected else None,
+        "grounded": selected.get("answer_grounded") is True if selected else None,
+        "f1": f1_score(answer, gold_answer),
+        "em": exact_match(answer, gold_answer),
+    }
+
+
+def _summary_record_for(
+    summary_records: Mapping,
+    condition: str,
+    qid: str,
+) -> dict:
+    record = summary_records.get(qid)
+    if record is None:
+        record = summary_records.get((condition, qid, "plan_summary", 0))
+    if not isinstance(record, dict):
+        raise IntegrityError(f"missing treated summary for {condition}/{qid}")
+    _require_equal(record.get("question_id"), qid, "treated summary question ID")
+    _require_equal(record.get("stage"), "plan_summary", "treated summary stage")
+    _require_equal(record.get("call_index"), 0, "treated summary call index")
+    return record
+
+
+def build_condition_result(
+    source: ReplaySource,
+    condition: str,
+    treated_qa_index: Mapping,
+    summary_records: Mapping,
+) -> ConditionResult:
+    if condition == SPANS_PLUS_PASSAGES:
+        question_ids = source.question_ids
+    elif condition == PASSAGES_ONLY:
+        question_ids = source.both_gold_ids
+    else:
+        raise ValueError(f"unknown replay condition {condition!r}")
+
+    canonical_qa: dict[CallKey, dict] = {}
+    canonical_summaries: dict[str, dict] = {}
+    histories: dict[str, list[dict]] = {}
+    answer_records: dict[str, dict] = {}
+    for qid in question_ids:
+        history = rebuild_treated_history(
+            source,
+            qid,
+            treated_qa_index,
+            condition,
+        )
+        for step_index in range(len(history)):
+            stage = prompts.stage_for("qa", step_index)
+            record = _treated_record_for(
+                treated_qa_index,
+                condition,
+                qid,
+                stage,
+                step_index,
+            )
+            key = CallKey(qid, stage, step_index)
+            if key in canonical_qa:
+                raise IntegrityError(f"duplicate treated QA record {condition}/{key!r}")
+            canonical_qa[key] = record
+        summary = _summary_record_for(summary_records, condition, qid)
+        final = resolve_treated_answer(summary, history)
+        gold = source.scoring[qid].gold_answer
+        reverse = _candidate_from_history(history, gold, "reverse_usable")
+        last = _candidate_from_history(history, gold, "last_executed")
+        best = _candidate_from_history(history, gold, "best_intermediate")
+        canonical_summaries[qid] = summary
+        histories[qid] = history
+        answer_records[qid] = {
+            "record_type": "answer",
+            "condition": condition,
+            "question_id": qid,
+            "question": source.questions[qid].question,
+            "gold_answer": gold,
+            "retrieval_stratum": source.scoring[qid].stratum,
+            "source_retrieval_all_gold": source.scoring[qid].both_gold,
+            "predicted_answer": final["answer"],
+            "final_answer_source": final["source"],
+            "final_answer_grounded": final["grounded"],
+            "final_answer_qa_step": final["qa_step"],
+            "f1": f1_score(final["answer"], gold),
+            "em": exact_match(final["answer"], gold),
+            "qa_reverse_usable": reverse,
+            "qa_last_executed": last,
+            "qa_best_intermediate_oracle": best,
+            "executed_steps": len(history),
+            "stop_reason": source.questions[qid].stop_reason,
+        }
+    expected_qa = 427 if condition == SPANS_PLUS_PASSAGES else 283
+    _require_equal(len(canonical_qa), expected_qa, f"{condition} treated QA count")
+    _require_equal(len(canonical_summaries), len(question_ids), f"{condition} summary count")
+    return ConditionResult(
+        condition=condition,
+        question_ids=tuple(question_ids),
+        qa_records=canonical_qa,
+        summary_records=canonical_summaries,
+        histories=histories,
+        answer_records=answer_records,
+    )
+
+
+def _source_history(source: ReplaySource, qid: str) -> list[dict]:
+    history = (_source_summary(source, qid).get("consumer_input") or {}).get(
+        "completed_steps"
+    )
+    if not isinstance(history, list):
+        raise IntegrityError(f"invalid source history for scoring {qid}")
+    return copy.deepcopy(history)
+
+
+def _qa_score_map(
+    source: ReplaySource,
+    histories: Mapping[str, list[dict]],
+    ids: tuple[str, ...],
+    mode: str,
+) -> dict[str, dict]:
+    return {
+        qid: _candidate_from_history(
+            histories[qid],
+            source.scoring[qid].gold_answer,
+            mode,
+        )
+        for qid in ids
+    }
+
+
+def _mean_scores(records: Mapping[str, dict], ids: tuple[str, ...]) -> dict:
+    if not ids or any(qid not in records for qid in ids):
+        raise IntegrityError("score summary has incomplete cohort")
+    return {
+        "n": len(ids),
+        "f1": mean(float(records[qid]["f1"]) for qid in ids),
+        "em": mean(float(records[qid]["em"]) for qid in ids),
+    }
+
+
+def _comparison_family(
+    a: Mapping[str, dict],
+    b: Mapping[str, dict],
+    cohorts: Mapping[str, tuple[str, ...]],
+) -> dict:
+    return {
+        name: paired_comparison(a, b, ids)
+        for name, ids in cohorts.items()
+    }
+
+
+def _qa_mechanism_report(
+    source: ReplaySource,
+    result: ConditionResult,
+    cohorts: Mapping[str, tuple[str, ...]],
+) -> dict:
+    source_histories = {qid: _source_history(source, qid) for qid in result.question_ids}
+    source_reverse = _qa_score_map(
+        source,
+        source_histories,
+        result.question_ids,
+        "reverse_usable",
+    )
+    treated_reverse = _qa_score_map(
+        source,
+        result.histories,
+        result.question_ids,
+        "reverse_usable",
+    )
+    treated_last = _qa_score_map(
+        source,
+        result.histories,
+        result.question_ids,
+        "last_executed",
+    )
+    treated_best = _qa_score_map(
+        source,
+        result.histories,
+        result.question_ids,
+        "best_intermediate",
+    )
+
+    parse_by_stage: dict[str, Counter] = {}
+    payload_by_stage: dict[str, Counter] = {}
+    prompt_tokens_by_stage: dict[str, list[int]] = {}
+    for key, record in result.qa_records.items():
+        parse_by_stage.setdefault(key.stage, Counter())[str(record.get("parse_status"))] += 1
+        _, payload_source = effective_payload(record)
+        payload_by_stage.setdefault(key.stage, Counter())[payload_source] += 1
+        prompt_tokens = record.get("prompt_tokens")
+        if isinstance(prompt_tokens, int) and not isinstance(prompt_tokens, bool):
+            prompt_tokens_by_stage.setdefault(key.stage, []).append(prompt_tokens)
+
+    success_directions: Counter = Counter()
+    success_ids: dict[str, list[str]] = {}
+    earliest_new_no: dict[str, int] = {}
+    right_censored: list[str] = []
+    grounding = Counter()
+    literal_survival_ids: list[str] = []
+    for qid in result.question_ids:
+        source_history = source_histories[qid]
+        treated_history = result.histories[qid]
+        answers = [
+            item.get("answer")
+            for item in treated_history
+            if isinstance(item.get("answer"), str)
+        ]
+        if _normalized_answer_present(source.scoring[qid].gold_answer, answers):
+            literal_survival_ids.append(qid)
+        for source_item, treated_item in zip(source_history, treated_history):
+            source_success = source_item.get("success")
+            treated_success = treated_item.get("success")
+            direction = f"{source_success}_to_{treated_success}"
+            success_directions[direction] += 1
+            if source_success != treated_success:
+                success_ids.setdefault(direction, []).append(
+                    f"{qid}:{treated_item.get('step_number')}"
+                )
+            if treated_item.get("answer_grounded") is True:
+                grounding["grounded"] += 1
+            else:
+                grounding["unsupported"] += 1
+            step_number = int(treated_item.get("step_number") or 0)
+            if (
+                treated_success == "no"
+                and source_success != "no"
+                and qid not in earliest_new_no
+            ):
+                earliest_new_no[qid] = step_number
+        if (
+            source.questions[qid].stop_reason == "semantic_inability"
+            and treated_history
+            and treated_history[-1].get("success") == "yes"
+        ):
+            right_censored.append(qid)
+
+    sensitivity_records: dict[str, dict] = {}
+    for qid, step_number in earliest_new_no.items():
+        truncated = result.histories[qid][:step_number]
+        sensitivity_records[qid] = _candidate_from_history(
+            truncated,
+            source.scoring[qid].gold_answer,
+            "reverse_usable",
+        )
+    prompt_telemetry = {
+        stage: {
+            "calls": len(values),
+            "total": sum(values),
+            "mean": mean(values),
+            "max": max(values),
+        }
+        for stage, values in prompt_tokens_by_stage.items()
+    }
+    return {
+        "reverse_usable": {
+            "versus_source_ma": _comparison_family(
+                treated_reverse,
+                source_reverse,
+                cohorts,
+            ),
+            "means": {
+                name: _mean_scores(treated_reverse, ids)
+                for name, ids in cohorts.items()
+            },
+        },
+        "last_executed": {
+            name: _mean_scores(treated_last, ids)
+            for name, ids in cohorts.items()
+        },
+        "best_intermediate_oracle": {
+            name: _mean_scores(treated_best, ids)
+            for name, ids in cohorts.items()
+        },
+        "parse_status_by_stage": {
+            stage: dict(counts) for stage, counts in parse_by_stage.items()
+        },
+        "payload_source_by_stage": {
+            stage: dict(counts) for stage, counts in payload_by_stage.items()
+        },
+        "success_drift": {
+            "direction_counts": dict(success_directions),
+            "disagreement_ids": success_ids,
+        },
+        "grounding": dict(grounding),
+        "literal_gold_answer_survival": {
+            "n": len(result.question_ids),
+            "present": len(literal_survival_ids),
+            "question_ids": literal_survival_ids,
+        },
+        "prompt_tokens_by_stage": prompt_telemetry,
+        "earliest_new_no_sensitivity": {
+            "affected_n": len(earliest_new_no),
+            "earliest_step_by_question": earliest_new_no,
+            "truncated_candidate_scores": (
+                _mean_scores(sensitivity_records, tuple(earliest_new_no))
+                if earliest_new_no
+                else {"n": 0, "f1": None, "em": None}
+            ),
+        },
+        "right_censoring": {
+            "definition": "source semantic_inability stop with treated last QA success=yes",
+            "n": len(right_censored),
+            "question_ids": right_censored,
+        },
+    }
+
+
+def _gap_recovery(
+    treatment: Mapping[str, dict],
+    baseline: Mapping[str, dict],
+    single: Mapping[str, dict],
+    ids: tuple[str, ...],
+) -> dict:
+    treatment_f1 = mean(float(treatment[qid]["f1"]) for qid in ids)
+    baseline_f1 = mean(float(baseline[qid]["f1"]) for qid in ids)
+    single_f1 = mean(float(single[qid]["f1"]) for qid in ids)
+    gap = single_f1 - baseline_f1
+    recovered = None if gap == 0 else (treatment_f1 - baseline_f1) / gap
+    return {
+        "n": len(ids),
+        "source_ma_f1": baseline_f1,
+        "single_f1": single_f1,
+        "treatment_f1": treatment_f1,
+        "original_gap_f1_points": 100.0 * gap,
+        "recovered_gap_fraction": recovered,
+        "recovered_gap_percent": None if recovered is None else 100.0 * recovered,
+    }
+
+
+def _token_cost(result: ConditionResult) -> dict:
+    records = list(result.qa_records.values()) + list(result.summary_records.values())
+    return {
+        "calls": len(records),
+        "prompt_tokens": sum(
+            int(record.get("prompt_tokens") or 0) for record in records
+        ),
+        "output_tokens": sum(
+            int(record.get("output_tokens") or 0) for record in records
+        ),
+    }
+
+
+def score_replay(
+    source: ReplaySource,
+    results: Mapping[str, ConditionResult],
+) -> dict:
+    plus = results.get(SPANS_PLUS_PASSAGES)
+    only = results.get(PASSAGES_ONLY)
+    if not isinstance(plus, ConditionResult) or not isinstance(only, ConditionResult):
+        raise IntegrityError("replay scoring requires both complete treatment conditions")
+    _require_equal(plus.question_ids, source.question_ids, "plus scoring cohort")
+    _require_equal(only.question_ids, source.both_gold_ids, "only scoring cohort")
+
+    full_hidden = tuple(
+        qid for qid in source.question_ids if source.scoring[qid].stratum == "hidden_bridge"
+    )
+    full_named = tuple(
+        qid for qid in source.question_ids if source.scoring[qid].stratum == "fully_named"
+    )
+    subset_hidden = tuple(
+        qid
+        for qid in source.both_gold_ids
+        if source.scoring[qid].stratum == "hidden_bridge"
+    )
+    subset_named = tuple(
+        qid
+        for qid in source.both_gold_ids
+        if source.scoring[qid].stratum == "fully_named"
+    )
+    plus_cohorts = {
+        "overall": source.question_ids,
+        "both_gold": source.both_gold_ids,
+        "hidden_bridge": full_hidden,
+        "fully_named": full_named,
+    }
+    only_cohorts = {
+        "both_gold": source.both_gold_ids,
+        "hidden_bridge": subset_hidden,
+        "fully_named": subset_named,
+    }
+    baseline = source.baseline_answers
+    single = source.single_answers
+    plus_answers = plus.answer_records
+    only_answers = only.answer_records
+
+    plus_vs_source = _comparison_family(plus_answers, baseline, plus_cohorts)
+    plus_vs_single = _comparison_family(plus_answers, single, plus_cohorts)
+    only_vs_source = _comparison_family(only_answers, baseline, only_cohorts)
+    only_vs_single = _comparison_family(only_answers, single, only_cohorts)
+    three_way = {
+        "spans_plus_passages_minus_spans_only": paired_comparison(
+            plus_answers,
+            baseline,
+            source.both_gold_ids,
+        ),
+        "passages_only_minus_spans_only": paired_comparison(
+            only_answers,
+            baseline,
+            source.both_gold_ids,
+        ),
+        "spans_plus_passages_minus_passages_only": paired_comparison(
+            plus_answers,
+            only_answers,
+            source.both_gold_ids,
+        ),
+        "spans_plus_passages_minus_single": paired_comparison(
+            plus_answers,
+            single,
+            source.both_gold_ids,
+        ),
+        "passages_only_minus_single": paired_comparison(
+            only_answers,
+            single,
+            source.both_gold_ids,
+        ),
+    }
+    plus_subset_f1 = three_way["spans_plus_passages_minus_single"]["a_f1"]
+    only_subset_f1 = three_way["passages_only_minus_single"]["a_f1"]
+    single_subset_f1 = three_way["spans_plus_passages_minus_single"]["b_f1"]
+    plus_qa_report = _qa_mechanism_report(source, plus, plus_cohorts)
+    only_qa_report = _qa_mechanism_report(source, only, only_cohorts)
+
+    report = {
+        "report_label": REPORT_LABEL,
+        "gate_c_thresholds_reference_only": copy.deepcopy(GATE_C_THRESHOLDS),
+        "claim_boundary": (
+            "Post-hoc fixed-trace diagnostic; an official Gate C claim requires an "
+            "approved SPEC change and a fresh full-pipeline run."
+        ),
+        "cohorts": {
+            "overall": len(source.question_ids),
+            "both_gold": len(source.both_gold_ids),
+            "overall_strata": {
+                "hidden_bridge": len(full_hidden),
+                "fully_named": len(full_named),
+            },
+            "both_gold_strata": {
+                "hidden_bridge": len(subset_hidden),
+                "fully_named": len(subset_named),
+            },
+        },
+        "extractor_answer_survival_both_gold": extractor_survival_headline(source),
+        "qa_level": {
+            SPANS_PLUS_PASSAGES: plus_qa_report,
+            PASSAGES_ONLY: only_qa_report,
+        },
+        "final_answer": {
+            SPANS_PLUS_PASSAGES: {
+                "versus_source_ma": plus_vs_source,
+                "versus_single": plus_vs_single,
+                "final_answer_source_distribution": dict(
+                    Counter(
+                        record["final_answer_source"]
+                        for record in plus_answers.values()
+                    )
+                ),
+                "gap_recovery": {
+                    "overall": _gap_recovery(
+                        plus_answers,
+                        baseline,
+                        single,
+                        source.question_ids,
+                    ),
+                    "both_gold": _gap_recovery(
+                        plus_answers,
+                        baseline,
+                        single,
+                        source.both_gold_ids,
+                    ),
+                },
+            },
+            PASSAGES_ONLY: {
+                "versus_source_ma": only_vs_source,
+                "versus_single": only_vs_single,
+                "final_answer_source_distribution": dict(
+                    Counter(
+                        record["final_answer_source"]
+                        for record in only_answers.values()
+                    )
+                ),
+                "gap_recovery": {
+                    "both_gold": _gap_recovery(
+                        only_answers,
+                        baseline,
+                        single,
+                        source.both_gold_ids,
+                    )
+                },
+            },
+            "three_way_both_gold": three_way,
+        },
+        "call_and_token_cost": {
+            SPANS_PLUS_PASSAGES: _token_cost(plus),
+            PASSAGES_ONLY: _token_cost(only),
+        },
+        "fixed_trace_drift": {
+            SPANS_PLUS_PASSAGES: {
+                "success_drift": plus_qa_report["success_drift"],
+                "right_censoring": plus_qa_report["right_censoring"],
+            },
+            PASSAGES_ONLY: {
+                "success_drift": only_qa_report["success_drift"],
+                "right_censoring": only_qa_report["right_censoring"],
+            },
+        },
+        "interpretation": {
+            "cohort": "both_gold",
+            "practical_equivalence_absolute_f1_points": 2.0,
+            "text": interpret_scores(
+                single_f1=single_subset_f1,
+                plus_f1=plus_subset_f1,
+                only_f1=only_subset_f1,
+            ),
+        },
+    }
+    serialized = json.dumps(report, ensure_ascii=False, sort_keys=True)
+    for forbidden in ("PASS_GATE_C", '"GO"', "§4.3 is repairable"):
+        if forbidden in serialized:
+            raise IntegrityError(f"diagnostic report contains forbidden claim {forbidden!r}")
+    return report
 
 
 def audit_source(source: ReplaySource) -> AuditReport:
