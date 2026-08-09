@@ -212,5 +212,147 @@ class PassageReplayTraceTests(unittest.TestCase):
         )
 
 
+class PassageReplayTreatedStateTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source = core.load_source_bundle(EVIDENCE)
+        cls.aggregate_qa = next(
+            record
+            for record in core.source_qa_records(cls.source)
+            if record["consumer_input"]["task_type"] == "aggregate"
+        )
+        cls.qid = cls.aggregate_qa["question_id"]
+        cls.source_qas = {
+            record["call_index"]: record
+            for record in core.source_qa_records(cls.source)
+            if record["question_id"] == cls.qid
+        }
+
+    def _treated(self, step, answer, *, success="yes", mode="parsed"):
+        record = copy.deepcopy(self.source_qas[step])
+        payload = {
+            "analysis": "treated",
+            "answer": answer,
+            "success": success,
+            "rating": 7,
+        }
+        record["parsed"] = payload if mode == "parsed" else None
+        record["salvaged"] = payload if mode == "salvaged" else None
+        if mode == "fallback":
+            record["parsed"] = None
+            record["salvaged"] = None
+        return record
+
+    def _index(self, step_records, condition=core.SPANS_PLUS_PASSAGES):
+        return {
+            (condition, self.qid, record["stage"], record["call_index"]): record
+            for record in step_records
+        }
+
+    def test_aggregate_uses_treated_grounded_answers_without_retrieval(self):
+        treated_index = self._index(
+            [self._treated(0, "Motörhead"), self._treated(1, "ImpossibleValue")]
+        )
+        call = core.build_treated_qa_call(
+            self.source,
+            self.aggregate_qa,
+            core.SPANS_PLUS_PASSAGES,
+            treated_index,
+        )
+        source_input = self.aggregate_qa["consumer_input"]
+        self.assertEqual(
+            call["consumer_input"]["step_definition"],
+            source_input["step_definition"],
+        )
+        self.assertEqual(call["consumer_input"]["retrieval"], source_input["retrieval"])
+        self.assertFalse(call["consumer_input"]["retrieval"]["attempted"])
+        self.assertIn("Prior step answer: Motörhead", call["fields"]["evidence"])
+        self.assertNotIn(
+            "Prior step answer: Noel Gallagher's High Flying Birds",
+            call["fields"]["evidence"],
+        )
+        self.assertNotIn("ImpossibleValue", call["fields"]["evidence"])
+
+    def test_aggregate_withholds_ungrounded_treated_answers(self):
+        treated_index = self._index(
+            [self._treated(0, "ImpossibleOne"), self._treated(1, "ImpossibleTwo")]
+        )
+        call = core.build_treated_qa_call(
+            self.source,
+            self.aggregate_qa,
+            core.SPANS_PLUS_PASSAGES,
+            treated_index,
+        )
+        self.assertEqual(call["fields"]["evidence"], "(no evidence collected)")
+        self.assertEqual(call["consumer_input"]["evidence_prompt_block_count"], 0)
+
+    def test_treated_history_and_summary_are_coherent_without_truncation(self):
+        treated_index = self._index(
+            [
+                self._treated(0, "Motörhead", success="no"),
+                self._treated(1, "ImpossibleValue"),
+                self._treated(2, "1980", mode="salvaged"),
+            ]
+        )
+        history = core.rebuild_treated_history(
+            self.source,
+            self.qid,
+            treated_index,
+            core.SPANS_PLUS_PASSAGES,
+        )
+        self.assertEqual(len(history), 3)
+        self.assertEqual([item["answer"] for item in history], ["Motörhead", "ImpossibleValue", "1980"])
+        self.assertEqual(history[0]["success"], "no")
+        self.assertTrue(history[0]["answer_grounded"])
+        self.assertEqual(history[2]["qa_source"], "salvaged")
+        self.assertEqual(
+            [item["task"] for item in history],
+            [item["task"] for item in self.source.baseline_index[(self.qid, "plan_summary", 0)]["consumer_input"]["completed_steps"]],
+        )
+
+        call = core.build_treated_summary_call(
+            self.source,
+            self.qid,
+            history,
+            core.SPANS_PLUS_PASSAGES,
+        )
+        rendered = prompts.build_messages("plan_summary", **call["fields"])[1]["content"]
+        self.assertIn("Motörhead", rendered)
+        self.assertNotIn("Noel Gallagher's High Flying Birds", call["fields"]["prior_state"])
+        self.assertEqual(
+            call["consumer_input"]["stop_reason"],
+            self.source.questions[self.qid].stop_reason,
+        )
+
+    def test_effective_payload_covers_parsed_salvaged_and_fallback(self):
+        parsed = self._treated(0, "Parsed", mode="parsed")
+        salvaged = self._treated(0, "Salvaged", mode="salvaged")
+        fallback = self._treated(0, "Ignored", mode="fallback")
+        self.assertEqual(core.effective_payload(parsed)[1], "parsed")
+        self.assertEqual(core.effective_payload(salvaged)[1], "salvaged")
+        self.assertEqual(core.effective_payload(fallback), ({}, "fallback"))
+
+    def test_finalizer_uses_summary_then_reverse_qa_precedence(self):
+        history = [
+            {"step_number": 1, "answer": "First", "answer_grounded": True},
+            {"step_number": 2, "answer": "Final QA", "answer_grounded": False},
+        ]
+        parsed = core.resolve_treated_answer({"parsed": {"answer": "Summary"}}, history)
+        salvaged = core.resolve_treated_answer(
+            {"parsed": None, "salvaged": {"answer": "Salvaged summary"}}, history
+        )
+        fallback = core.resolve_treated_answer(
+            {"parsed": {"answer": "unknown"}, "salvaged": None}, history
+        )
+        empty = core.resolve_treated_answer(None, [])
+        self.assertEqual((parsed["answer"], parsed["source"]), ("Summary", "summary_parsed"))
+        self.assertEqual(
+            (salvaged["answer"], salvaged["source"]),
+            ("Salvaged summary", "summary_salvaged"),
+        )
+        self.assertEqual((fallback["answer"], fallback["source"]), ("Final QA", "qa_fallback"))
+        self.assertEqual((empty["answer"], empty["source"]), ("", "none"))
+
+
 if __name__ == "__main__":
     unittest.main()

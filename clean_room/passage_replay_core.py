@@ -7,9 +7,13 @@ view, then fails closed if any source identity changes.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
+import re
+import unicodedata
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -123,6 +127,23 @@ PASSAGE_HEADER = "Retrieved passages for the current step:"
 SPANS_PLUS_PASSAGES = "spans_plus_passages"
 PASSAGES_ONLY = "passages_only"
 CONDITIONS = (SPANS_PLUS_PASSAGES, PASSAGES_ONLY)
+_TOKEN = re.compile(r"[^\W_]+", re.UNICODE)
+_NO_ANSWER_SENTINELS = frozenset(
+    {
+        "unknown",
+        "no answer",
+        "no answer found",
+        "no relevant information",
+        "no relevant information found",
+        "not enough information",
+        "insufficient information",
+        "cannot determine",
+        "unable to determine",
+        "i don't know",
+        "n/a",
+        "none",
+    }
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -672,12 +693,310 @@ def condition_call_keys(
     return keys
 
 
-def _effective_payload(record: dict | None) -> tuple[dict, str]:
+def effective_payload(record: dict | None) -> tuple[dict, str]:
     if record and isinstance(record.get("parsed"), dict):
         return dict(record["parsed"]), "parsed"
     if record and isinstance(record.get("salvaged"), dict):
         return dict(record["salvaged"]), "salvaged"
     return {}, "fallback"
+
+
+def _normalized_token_phrase(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value or "").casefold()
+    return " ".join(_TOKEN.findall(normalized))
+
+
+def answer_is_grounded(answer: str, evidence_texts: list[str]) -> bool:
+    answer_norm = _normalized_token_phrase(answer)
+    if not answer_norm:
+        return False
+    needle = f" {answer_norm} "
+    return any(
+        needle in f" {_normalized_token_phrase(text)} "
+        for text in evidence_texts
+        if isinstance(text, str) and text.strip()
+    )
+
+
+def _source_summary(source: ReplaySource, qid: str) -> dict:
+    summary = source.baseline_index.get((qid, "plan_summary", 0))
+    if summary is None:
+        raise IntegrityError(f"missing source summary for {qid}")
+    return summary
+
+
+def _treated_record_for(
+    treated_qa_index: Mapping,
+    condition: str,
+    qid: str,
+    stage: str,
+    call_index: int,
+) -> dict:
+    record = treated_qa_index.get((condition, qid, stage, call_index))
+    if record is None:
+        record = treated_qa_index.get(ConditionCallKey(condition, qid, stage, call_index))
+    if not isinstance(record, dict):
+        raise IntegrityError(
+            f"missing treated QA record for {(condition, qid, stage, call_index)!r}"
+        )
+    _require_equal(record.get("question_id"), qid, "treated QA question ID")
+    _require_equal(record.get("stage"), stage, "treated QA stage")
+    _require_equal(record.get("call_index"), call_index, "treated QA call index")
+    return record
+
+
+def _visible_texts_for_step(
+    source: ReplaySource,
+    source_qa: dict,
+    condition: str,
+    prior_history: list[dict],
+) -> list[str]:
+    consumer_input = source_qa.get("consumer_input") or {}
+    if consumer_input.get("task_type") == "aggregate":
+        return [
+            f"Prior step answer: {item['answer']}"
+            for item in prior_history
+            if item.get("answer_grounded") is True and item.get("answer")
+        ]
+    join = join_recorded_passages(source, source_qa)
+    visible = [sentence for sentences in join.sentence_lists for sentence in sentences]
+    if condition == SPANS_PLUS_PASSAGES:
+        visible.extend(
+            span
+            for block in consumer_input.get("evidence_blocks") or []
+            for span in block.get("prompt_spans") or []
+        )
+    elif condition != PASSAGES_ONLY:
+        raise ValueError(f"unknown replay condition {condition!r}")
+    return visible
+
+
+def rebuild_treated_history(
+    source: ReplaySource,
+    qid: str,
+    treated_qa_index: Mapping,
+    condition: str,
+    *,
+    before_step: int | None = None,
+) -> list[dict]:
+    if condition not in CONDITIONS:
+        raise ValueError(f"unknown replay condition {condition!r}")
+    if qid not in source.questions:
+        raise IntegrityError(f"unknown treated-history question ID {qid}")
+    source_summary = _source_summary(source, qid)
+    source_history = (source_summary.get("consumer_input") or {}).get("completed_steps")
+    if not isinstance(source_history, list):
+        raise IntegrityError(f"invalid source history for {qid}")
+    limit = len(source_history) if before_step is None else min(before_step, len(source_history))
+    if limit < 0:
+        raise ValueError("before_step must be nonnegative")
+
+    treated_history: list[dict] = []
+    for step_index, source_item in enumerate(source_history[:limit]):
+        stage = prompts.stage_for("qa", step_index)
+        source_qa = source.baseline_index.get((qid, stage, step_index))
+        if source_qa is None:
+            raise IntegrityError(f"missing source QA call for {qid}/{stage}/{step_index}")
+        treated_record = _treated_record_for(
+            treated_qa_index,
+            condition,
+            qid,
+            stage,
+            step_index,
+        )
+        payload, payload_source = effective_payload(treated_record)
+        answer_value = payload.get("answer", "")
+        answer = answer_value if isinstance(answer_value, str) else ""
+        visible_texts = _visible_texts_for_step(
+            source,
+            source_qa,
+            condition,
+            treated_history,
+        )
+        grounded = answer_is_grounded(answer, visible_texts)
+        treated_item = copy.deepcopy(source_item)
+        treated_item.update(
+            {
+                "answer": answer,
+                "answer_grounded": grounded,
+                "answer_grounding": "consumed_evidence" if grounded else "unsupported",
+                "success": payload.get("success"),
+                "rating": payload.get("rating"),
+                "qa_source": payload_source,
+            }
+        )
+        treated_history.append(treated_item)
+    return treated_history
+
+
+def _source_message_hash(source_record: dict, prompt_role: str, fields: dict) -> str:
+    messages = prompts.build_messages(prompt_role, **fields)
+    message_hash = rendered_prompt_sha256(messages)
+    _require_equal(
+        message_hash,
+        source_record.get("rendered_prompt_sha256"),
+        f"source {prompt_role} parent message hash",
+    )
+    return message_hash
+
+
+def build_treated_qa_call(
+    source: ReplaySource,
+    qa: dict,
+    condition: str,
+    treated_qa_index: Mapping,
+) -> dict:
+    if condition not in CONDITIONS:
+        raise ValueError(f"unknown replay condition {condition!r}")
+    qid = _require_str(qa, "question_id", "source QA parent")
+    call_index = _require_int(qa, "call_index", f"source QA parent {qid}")
+    stage = prompts.stage_for("qa", call_index)
+    _require_equal(qa.get("stage"), stage, f"source QA parent stage for {qid}")
+    source_fields = reconstruct_source_qa_fields(source, qa)
+    fields = copy.deepcopy(source_fields)
+    consumer_input = copy.deepcopy(qa.get("consumer_input") or {})
+    if consumer_input.get("task_type") == "question-answering":
+        join = join_recorded_passages(source, qa)
+        fields["evidence"] = render_treated_evidence(fields["evidence"], join, condition)
+        payload_source = qa.get("consumer_payload_source")
+    elif consumer_input.get("task_type") == "aggregate":
+        history = rebuild_treated_history(
+            source,
+            qid,
+            treated_qa_index,
+            condition,
+            before_step=call_index,
+        )
+        blocks: list[tuple[str, list[str]]] = []
+        consumed: list[dict] = []
+        for item in history:
+            prompt_spans = (
+                [f"Prior step answer: {item['answer']}"]
+                if item.get("answer_grounded") is True and item.get("answer")
+                else []
+            )
+            if prompt_spans:
+                blocks.append((item["sub_question"], prompt_spans))
+            consumed.append(
+                {
+                    "sub_question": item["sub_question"],
+                    "answer": item["answer"],
+                    "answer_grounded": item["answer_grounded"],
+                    "spans": [],
+                    "prompt_spans": prompt_spans,
+                    "included_in_prompt": bool(prompt_spans),
+                    "document_title": None,
+                    "document_rank": None,
+                    "consumer_payload_source": item["qa_source"],
+                }
+            )
+        frozen = source.questions[qid]
+        fields = _build_qa_fields(
+            frozen.question,
+            blocks,
+            sub_question=consumer_input["step_definition"]["task"],
+            step_number=call_index + 1,
+            plan_steps=len(frozen.plan),
+        )
+        consumer_input["evidence_document_count"] = len(consumed)
+        consumer_input["evidence_prompt_block_count"] = len(blocks)
+        consumer_input["evidence_blocks"] = consumed
+        payload_source = "treated_history"
+    else:
+        raise IntegrityError(f"unknown frozen task type for {qid}/{stage}")
+
+    source_message_hash = _source_message_hash(qa, "qa", source_fields)
+    treatment_message_hash = rendered_prompt_sha256(prompts.build_messages("qa", **fields))
+    parent_key = [qid, stage, call_index]
+    return {
+        "question_id": qid,
+        "stage": stage,
+        "call_index": call_index,
+        "fields": fields,
+        "condition": condition,
+        "consumer_payload_source": payload_source,
+        "consumer_input": consumer_input,
+        "source_parent_key": parent_key,
+        "source_parent_record_sha256": canonical_json_sha256(qa),
+        "source_message_sha256": source_message_hash,
+        "treatment_message_sha256": treatment_message_hash,
+    }
+
+
+def build_treated_summary_call(
+    source: ReplaySource,
+    qid: str,
+    history: list[dict],
+    condition: str,
+) -> dict:
+    if condition not in CONDITIONS:
+        raise ValueError(f"unknown replay condition {condition!r}")
+    frozen = source.questions.get(qid)
+    if frozen is None:
+        raise IntegrityError(f"unknown summary question ID {qid}")
+    source_summary = _source_summary(source, qid)
+    source_fields = reconstruct_source_summary_fields(source, source_summary)
+    fields = _build_plan_summary_fields(
+        frozen.question,
+        frozen.plan,
+        history,
+        frozen.stop_reason,
+    )
+    source_message_hash = _source_message_hash(source_summary, "plan_summary", source_fields)
+    treatment_message_hash = rendered_prompt_sha256(
+        prompts.build_messages("plan_summary", **fields)
+    )
+    return {
+        "question_id": qid,
+        "stage": "plan_summary",
+        "call_index": 0,
+        "fields": fields,
+        "condition": condition,
+        "consumer_payload_source": "treated_history",
+        "consumer_input": {
+            "plan": list(frozen.plan),
+            "completed_steps": copy.deepcopy(history),
+            "stop_reason": frozen.stop_reason,
+        },
+        "source_parent_key": [qid, "plan_summary", 0],
+        "source_parent_record_sha256": canonical_json_sha256(source_summary),
+        "source_message_sha256": source_message_hash,
+        "treatment_message_sha256": treatment_message_hash,
+    }
+
+
+def usable_short_answer(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    answer = " ".join(value.split())
+    if not answer or len(answer.split()) > 12:
+        return False
+    normalized = answer.casefold().strip(" \t\r\n.,;:!?\"'`()[]{}")
+    return normalized not in _NO_ANSWER_SENTINELS
+
+
+def resolve_treated_answer(summary_record: dict | None, history: list[dict]) -> dict:
+    if summary_record is not None:
+        for key, source in (("parsed", "summary_parsed"), ("salvaged", "summary_salvaged")):
+            payload = summary_record.get(key) or {}
+            answer = payload.get("answer")
+            if usable_short_answer(answer):
+                return {
+                    "answer": " ".join(answer.split()),
+                    "source": source,
+                    "grounded": None,
+                    "qa_step": None,
+                }
+    for item in reversed(history):
+        answer = item.get("answer")
+        if usable_short_answer(answer):
+            return {
+                "answer": " ".join(answer.split()),
+                "source": "qa_fallback",
+                "grounded": item.get("answer_grounded") is True,
+                "qa_step": item.get("step_number"),
+            }
+    return {"answer": "", "source": "none", "grounded": None, "qa_step": None}
 
 
 def audit_source(source: ReplaySource) -> AuditReport:
@@ -715,7 +1034,7 @@ def audit_source(source: ReplaySource) -> AuditReport:
         step_definition = consumer_input.get("step_definition")
         step_stage = prompts.stage_for("step_definer", call_index)
         step_record = source.baseline_index.get((qid, step_stage, call_index))
-        payload, _ = _effective_payload(step_record)
+        payload, _ = effective_payload(step_record)
         _require_equal(payload, step_definition, f"Step Definer/QA task for {qid}/{call_index}")
         reconstruct_source_qa_fields(source, qa)
         qa_hash_matches += 1
